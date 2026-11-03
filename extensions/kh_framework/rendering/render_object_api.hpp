@@ -30,8 +30,9 @@ inline std::string add_render_object(const RenderObject& obj) {
 // refitted bound (cast_size). pos, rot_m / rotated, size and skel_ctr are each taken from the live entry unless the
 // property changed it (staged differs from base; for size and skel_ctr, also unless the mesh or the box's owner
 // changed); cast_size, which no property writes, is the live entry's while the object stays a plain cloth on the same
-// mesh and zero otherwise (KH_CAST_REFIT, below) - the property wins what it set, and nothing it did not set is
-// written back from the copy's older state.
+// mesh and zero otherwise (KH_CAST_REFIT, below), and skin_vbase, which no property writes either, is always the live
+// entry's (KH_EA_VBASE_MERGE: the skin upload's slice base) - the property wins what it set, and nothing it did not
+// set is written back from the copy's older state.
 inline bool update_render_object(const std::string& handle, RenderObject&& staged, const RenderObject& base) {
     std::lock_guard<std::mutex> g(g_draw_list_mutex);
     auto it = g_draw_list.find(handle);
@@ -70,6 +71,9 @@ inline bool update_render_object(const std::string& handle, RenderObject&& stage
     } else {
         memset(staged.cast_size, 0, sizeof(staged.cast_size));
     }
+    // KH_EA_VBASE_MERGE: kh_skin_upload's in-place write; the copy's may name a slice the binding has left (its
+    // record then mismatches the tables and the bucket route draws it per object until the next upload).
+    staged.skin_vbase = khuo_live.skin_vbase;
     it->second = staged;
     kh_scene_mark(it->second.slot);
     return true;

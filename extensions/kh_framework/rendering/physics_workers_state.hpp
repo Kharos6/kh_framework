@@ -8,8 +8,8 @@ static std::deque<std::shared_ptr<KhClothInst>> g_cloth_q;
 static std::condition_variable g_cloth_cv;
 static std::condition_variable g_skin_cv;    // KH_POOL_SPLIT: the skin pool waits here, on the same g_cloth_mu.
 static std::atomic<bool> g_cloth_stop{ false };
-// Never destructed: a detached worker may outlive static teardown, and std::thread's static destructor is
-// std::terminate under the loader lock (g_khmw_thr and g_khtl_thr are declared this way for the same reason).
+// Never destructed: on a process exit the OS kills the workers but their objects stay joinable, and a joinable
+// std::thread's static destructor is std::terminate under the loader lock (g_khmw_thr and g_khtl_thr likewise).
 static std::vector<std::thread>& g_cloth_thr = *(new std::vector<std::thread>());
 // KH_POOL_SPLIT - two pools on one lock. The SOLVER pool (g_cloth_thr) takes the cloth and chain steps (g_cloth_q);
 // the SKIN pool (g_skin_thr) the skinnings and their collider refits (g_skin_q). Each waits on its own condition

@@ -32,7 +32,7 @@ inline void flush_ui_locked(ID3D11Device* dev, ID3D11DeviceContext* ctx, bool kh
             if (!(khu_live.visible && khu_live.fullscreen && khu_live.affect_ui)) continue;
             bool expired = false;
             const float env = lifetime_envelope(khu_live, snapshot_now, expired);
-            if (expired) continue;   // The scene flush owns the erasure.
+            if (expired) continue;   // The game thread erases it (flush_frame's census: KH_NO_PARK_EXPIRY).
             RenderObject o = khu_live;
             o.color[3] *= env;
             passes.emplace_back(o.seq, o);
@@ -90,9 +90,9 @@ inline void flush_ui_locked(ID3D11Device* dev, ID3D11DeviceContext* ctx, bool kh
 
     if (!fmt_ok || td.SampleDesc.Count > 1) {
         // KH_UI_BB_REPORT: said only of the swap chain's buffer - the lock path's target may be any engine target.
-        if (khul_present) {
-            report_error_once_safe("KH RenderIntegration: UI passes need an 8-bit (RGBA8 / BGRA8) single-sample "
-                                   "backbuffer; none is drawn on this one");
+        if (khul_present) {   // KH_EA_ERR_CLASS: the swap chain's configuration - a warning (logged, never thrown).
+            kh_log_once_safe("KH RenderIntegration: UI flush: UI passes need an 8-bit (RGBA8 / BGRA8) single-sample "
+                             "backbuffer; none is drawn on this one");
         }
         bb->Release();
         return;
@@ -468,7 +468,9 @@ inline void flush_ui_locked(ID3D11Device* dev, ID3D11DeviceContext* ctx, bool kh
     auto khup_open = [&]() -> bool {
         std::string khup_cap = ensure_backbuffer_capture(dev, ctx, bb, td);
         if (khup_cap.empty()) khup_cap = ensure_ui_chain(dev, td);
-        if (!khup_cap.empty()) return false;
+        // KH_EA_UI_CAP_REPORT: reported once per text, as the user pass's capture (KH_UI_USER_CAP) and the ensures
+        // above are - a failure here ends the flush's pass loop (both callers break).
+        if (!kh_ensure_ok("UI-flush capture", khup_cap)) return false;
         khup_srvs[0] = g_res.bb_srv;
         khup_rtvs[0] = g_res.bb_rtv;
         khup_srvs[1] = g_res.ui_chain_srv;
@@ -537,12 +539,9 @@ inline void flush_ui_locked(ID3D11Device* dev, ID3D11DeviceContext* ctx, bool kh
             if (!khu_lut) continue;
         }
 
-        const bool wants_depth = o.localized || o.banded ||
-            o.effect == static_cast<int>(EffectId::Outline) ||
-            o.effect == static_cast<int>(EffectId::Pulse) ||
-            o.effect == static_cast<int>(EffectId::Fog) ||
-            o.effect == static_cast<int>(EffectId::SunFlare) ||
-            o.effect == KH_EFFECT_CUSTOM;   // User shaders may sample depth.
+        // The scene chain's one list (kh_fx_needs_depth; user shaders may sample depth). Its three scene-only readers
+        // (ssgi, fogScatter, dynamicLightFog) are skipped below either way.
+        const bool wants_depth = kh_fx_needs_depth(o);
 
         if (wants_depth && !depth_ok) continue;
         if ((o.localized || o.effect == static_cast<int>(EffectId::Pulse)) && !has_inverse) continue;
@@ -591,8 +590,8 @@ inline void flush_ui_locked(ID3D11Device* dev, ID3D11DeviceContext* ctx, bool kh
                 ? kh_capture_bb_premult(dev, ctx, bb, td)
                 : ensure_backbuffer_capture(dev, ctx, bb, td);
             if (!khu_cap_err.empty()) {   // KH_UI_USER_CAP: this pass alone is lost (the chain is closed above).
-                report_error_once_safe("KH RenderIntegration: a .hlsl UI pass could not capture the backbuffer (" +
-                                       khu_cap_err + "); that pass is not drawn");
+                report_error_once_safe("KH RenderIntegration: UI flush: a .hlsl UI pass could not capture the "
+                                       "backbuffer (" + khu_cap_err + "); that pass is not drawn");
                 continue;
             }
             ctx->OMSetRenderTargets(1, &khup_bb_rtv, khup_bb_dsv);
@@ -665,11 +664,13 @@ inline bool flush_ui_frame() {
     ID3D11DeviceContext* ctx = RVExtBridge::get_d3d_device_context();
     if (!dev || !ctx) return false;
     kh_stat(g_stats.ui_flushes);
-    KH_PROF_SCOPE(KHP_FLUSH_UI_FRAME);   // KH_PARK_WAIT: the UI park whole (its wait + flush_ui_locked).
 
     // KH_PRESENT_UI: the Present hook draws the UI chain this frame; the EH only keeps the driver alive. Off that path
     // (no hook, or Present has not drawn within the stale window) the lock path below stands.
     if (kh_present_ui_live()) return true;
+    // KH_PARK_WAIT: the UI park whole (its wait + flush_ui_locked). KH_EA_UI_PARK_ZONE: below the Present path's
+    // return, so the zone's entries count the lock path's calls alone.
+    KH_PROF_SCOPE(KHP_FLUSH_UI_FRAME);
 
     // The lock path: the fallback while the Present hook is not serving (not installed, or no Present drew the chain
     // within the stale window). Its grant lands ahead of the engine's UI composition without the Draw3D park in front

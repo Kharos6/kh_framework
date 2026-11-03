@@ -54,45 +54,22 @@ inline void kh_gen_tangents(std::vector<MeshVertex>& v) {
 
 static constexpr size_t KH_FBX_VERT_CEIL = 0xFFFFFFFFull / sizeof(MeshVertex);
 
-// khfb_pub (optional): whether the publish landed here (false = deferred to the next injection or flush,
-// g_mesh_publish_pending).
-inline bool kh_fbx_register(MeshDef&& d, const std::string& path, int& out_id, std::string& err,
-                            bool* khfb_pub = nullptr) {
+// KH_EA_FBX_NO_PARK: append (invisible) and leave the publish + GPU top-up to the render thread, as a generated mesh
+// (KH_MESH_GEN_PUB): never under the graphics lock. The next injection lands it ahead of its scene sync, else the
+// flush's housekeeping (kh_mesh_publish_land, which reports a buffer failure through kh_ensure_ok "mesh publish").
+// Game thread.
+inline bool kh_fbx_register(MeshDef&& d, const std::string& path, int& out_id, std::string& err) {
     d.name = path;
     d.name = kh_lower_copy(std::move(d.name));
     d.alias = "";
 
-    // Append (invisible) unlocked, then publish + GPU top-up with the render thread parked, so no draw can race the
-    // count/buffer pair.
     const int id = kh_mesh_append(std::move(d));
     if (id < 0) { err = "mesh registry full"; return false; }
     kh_mesh_note_ref(id);   // KH_MESH_FREE: the idle window starts at import, not at 0.
     // Until the publish lands no object naming the id enters the live scene (KH_SCENE_UNPUB, kh_scene_sync), and a
-    // changed one keeps drawing its last synced state.
-    bool khfb_published = false;
-
-    for (int khfb_try = 0; khfb_try < 3 && !khfb_published; ++khfb_try) {
-        RVExtBridge::ScopedGraphicsLock khfb_lock;
-        if (!khfb_lock.acquired()) continue;
-        kh_mesh_publish();
-        ID3D11Device* dev = RVExtBridge::get_d3d_device();
-
-        if (dev) {
-            const std::string ve = ensure_mesh_vbs(dev);
-            // The id stays published whatever this returns, and the next ensure_resources on either mesh path retries
-            // the top-up. Until one succeeds (or the mesh is released) that ensure returns this error and the flush and
-            // the injection stand down whole - every object, not only the ones using this mesh.
-            if (!ve.empty()) kh_ensure_ok(("fbx '" + path + "'").c_str(), ve);   // KH_ENSURE_ONCE.
-        }
-
-        khfb_published = true;
-    }
-
-    if (!khfb_published) {
-        g_mesh_publish_pending.store(true, std::memory_order_relaxed);
-    }
-
-    if (khfb_pub) *khfb_pub = khfb_published;
+    // changed one keeps drawing its last synced state; the game-thread readers take the staged lookup
+    // (KH_MESH_STAGED) or wait for the publish (kh_skin_sync, kh_cloth_sync, the collider gather).
+    g_mesh_publish_pending.store(true, std::memory_order_relaxed);
     out_id = id;
     return true;
 }
@@ -432,6 +409,9 @@ inline bool kh_fbx_import(const std::string& path, int& out_id, std::string& err
         char buf[512];
         ufbx_format_error(buf, sizeof(buf), &uerr);
         err = buf;
+        // KH_EA_FBX_ERR_LINE: ufbx ends its line with '\n' (its error stack, one more line per frame, is not compiled
+        // in); the report is one line.
+        while (!err.empty() && (err.back() == '\n' || err.back() == '\r')) err.pop_back();
         return false;
     }
     // KH_FBX_SCENE_HOLD: an exception in the walk below (an allocation: the buckets grow with the file) unwinds to the
@@ -772,13 +752,20 @@ inline bool kh_fbx_import(const std::string& path, int& out_id, std::string& err
     // The writer takes g_khsm_trim_mu: an FBX import can land while a shader batch writes .khsc blobs into the same
     // folder, and the trim enumerates and deletes.
     kh_mesh_occ_prep(d);   // KH_OCC_BOX: before the cache write reads it.
-    bool khmc_pub = true;
-    const bool khmc_ok = kh_fbx_register(std::move(d), path, out_id, err, &khmc_pub);
+    const bool khmc_ok = kh_fbx_register(std::move(d), path, out_id, err);
     // Queued only on success, and only once the id is published: the writer reads the mesh by id and drops an
-    // unpublished one. A deferred publish queues it where it lands (KH_MESH_CACHE_LATER).
+    // unpublished one, so the write waits for the publish and is queued where it lands (KH_MESH_CACHE_LATER). The
+    // writer is started here, on the game thread, so that landing (the render thread) only queues. KH_EA_MW_INLINE:
+    // no writer thread - the write and the trim run here, on the game thread (the appended def is immutable), never
+    // at the landing.
     if (khmc_ok) {
-        if (khmc_pub) kh_mesh_cache_queue(khmc_hash, out_id);
-        else kh_mesh_cache_later(khmc_hash, out_id);
+        if (kh_mesh_cache_writer_start()) {
+            kh_mesh_cache_later(khmc_hash, out_id);
+        } else if (const MeshDef* khmc_d = kh_mesh_def_staged(out_id)) {
+            kh_mesh_cache_store(khmc_hash, *khmc_d);
+            std::lock_guard<std::mutex> khmc_tl(g_khsm_trim_mu);
+            kh_mesh_cache_trim();
+        }
     }
     return khmc_ok;
 }
@@ -799,9 +786,9 @@ inline int kh_fbx_mesh_id(const std::string& request, std::string& err) {
         std::lock_guard<std::mutex> g(g_fbx_cache_mutex);
         auto it = g_fbx_cache.find(key);
         if (it != g_fbx_cache.end()) {
-            // KH_MESH_STAGED: alive, or appended with its publish deferred (kh_fbx_register: the lock refused) - the
-            // same mesh either way; kh_mesh_alive alone reads the second as released and would import the file again on
-            // every request until the publish lands.
+            // KH_MESH_STAGED: alive, or appended with its publish still pending (kh_fbx_register) - the same mesh
+            // either way; kh_mesh_alive alone reads the second as released and would import the file again on every
+            // request until the publish lands.
             if (kh_mesh_alive(it->second) || kh_mesh_def_staged(it->second)) return it->second;
             g_fbx_cache.erase(it);   // KH_MESH_FREE: released since (a null tombstone); import again (disk cache hit).
         }

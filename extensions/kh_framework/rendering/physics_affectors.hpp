@@ -4,14 +4,13 @@
 // it on its own.
 namespace RenderIntegration {
 
-inline double effect_time_seconds_d();   // Defined with the effect clock (rendering/effect_clock.hpp).
-
-// The frame delta the simulation steps on, from the process clock the effect envelopes use (steady wall time: the
-// cloth keeps moving in the pause menu and does not follow setAccTime). The first frame of a session reports the
-// clock's age at that call (the clock starts at its first read by anything, so 0 only when this is it), a gap over
-// 10 s reports 0; the core advances nothing for a zero dt (an unprimed instance places its rest pose on its first
-// step whatever dt says) and clamps any other long frame to KH_CLOTH_DT_MAX.
-inline double effect_time_seconds_d();   // Defined with the effect clock (rendering/effect_clock.hpp).
+// Defined with the effect clock (rendering/effect_clock.hpp). The affectors' lifetimes and turbulence run on it, and
+// so does the frame delta the simulation steps on (kh_cloth_frame_dt, rendering/cloth_sync.hpp): steady wall time,
+// so the cloth keeps moving in the pause menu and does not follow setAccTime. The first frame of a session reports
+// the clock's age at that call (the clock starts at its first read by anything, so 0 only when this is it), a gap
+// over 10 s reports 0; the core advances nothing for a zero dt (an unprimed instance places its rest pose on its
+// first step whatever dt says) and clamps any other long frame to KH_CLOTH_DT_MAX.
+inline double effect_time_seconds_d();
 
 // KH_AFFECTOR - the script-side record (addPhysicsAffector, updatePhysicsAffector, removeRenderHandler). GAME
 // THREAD ONLY, unlocked: the SQF commands, kh_cloth_sync and the mission reset all run on it, and neither the render
@@ -34,7 +33,8 @@ struct KhAffector {
     uint64_t seq = 0;                          // Creation stamp; turbulence's seed.
 };
 static std::unordered_map<std::string, KhAffector> g_affectors;
-// Its size, stored by the game thread wherever the table changes, for kh_cloth_stats_publish on the render thread.
+// Its size, stored by the game thread wherever the table changes: renderStats' physicsAffectors gauge (KH_AFF_GAUGE,
+// read live by the command, not through the flush's stats copy).
 static std::atomic<uint64_t> g_affectors_n{ 0 };
 inline void kh_aff_count_note() { g_affectors_n.store(g_affectors.size(), std::memory_order_relaxed); }
 static uint64_t g_aff_next_seq = 0;

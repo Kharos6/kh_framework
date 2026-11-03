@@ -65,6 +65,47 @@ inline void kh_vmsee_arm(ID3D11Device* dev, const std::vector<std::pair<uint64_t
     if (khva_dem && kh_vmsee_ensure(dev)) g_vmsee_want_cycle = g_topo_cycles;
 }
 
+// KH_EA_SCENE_RTV: whether khrs_rtv (not null) views the scene texture (KH_SCENE_NAME's, g_topo_scene_tex_id; none
+// named yet = false). The pre-draws', the injection capture's and the in-front tail arm's RT0 test (here,
+// rendering/see_through.hpp and rendering/in_front.hpp).
+inline bool kh_rtv_is_scene(ID3D11RenderTargetView* khrs_rtv) {
+    if (!g_topo_scene_tex_id) return false;
+    ID3D11Resource* khrs_res = nullptr;
+    khrs_rtv->GetResource(&khrs_res);
+    const bool khrs_scene = khrs_res != nullptr && static_cast<void*>(khrs_res) == g_topo_scene_tex_id;
+    if (khrs_res) khrs_res->Release();
+    return khrs_scene;
+}
+
+// KH_EA_S0_PASS: the main depth's sample 0, raw, into khds_rtv (R32F, khds_w x khds_h) - PSDepthS0 in one fullscreen
+// triangle: the snapshot below, KH_WSEE's capture (S) and its B2 moment (S2). The caller has saved the state
+// (StateBackup, KhOmSave) under in_injection and checked ps_vmsee_s0's sample count; the pass's state stays bound but
+// t0, nulled.
+inline void kh_depth_s0_pass(ID3D11DeviceContext* ctx, ID3D11RenderTargetView* khds_rtv, UINT khds_w, UINT khds_h) {
+    D3D11_VIEWPORT khds_vp = {};
+    khds_vp.Width = static_cast<FLOAT>(khds_w);
+    khds_vp.Height = static_cast<FLOAT>(khds_h);
+    khds_vp.MaxDepth = 1.0f;
+    // Replacing the OM targets unbinds the main depth's view first, which makes its SRV legal at t0.
+    ctx->OMSetRenderTargets(1, &khds_rtv, nullptr);
+    ctx->RSSetViewports(1, &khds_vp);
+    ctx->RSSetState(g_res.rasterizer);
+    ctx->IASetInputLayout(nullptr);
+    ctx->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+    ctx->VSSetShader(g_res.vs_fullscreen, nullptr, 0);
+    ctx->PSSetShader(g_res.ps_vmsee_s0, nullptr, 0);
+    ctx->GSSetShader(nullptr, nullptr, 0);
+    ctx->HSSetShader(nullptr, nullptr, 0);
+    ctx->DSSetShader(nullptr, nullptr, 0);
+    ctx->PSSetShaderResources(0, 1, &g_res.depth_srv);
+    ctx->OMSetDepthStencilState(g_res.dss_off, 0);
+    const FLOAT khds_bf[4] = { 0.0f, 0.0f, 0.0f, 0.0f };
+    ctx->OMSetBlendState(nullptr, khds_bf, 0xFFFFFFFF);
+    ctx->Draw(3, 0);
+    ID3D11ShaderResourceView* khds_null = nullptr;
+    ctx->PSSetShaderResources(0, 1, &khds_null);   // Off t0 before the engine's depth view is bound again.
+}
+
 // The snapshot (snapshot_composite_depth's pattern): the main depth's sample 0 into the R32F target, the
 // transmittance cleared to 1, everything handed back. Our binds and the restore run under in_injection, so the OM
 // hooks do not take them for the engine's (the main-depth test, the blend / PIP / shadow trackers). The bound depth
@@ -98,28 +139,7 @@ inline bool kh_vmsee_snapshot(ID3D11DeviceContext* ctx) {
     khvn_bk.capture(ctx);
     KhOmSave khvn_om;
     khvn_om.capture(ctx);
-    D3D11_VIEWPORT khvn_vp = {};
-    khvn_vp.Width = static_cast<FLOAT>(g_res.vmsee_w);
-    khvn_vp.Height = static_cast<FLOAT>(g_res.vmsee_h);
-    khvn_vp.MaxDepth = 1.0f;
-    // Replacing the OM targets unbinds the main depth's view first, which makes its SRV legal at t0.
-    ctx->OMSetRenderTargets(1, &g_res.vmsee_s_rtv, nullptr);
-    ctx->RSSetViewports(1, &khvn_vp);
-    ctx->RSSetState(g_res.rasterizer);
-    ctx->IASetInputLayout(nullptr);
-    ctx->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
-    ctx->VSSetShader(g_res.vs_fullscreen, nullptr, 0);
-    ctx->PSSetShader(g_res.ps_vmsee_s0, nullptr, 0);
-    ctx->GSSetShader(nullptr, nullptr, 0);
-    ctx->HSSetShader(nullptr, nullptr, 0);
-    ctx->DSSetShader(nullptr, nullptr, 0);
-    ctx->PSSetShaderResources(0, 1, &g_res.depth_srv);
-    ctx->OMSetDepthStencilState(g_res.dss_off, 0);
-    const FLOAT khvn_bf[4] = { 0.0f, 0.0f, 0.0f, 0.0f };
-    ctx->OMSetBlendState(nullptr, khvn_bf, 0xFFFFFFFF);
-    ctx->Draw(3, 0);
-    ID3D11ShaderResourceView* khvn_null = nullptr;
-    ctx->PSSetShaderResources(0, 1, &khvn_null);   // Off t0 before the engine's depth view is bound again.
+    kh_depth_s0_pass(ctx, g_res.vmsee_s_rtv, g_res.vmsee_w, g_res.vmsee_h);   // KH_EA_S0_PASS.
     const FLOAT khvn_one[4] = { 1.0f, 1.0f, 1.0f, 1.0f };
     ctx->ClearRenderTargetView(g_res.vmsee_t_rtv, khvn_one);
     khvn_om.restore(ctx);
@@ -144,12 +164,8 @@ inline void kh_vmsee_pre_draw(ID3D11DeviceContext* ctx) {
     ID3D11RenderTargetView* khvp_rtv = nullptr;
     ctx->OMGetRenderTargets(1, &khvp_rtv, nullptr);
     if (!khvp_rtv) return;
-    ID3D11Resource* khvp_res = nullptr;
-    khvp_rtv->GetResource(&khvp_res);
+    const bool khvp_scene = kh_rtv_is_scene(khvp_rtv);   // KH_EA_SCENE_RTV.
     khvp_rtv->Release();
-    const bool khvp_scene = khvp_res != nullptr && g_topo_scene_tex_id != nullptr &&
-                            static_cast<void*>(khvp_res) == g_topo_scene_tex_id;
-    if (khvp_res) khvp_res->Release();
     if (!khvp_scene) return;
     if (g_vmsee_snap_cycle != g_topo_cycles) {
         g_vmsee_snap_cycle = g_topo_cycles;

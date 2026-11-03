@@ -34,7 +34,7 @@ static UINT g_main_depth_h = 0;
 static float g_scene_vp_min_d = 0.011f;
 static float g_scene_vp_max_d = 0.999f;
 static std::atomic<float> g_sun_range{200.0f};
-static std::atomic<float> g_obj_vis{0.0f};
+static std::atomic<float> g_obj_vis{0.0f};   // Cleared by the session reset; re-armed by the first stage_video_options.
 // KH_NO_PARK_LANDED: the cycle of the last landing, stamped beside the serial. Render thread only: read by
 // flush_locked's injected_since_last_flush, the DLS world pass (kh_dls_world_pass_body) and the skin cull
 // (kh_skin_cull_pass).

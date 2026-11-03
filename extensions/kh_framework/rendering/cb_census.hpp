@@ -4,8 +4,6 @@
 // its own.
 namespace RenderIntegration {
 
-inline bool shadow_live_wanted();   // Defined in rendering/mask_cast_state.hpp.
-
 inline bool shadow_live_wanted();   // Defined in rendering/mask_cast_state.hpp (the view-stage gate).
 // Keyed by the buffer object pointer, compared opaquely (never dereferenced or AddRef'd: a destroyed buffer stops
 // matching; a recycled pointer re-records only when an upload to it probes as a camera slot, and until then resolves to
@@ -15,9 +13,6 @@ struct KhCbCensusEntry {
     float    m22 = 0.0f;
     float    m32 = 0.0f;
     uint64_t ms = 0;   // Steady ms of the recording upload.
-    uint32_t hits = 0;
-    // The recording camera, when the note is handed one (no caller does); nothing reads it.
-    float    cam[3] = {};
 };
 static constexpr int KH_CBC_N = 16;
 static KhCbCensusEntry g_cbc[KH_CBC_N];
@@ -61,8 +56,7 @@ inline const KhCbCensusEntry* kh_cbc_find(void* khcb_buf) {
     return nullptr;
 }
 
-inline void kh_cbc_note(void* khcb_res, float khcb_m22, float khcb_m32,
-                        const float* khcb_cam) {
+inline void kh_cbc_note(void* khcb_res, float khcb_m22, float khcb_m32) {
     int khcb_slot = -1;
     uint64_t khcb_oldest = ~0ull;
     int khcb_oldest_i = 0;
@@ -85,12 +79,5 @@ inline void kh_cbc_note(void* khcb_res, float khcb_m22, float khcb_m32,
     g_cbc[khcb_slot].m22 = khcb_m22;
     g_cbc[khcb_slot].m32 = khcb_m32;
     g_cbc[khcb_slot].ms = steady_now_ms();
-    g_cbc[khcb_slot].hits++;
-
-    if (khcb_cam) {
-        g_cbc[khcb_slot].cam[0] = khcb_cam[0];
-        g_cbc[khcb_slot].cam[1] = khcb_cam[1];
-        g_cbc[khcb_slot].cam[2] = khcb_cam[2];
-    }
 }
 }

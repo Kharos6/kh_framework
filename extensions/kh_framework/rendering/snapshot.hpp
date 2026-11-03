@@ -63,7 +63,7 @@ inline void kh_snapshot_take(ID3D11Device* dev, ID3D11DeviceContext* ctx, const 
     std::string khs_err = snapshot_composite_depth(dev, ctx);
 
     if (!khs_err.empty()) {
-        report_error_once_safe("KH occlusion snapshot: " + khs_err);
+        report_error_once_safe("KH RenderIntegration: occlusion snapshot: " + khs_err);
     } else {
         g_snap_serial++;
         g_snap_ms = steady_now_ms();
@@ -74,7 +74,7 @@ inline void kh_snapshot_take(ID3D11Device* dev, ID3D11DeviceContext* ctx, const 
         } else {
             g_snap_pair_src = 0;
         }
-        if (!kh_view_camera_exact(pv.view, g_snap_cam)) extract_camera_pos(pv.view, g_snap_cam);
+        kh_cam_of(pv.view, g_snap_cam);
         // view*proj of this frame folded in double and rebased to g_snap_cam (row3 += cam . rows), so the shader
         // multiplies a camera-relative offset - exact algebra whichever point c is; c near the true camera only keeps
         // magnitudes small.

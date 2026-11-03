@@ -5,6 +5,9 @@
 namespace RenderIntegration {
 // Defined in rendering/skinning.hpp (declared here for the uses below).
 inline void kh_skin_nrm_cof(const float khsn_r[3][3], const float khsn_n[3], float khsn_nn[3]);
+// Defined in rendering/cloth_sync.hpp (declared here for kh_chain_writeback).
+inline uint32_t kh_cloth_step_shape(std::vector<float>& khck_ref, uint32_t& khck_key,
+                                    const std::vector<float>& khck_met);
 
 
 // KH_CHAIN - the bodies, joints and contact points of a mesh's skeleton, from the start bone down. Game thread, on an
@@ -513,17 +516,7 @@ inline void kh_chain_writeback(KhClothInst& khcw_in, uint32_t khcw_back) {
         khcw_in.box_ctr[khcw_back][k] = c.auth_ctr[k] + bc[k];
         khcw_in.box_size[khcw_back][k] = be[k];
     }
-    bool moved = khcw_in.shape_key == 0u || khcw_in.shape_ref.size() != met.size();
-    for (size_t i = 0; i < met.size() && !moved; ++i) {
-        if (!(fabsf(met[i] - khcw_in.shape_ref[i]) <= KH_CLOTH_SHAPE_M)) moved = true;
-    }
-    if (moved) {
-        khcw_in.shape_ref = met;
-        uint32_t k = g_cloth_shape_serial.fetch_add(1u, std::memory_order_relaxed) + 1u;
-        if (k == 0u) k = g_cloth_shape_serial.fetch_add(1u, std::memory_order_relaxed) + 1u;
-        khcw_in.shape_key = k;
-    }
-    khcw_in.shape_of[khcw_back] = khcw_in.shape_key;
+    khcw_in.shape_of[khcw_back] = kh_cloth_step_shape(khcw_in.shape_ref, khcw_in.shape_key, met);   // KH_CLOTH_SHAPE.
 }
 
 // KH_CHAIN - does this object simulate as a chain, and can its mesh? A chain and a cloth are exclusive (the SQF side

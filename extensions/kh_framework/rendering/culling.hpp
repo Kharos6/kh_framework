@@ -114,7 +114,7 @@ inline bool kh_mesh_visible(const KhCullSet& khc_s, const float khc_ctr[3], floa
         if (khc_d < -khc_b) return false;
     }
 
-    if (khc_s.back_on && khc_s.back_ok) {   // KH_CULL_BACK: the mirror half of the double cone.
+    if (khc_s.back_on && khc_s.back_ok) {   // KH_CULL_BACK: wholly behind the apex plane.
         const float khc_dn = khc_s.fwd[0] * (khc_q[0] - khc_s.apex[0]) +
                              khc_s.fwd[1] * (khc_q[1] - khc_s.apex[1]) +
                              khc_s.fwd[2] * (khc_q[2] - khc_s.apex[2]);

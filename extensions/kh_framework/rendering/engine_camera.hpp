@@ -190,10 +190,7 @@ inline bool kh_engcam_eval(const float khec_view[4][4], float khec_cam[3], bool 
         if (!g_engcam_frame_taken) return false;
 
         float khec_lrec[3];
-
-        if (!kh_view_camera_exact(khec_view, khec_lrec)) {
-            extract_camera_pos(khec_view, khec_lrec);
-        }
+        kh_cam_of(khec_view, khec_lrec);
 
         if (!kh_engcam_agree4(g_engcam_frame_val, khec_lrec)) {
             return false;
@@ -206,10 +203,7 @@ inline bool kh_engcam_eval(const float khec_view[4][4], float khec_cam[3], bool 
     }
 
     float khec_rec[3];
-
-    if (!kh_view_camera_exact(khec_view, khec_rec)) {
-        extract_camera_pos(khec_view, khec_rec);
-    }
+    kh_cam_of(khec_view, khec_rec);   // KH_CAM_HONEST.
 
     // Near-origin stand-down, parity with the rebase family.
     if (khec_rec[0] * khec_rec[0] + khec_rec[1] * khec_rec[1] +
@@ -263,7 +257,6 @@ inline bool kh_engcam_eval(const float khec_view[4][4], float khec_cam[3], bool 
                 khec_best = &g_engcam_cand[khec_k];
             }
         }
-
 
         if (!khec_best) return false;
 

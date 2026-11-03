@@ -58,7 +58,7 @@ static constexpr uint32_t KH_LITE_CONF_CLOSES = 8;
 static uint32_t g_lite_cand_n = 0;      // Consecutive sparse out-of-band closes agreeing with the candidate.
 static float    g_lite_cand_sl = 0.0f;  // The candidate's sun / ambient sums.
 static float    g_lite_cand_al = 0.0f;
-struct KhBlkOwn { float amb[3]; float sun[3]; uint32_t draws; uint32_t at; uint8_t flag;
+struct KhBlkOwn { float amb[3]; float sun[3]; uint32_t draws; uint8_t flag;
                   uint32_t members; uint32_t rep_draws; float al; float sl; };
 static uint64_t g_blko_draws = 0;          // Main-scene draws, monotonic.
 static KhBlkOwn g_blko_cur[KH_BLKO_MAX] = {};   // The open frame's clusters.

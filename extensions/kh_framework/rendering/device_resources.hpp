@@ -6,9 +6,6 @@ namespace RenderIntegration {
 // Defined in rendering/white_placeholder.hpp (declared here for the uses below).
 inline void kh_white_ensure(ID3D11Device* dev);
 
-static UINT g_eds_memo_w = 0;
-static UINT g_eds_memo_h = 0;
-
 // KH_ENSURE_ONCE: one report per fault, not one per site. The same ensure error reaches several sites a frame (the
 // flush, the injection, the seam, the UI flush, the sun pass, the mesh publish), and report_error_once_safe keys on
 // the prefixed text, so the bare error is filed as the key first: the first site names itself, every later site
@@ -21,11 +18,12 @@ inline bool kh_ensure_ok(const char* khe_what, const std::string& khe_err) {
         if (std::find(g_err_once.begin(), g_err_once.end(), khe_err) != g_err_once.end()) return false;
         if (g_err_once.size() < 256) g_err_once.push_back(khe_err);
     }
-    report_error_once_safe(std::string("KH ") + khe_what + ": " + khe_err);
+    report_error_once_safe(std::string("KH RenderIntegration: ") + khe_what + ": " + khe_err);
     return false;
 }
 // Non-fatal shader creation: a failed compile or create is reported once (the text names the entry point, so one
-// failing entry does not silence the next) and leaves the slot null; every consumer gates on the pointer.
+// failing entry does not silence the next) and leaves the slot null; every consumer gates on the pointer. label: the
+// feature the report names ("KH RenderIntegration: <label>: ...").
 inline void kh_ps_optional(ID3D11Device* dev, const std::string& src, const char* entry,
                            const D3D_SHADER_MACRO* defs, ID3D11PixelShader** out, const char* label) {
     ID3DBlob* blob = nullptr;
@@ -35,10 +33,12 @@ inline void kh_ps_optional(ID3D11Device* dev, const std::string& src, const char
         blob->Release();
         if (FAILED(hr)) {
             *out = nullptr;
-            report_error_once_safe(std::string(label) + entry + " could not be created " + hr_str(hr));
+            report_error_once_safe(std::string("KH RenderIntegration: ") + label + ": " + entry +
+                                   " could not be created " + hr_str(hr));
         }
     } else if (!err.empty()) {
-        report_error_once_safe(std::string(label) + err);   // compile_shader's error text already names the entry.
+        // compile_shader's error text already names the entry.
+        report_error_once_safe(std::string("KH RenderIntegration: ") + label + ": " + err);
     }
 }
 inline void kh_vs_optional(ID3D11Device* dev, const std::string& src, const char* entry,
@@ -50,10 +50,12 @@ inline void kh_vs_optional(ID3D11Device* dev, const std::string& src, const char
         blob->Release();
         if (FAILED(hr)) {
             *out = nullptr;
-            report_error_once_safe(std::string(label) + entry + " could not be created " + hr_str(hr));
+            report_error_once_safe(std::string("KH RenderIntegration: ") + label + ": " + entry +
+                                   " could not be created " + hr_str(hr));
         }
     } else if (!err.empty()) {
-        report_error_once_safe(std::string(label) + err);   // compile_shader's error text already names the entry.
+        // compile_shader's error text already names the entry.
+        report_error_once_safe(std::string("KH RenderIntegration: ") + label + ": " + err);
     }
 }
 
@@ -319,11 +321,13 @@ inline std::string ensure_resources(ID3D11Device* dev) {
                                                khmv_blob->GetBufferSize(),
                                                nullptr, &g_vmir_vs))) {
                 g_vmir_vs = nullptr;
-                report_error_once_safe("KH mirror: VSMirror could not be created (the mirror stands down)");
+                report_error_once_safe("KH RenderIntegration: mirror: VSMirror could not be created (the mirror "
+                                       "stands down)");
             }
             khmv_blob->Release();
         } else {
-            report_error_once_safe("KH mirror: VSMirror compile failed (the mirror stands down): " + khmv_err);
+            report_error_once_safe("KH RenderIntegration: mirror: VSMirror compile failed (the mirror stands down): " +
+                                   khmv_err);
         }
     }
     err = compile_shader(static_src.c_str(), "VSFullscreen", "vs_5_0", khcb_rx_defines, &vs_fs_blob);
@@ -342,37 +346,48 @@ inline std::string ensure_resources(ID3D11Device* dev) {
                 D3D11_SHADER_BUFFER_DESC khcm_d = {};
                 return (khcm_cb && SUCCEEDED(khcm_cb->GetDesc(&khcm_d))) ? khcm_d.Size : 0u;
             };
-            g_cb_mirror_obj_b = khcm_size("CBObj");
-            g_cb_mirror_frame_b = khcm_size("CBFrame");
-            g_cb_mirror_bad = g_cb_mirror_obj_b != static_cast<uint32_t>(KH_CBOBJ_BYTES) ||
-                              g_cb_mirror_frame_b != static_cast<uint32_t>(KH_CBFRAME_BYTES);
+            const uint32_t khcm_obj_b = khcm_size("CBObj");
+            const uint32_t khcm_frame_b = khcm_size("CBFrame");
             khcm_r->Release();
-            if (g_cb_mirror_bad) {
-                report_error_once_safe("KH CB mirror: HLSL CBObj/CBFrame " + std::to_string(g_cb_mirror_obj_b) + "/" +
-                                std::to_string(g_cb_mirror_frame_b) + " B vs C++ " +
-                                std::to_string(KH_CBOBJ_BYTES) + "/" + std::to_string(KH_CBFRAME_BYTES) + " B");
+            if (khcm_obj_b != static_cast<uint32_t>(KH_CBOBJ_BYTES) ||
+                khcm_frame_b != static_cast<uint32_t>(KH_CBFRAME_BYTES)) {
+                report_error_once_safe("KH RenderIntegration: CB mirror: HLSL CBObj/CBFrame " +
+                                       std::to_string(khcm_obj_b) + "/" + std::to_string(khcm_frame_b) + " B vs C++ " +
+                                       std::to_string(KH_CBOBJ_BYTES) + "/" + std::to_string(KH_CBFRAME_BYTES) + " B");
             }
         }
     }
 
     // Non-fatal entry points: each consumer gates on its pointer.
-    kh_ps_optional(dev, static_src, "PSInjDepthA", khtx_defines, &g_res.ps_inj_depth_a, "KH inject-depth alpha shader: ");   // KH_FOOTPRINT_ALPHA (KH_TEXTURED for KhMatRouteG).
-    kh_ps_optional(dev, static_src, "PSMaskCast", khcb_rx_defines, &g_res.ps_maskcast, "KH maskcast shader: ");   // Analytic mask cast.
-    kh_ps_optional(dev, static_src, "PSReplayMerge", khcb_rx_defines, &g_res.ps_rpmerge, "KH replay merge shader: ");   // KH_VOL_REPLAY.
-    kh_ps_optional(dev, static_src, "PSReplayMergeMir", khcb_rx_defines, &g_res.ps_rpmergemir, "KH mirror merge shader: ");   // KH_MIR_REPLAY.
-    kh_ps_optional(dev, static_src, "PSDlsWorld", khcb_rx_defines, &g_res.ps_dls_world, "KH dlsworld shader: ");   // KH_DLS_WORLD receive.
-    kh_ps_optional(dev, static_src, "PSSeamFoot", khcb_rx_defines, &g_res.ps_seam_foot, "KH seam footprint shader: ");   // KH_VOL_FOOT; absent = the depth-plane witness.
-    kh_ps_optional(dev, static_src, "PSDlsWorldFog", khcb_rx_defines, &g_res.ps_dls_world_fog, "KH dlsworld fog shader: ");   // KH_DLSW_FOG; absent = the plain multiply.
-    kh_vs_optional(dev, static_src, "VSDlsMask", khcb_rx_defines, &g_res.vs_dls_mask, "KH dlsmask VS: ");   // KH_DLSW_MASK pair: a failed
-    kh_ps_optional(dev, static_src, "PSDlsMask", khcb_rx_defines, &g_res.ps_dls_mask, "KH dlsmask PS: ");   // compile leaves the mask off.
-    kh_ps_optional(dev, static_src, "PSDlsMaskA", khtx_defines, &g_res.ps_dls_mask_a, "KH dlsmask alpha PS: ");   // KH_DLSW_MASK_ALPHA (KH_TEXTURED for KhMatRouteG); absent = alpha casters mask opaque.
-    kh_ps_optional(dev, static_src, "PSMaskPrime", khcb_rx_defines, &g_res.ps_maskprime, "KH maskprime shader: ");   // Priming pass, same contract.
+    kh_ps_optional(dev, static_src, "PSInjDepthA", khtx_defines, &g_res.ps_inj_depth_a,
+                   "inject-depth alpha shader");   // KH_FOOTPRINT_ALPHA (KH_TEXTURED for KhMatRouteG).
+    kh_ps_optional(dev, static_src, "PSMaskCast", khcb_rx_defines, &g_res.ps_maskcast,
+                   "maskcast shader");   // Analytic mask cast.
+    kh_ps_optional(dev, static_src, "PSReplayMerge", khcb_rx_defines, &g_res.ps_rpmerge,
+                   "replay merge shader");   // KH_VOL_REPLAY.
+    kh_ps_optional(dev, static_src, "PSReplayMergeMir", khcb_rx_defines, &g_res.ps_rpmergemir,
+                   "mirror merge shader");   // KH_MIR_REPLAY.
+    kh_ps_optional(dev, static_src, "PSDlsWorld", khcb_rx_defines, &g_res.ps_dls_world,
+                   "dlsworld shader");   // KH_DLS_WORLD receive.
+    kh_ps_optional(dev, static_src, "PSSeamFoot", khcb_rx_defines, &g_res.ps_seam_foot,
+                   "seam footprint shader");   // KH_VOL_FOOT; absent = the depth-plane witness.
+    kh_ps_optional(dev, static_src, "PSDlsWorldFog", khcb_rx_defines, &g_res.ps_dls_world_fog,
+                   "dlsworld fog shader");   // KH_DLSW_FOG; absent = the plain multiply.
+    kh_vs_optional(dev, static_src, "VSDlsMask", khcb_rx_defines, &g_res.vs_dls_mask,
+                   "dlsmask VS");   // KH_DLSW_MASK pair: a failed
+    kh_ps_optional(dev, static_src, "PSDlsMask", khcb_rx_defines, &g_res.ps_dls_mask,
+                   "dlsmask PS");   // compile leaves the mask off.
+    kh_ps_optional(dev, static_src, "PSDlsMaskA", khtx_defines, &g_res.ps_dls_mask_a,
+                   "dlsmask alpha PS");   // KH_DLSW_MASK_ALPHA (KH_TEXTURED for KhMatRouteG); absent = alpha casters
+                                          // mask opaque.
+    kh_ps_optional(dev, static_src, "PSMaskPrime", khcb_rx_defines, &g_res.ps_maskprime,
+                   "maskprime shader");   // Priming pass, same contract.
     // KH_GLOW_PYR: the effect unit's two pyramid builders (MSAA_DEPTH 0 - neither reads depth); absent = direct taps.
-    kh_ps_optional(dev, khfx_src, "PSGlowSeed", khfx_d0, &g_res.ps_glow_seed, "KH glow seed shader: ");
-    kh_ps_optional(dev, khfx_src, "PSGlowDown", khfx_d0, &g_res.ps_glow_down, "KH glow down shader: ");
+    kh_ps_optional(dev, khfx_src, "PSGlowSeed", khfx_d0, &g_res.ps_glow_seed, "glow seed shader");
+    kh_ps_optional(dev, khfx_src, "PSGlowDown", khfx_d0, &g_res.ps_glow_down, "glow down shader");
     // KH_ANA_PYR: anamorphic's two, likewise (MSAA_DEPTH 0); absent = its direct taps.
-    kh_ps_optional(dev, khfx_src, "PSAnaSeed", khfx_d0, &g_res.ps_ana_seed, "KH anamorphic seed shader: ");
-    kh_ps_optional(dev, khfx_src, "PSAnaDown", khfx_d0, &g_res.ps_ana_down, "KH anamorphic down shader: ");
+    kh_ps_optional(dev, khfx_src, "PSAnaSeed", khfx_d0, &g_res.ps_ana_seed, "anamorphic seed shader");
+    kh_ps_optional(dev, khfx_src, "PSAnaDown", khfx_d0, &g_res.ps_ana_down, "anamorphic down shader");
 
     {   // Instanced sun-depth VS + layout: non-fatal (per-caster loop covers).
         ID3DBlob* sd_blob = nullptr;
@@ -394,7 +409,7 @@ inline std::string ensure_resources(ID3D11Device* dev) {
 
             sd_blob->Release();
         } else if (!sd_err.empty()) {
-            report_error_once_safe("KH sun-depth shader: " + sd_err);
+            report_error_once_safe("KH RenderIntegration: sun shadow: sun-depth shader: " + sd_err);
         }
     }
 
@@ -416,7 +431,7 @@ inline std::string ensure_resources(ID3D11Device* dev) {
                     *khsi_out[khsi_i] = nullptr;
                 }
             } else if (!khsi_err.empty()) {
-                report_error_once_safe(std::string("KH seam: instanced VS ") + khsi_ent[khsi_i] +
+                report_error_once_safe(std::string("KH RenderIntegration: seam: instanced VS ") + khsi_ent[khsi_i] +
                                        " - that loop stays per caster: " + khsi_err);
             }
 
@@ -451,10 +466,11 @@ inline std::string ensure_resources(ID3D11Device* dev) {
                 KH_SAFE_RELEASE(g_res.vs_sundepth_a);
                 KH_SAFE_RELEASE(g_res.ps_sundepth_a);
                 KH_SAFE_RELEASE(g_res.layout_sundepth_a);
-                report_error_once_safe("KH sun-depth alpha shaders: create " + hr_str(khsa_hr));
+                report_error_once_safe("KH RenderIntegration: sun shadow: sun-depth alpha shaders: create " +
+                                       hr_str(khsa_hr));
             }
         } else if (!khsa_err.empty()) {
-            report_error_once_safe("KH sun-depth alpha shaders: " + khsa_err);
+            report_error_once_safe("KH RenderIntegration: sun shadow: sun-depth alpha shaders: " + khsa_err);
         }
 
         if (khsa_vb) khsa_vb->Release();
@@ -483,10 +499,11 @@ inline std::string ensure_resources(ID3D11Device* dev) {
             if (FAILED(khso_hr)) {
                 KH_SAFE_RELEASE(g_res.vs_sundepth_ao);
                 KH_SAFE_RELEASE(g_res.layout_sundepth_ao);
-                report_error_once_safe("KH sun-depth alpha fallback shader: create " + hr_str(khso_hr));
+                report_error_once_safe("KH RenderIntegration: sun shadow: sun-depth alpha fallback shader: create " +
+                                       hr_str(khso_hr));
             }
         } else if (!khso_err.empty()) {
-            report_error_once_safe("KH sun-depth alpha fallback shader: " + khso_err);
+            report_error_once_safe("KH RenderIntegration: sun shadow: sun-depth alpha fallback shader: " + khso_err);
         }
         if (khso_vb) khso_vb->Release();
     }
@@ -559,10 +576,10 @@ inline std::string ensure_resources(ID3D11Device* dev) {
                 KH_SAFE_RELEASE(g_res.vs_tex);
                 KH_SAFE_RELEASE(g_res.ps_tex);
                 KH_SAFE_RELEASE(g_res.layout_tex);
-                report_error_once_safe("KH textured shaders: create " + hr_str(khtx_hr));
+                report_error_once_safe("KH RenderIntegration: textured shaders: create " + hr_str(khtx_hr));
             }
         } else {
-            report_error_once_safe("KH textured shaders: " + khtx_err);
+            report_error_once_safe("KH RenderIntegration: textured shaders: " + khtx_err);
         }
 
         if (khtx_vsb) khtx_vsb->Release();
@@ -579,7 +596,7 @@ inline std::string ensure_resources(ID3D11Device* dev) {
             const std::string khin_err = compile_shader(static_src.c_str(), "VSMainInst", "vs_5_0", khin_defs, &khin_b);
 
             if (!khin_err.empty() || !khin_b) {
-                if (!khin_err.empty()) report_error_once_safe("KH instanced shaders: " + khin_err);
+                if (!khin_err.empty()) report_error_once_safe("KH RenderIntegration: instanced shaders: " + khin_err);
                 return false;
             }
 
@@ -608,7 +625,7 @@ inline std::string ensure_resources(ID3D11Device* dev) {
             if (FAILED(khin_hr)) {
                 KH_SAFE_RELEASE(*khin_vs);
                 KH_SAFE_RELEASE(*khin_il);
-                report_error_once_safe("KH instanced shaders: create " + hr_str(khin_hr));
+                report_error_once_safe("KH RenderIntegration: instanced shaders: create " + hr_str(khin_hr));
                 return false;
             }
 
@@ -631,7 +648,7 @@ inline std::string ensure_resources(ID3D11Device* dev) {
                 const HRESULT khin_hr = dev->CreateBuffer(&khin_bd, nullptr, &g_res.inst_vb[khin_i]);
 
                 if (FAILED(khin_hr)) {
-                    report_error_once_safe("KH instanced stream: create " + hr_str(khin_hr));
+                    report_error_once_safe("KH RenderIntegration: instanced stream: create " + hr_str(khin_hr));
                     khin_ok = false;
                 }
             }
@@ -679,7 +696,7 @@ inline std::string ensure_resources(ID3D11Device* dev) {
                     }
                 }
             } else if (!khsk_err.empty()) {
-                report_error_once_safe(std::string("KH skin pool: twin ") + khsk_t.ent +
+                report_error_once_safe(std::string("KH RenderIntegration: skin pool: twin ") + khsk_t.ent +
                                        " - that route draws skeletal meshes one by one: " + khsk_err);
             }
             if (khsk_b) khsk_b->Release();
@@ -724,7 +741,8 @@ inline std::string ensure_resources(ID3D11Device* dev) {
                     if (FAILED(khcr_hr)) {
                         for (int khcr_j = 0; khcr_j < 2; ++khcr_j) KH_SAFE_RELEASE(g_res.cb_ring[khcr_j]);
                         g_cbr_supported = false;
-                        report_error_once_safe("KH cb ring: create " + hr_str(khcr_hr) + " (per-object uploads)");
+                        report_error_once_safe("KH RenderIntegration: cb ring: create " + hr_str(khcr_hr) +
+                                               " (per-object uploads)");
                         break;
                     }
                 }
@@ -971,8 +989,8 @@ inline std::string ensure_resources(ID3D11Device* dev) {
             rd.DepthClipEnable = FALSE;
             if (FAILED(dev->CreateRasterizerState(&rd, khpk_out))) {
                 *khpk_out = nullptr;
-                report_error_once_safe(std::string("KH sun shadow: pancake rasterizer (") + khpk_what +
-                                       ") could not be created (that tier state clips)");
+                report_error_once_safe(std::string("KH RenderIntegration: sun shadow: pancake rasterizer (") +
+                                       khpk_what + ") could not be created (that tier state clips)");
             }
             rd.DepthClipEnable = TRUE;
         };
@@ -1108,11 +1126,11 @@ inline std::string ensure_effect_shader(ID3D11Device* dev) {
     static const char* const khes_ent[6] = { "PSFxLinZ", "PSSsgiGather", "PSSsgiAtrous", "PSDlfGather", "PSDlfFilter",
                                              "PSFsSplitS" };
     for (int khes_k = 0; khes_k < 6; ++khes_k) {
-        kh_ps_optional(dev, fx_src, khes_ent[khes_k], defines, khes_ps[khes_k], "KH effect split shader: ");
+        kh_ps_optional(dev, fx_src, khes_ent[khes_k], defines, khes_ps[khes_k], "effect split shader");
     }
     // KH_WSEE_EDGE_COST: fog scatter's side value (non-fatal, the prewarm tables' twin) - absent, kh_fx_side_draw
     // draws side 28 with PSEffect's branch.
-    kh_ps_optional(dev, fx_src, "PSFsSide", defines, &g_res.ps_fs_side, "KH effect split shader: ");
+    kh_ps_optional(dev, fx_src, "PSFsSide", defines, &g_res.ps_fs_side, "effect split shader");
     // KH_FX_LEAN: fog scatter's entry and dynamicLightFog's composite without the record maths (non-fatal, the
     // prewarm tables' twins: their KH_FX_LEAN jobs) - absent, the full build or PSEffect's branch.
     const D3D_SHADER_MACRO khes_lean[] = {
@@ -1121,24 +1139,24 @@ inline std::string ensure_effect_shader(ID3D11Device* dev) {
         { "KH_FX_LEAN", "1" },
         { nullptr, nullptr }
     };
-    kh_ps_optional(dev, fx_src, "PSFsSplitS", khes_lean, &g_res.ps_fs_split_lean, "KH effect split shader: ");
-    kh_ps_optional(dev, fx_src, "PSDlfComp", khes_lean, &g_res.ps_dlf_comp, "KH effect split shader: ");
+    kh_ps_optional(dev, fx_src, "PSFsSplitS", khes_lean, &g_res.ps_fs_split_lean, "effect split shader");
+    kh_ps_optional(dev, fx_src, "PSDlfComp", khes_lean, &g_res.ps_dlf_comp, "effect split shader");
     // KH_FX_LEAN_PASS: PSEffect itself without the record code (non-fatal, the prewarm tables' twin).
-    kh_ps_optional(dev, fx_src, "PSEffect", khes_lean, &g_res.ps_effect_lean, "KH effect split shader: ");
+    kh_ps_optional(dev, fx_src, "PSEffect", khes_lean, &g_res.ps_effect_lean, "effect split shader");
     // KH_DLF_SPLIT: the gather's lean build and the texel marker (non-fatal, the prewarm tables' twins; the marker
     // with the system built in alone - only an armed pass draws it). Without the lean build the full gather draws
     // alone; with it and without the marker or its stencil, an unarmed pass draws the lean build, an armed one the
     // full.
-    kh_ps_optional(dev, fx_src, "PSDlfGather", khes_lean, &g_res.ps_dlf_gather_lean, "KH effect split shader: ");
+    kh_ps_optional(dev, fx_src, "PSDlfGather", khes_lean, &g_res.ps_dlf_gather_lean, "effect split shader");
     if constexpr (KH_WSEE_ON) {
-        kh_ps_optional(dev, fx_src, "PSDlfClass", defines, &g_res.ps_dlf_class, "KH effect split shader: ");
+        kh_ps_optional(dev, fx_src, "PSDlfClass", defines, &g_res.ps_dlf_class, "effect split shader");
     }
     // KH_WSEE: the run's agreement mask (kh_wsee_agree_draw; non-fatal, the prewarm tables' twin) - multisampled
     // only, as the capture is (kh_wsee_ensure); not made with the system built out (no pass is armed). Absent, no
     // mask is drawn and the armed passes test inline.
     if constexpr (KH_WSEE_ON) {
         if (g_res.depth_sample_count > 1) {
-            kh_ps_optional(dev, fx_src, "PSWseeAgree", defines, &g_res.ps_wsee_agree, "KH world see-through: ");
+            kh_ps_optional(dev, fx_src, "PSWseeAgree", defines, &g_res.ps_wsee_agree, "world see-through");
         }
     }
     g_res.ps_effect_samples = g_res.depth_sample_count;
@@ -1233,7 +1251,7 @@ inline std::string ensure_composite_shader(ID3D11Device* dev) {
     ID3DBlob* ps_blob = nullptr;
     auto comp_fail = [&](const std::string& e) {
         g_comp_last_err = e;
-        if (g_comp_fail_streak == 0) report_error_once_safe("KH composite shader: " + e);
+        if (g_comp_fail_streak == 0) report_error_once_safe("KH RenderIntegration: composite shader: " + e);
         g_comp_fail_streak++;
         g_comp_next_retry = now_bo + 2.0f;
         return e;
@@ -1287,10 +1305,10 @@ inline std::string ensure_composite_shader(ID3D11Device* dev) {
                 KH_SAFE_RELEASE(g_res.vs_comp_tex);
                 KH_SAFE_RELEASE(g_res.ps_comp_tex);
                 KH_SAFE_RELEASE(g_res.ps_comp_arb_tex);
-                report_error_once_safe("KH textured composite: create " + hr_str(khtx_hr));
+                report_error_once_safe("KH RenderIntegration: textured composite: create " + hr_str(khtx_hr));
             }
         } else {
-            report_error_once_safe("KH textured composite: " + khtx_err);
+            report_error_once_safe("KH RenderIntegration: textured composite: " + khtx_err);
         }
 
         if (khtx_vsb) khtx_vsb->Release();
@@ -1309,7 +1327,7 @@ inline std::string ensure_composite_shader(ID3D11Device* dev) {
             khin_b->Release();
             khin_b = nullptr;
         } else if (!khin_err.empty()) {
-            report_error_once_safe("KH instanced composite: " + khin_err);
+            report_error_once_safe("KH RenderIntegration: instanced composite: " + khin_err);
         }
 
         khin_err = compile_shader(comp_src.c_str(), "VSCompositeInst", "vs_5_0", khtx_defines, &khin_b);
@@ -1318,7 +1336,7 @@ inline std::string ensure_composite_shader(ID3D11Device* dev) {
                 KH_SAFE_RELEASE(g_res.vs_comp_inst_tex);
             khin_b->Release();
         } else if (!khin_err.empty()) {
-            report_error_once_safe("KH instanced composite (textured): " + khin_err);
+            report_error_once_safe("KH RenderIntegration: instanced composite (textured): " + khin_err);
         }
     }
     // KH_SKIN_POOL: VSCompositeInstSk, plain and textured (non-fatal: a missing one keeps skeletal bindings out of
@@ -1336,8 +1354,8 @@ inline std::string ensure_composite_shader(ID3D11Device* dev) {
                     *khck_out[khck_i] = nullptr;
                 }
             } else if (!khck_err.empty()) {
-                report_error_once_safe("KH skin pool: twin VSCompositeInstSk - skeletal meshes draw one by one: " +
-                                       khck_err);
+                report_error_once_safe("KH RenderIntegration: skin pool: twin VSCompositeInstSk - skeletal meshes "
+                                       "draw one by one: " + khck_err);
             }
             if (khck_b) khck_b->Release();
         }

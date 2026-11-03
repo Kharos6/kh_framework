@@ -33,6 +33,14 @@ static void STDMETHODCALLTYPE hooked_resolvesubresource(ID3D11DeviceContext* sel
                        g_rtshadow_cycle.load(std::memory_order_relaxed) == g_topo_cycles) {
                 kh_fx_late_gt(self, true);   // KH_FX_LATE: a render-thread resolve after this cycle's flush.
             }
+            // The dynamic-light world pass, on the render thread once a cycle (a second resolve would multiply twice
+            // and darken the frame): the cycle's first resolve, ahead of the view model, so the world multiply does
+            // not reach the hands and weapon - and ahead of the flush below, so the flush's late draws and chain take
+            // this cycle's pass. KH_EA_DLS_ONE: one latch site (the flush branch carried a second copy).
+            if (reorder_on_render_thread() && !g_ro.in_injection && g_dls_world_cycle != g_topo_cycles) {
+                g_dls_world_cycle = g_topo_cycles;
+                kh_dls_world_pass(self);
+            }
             // The flush, on the render thread, once a cycle and never inside our injection - and only while the game
             // thread has work, the park's own condition (flush_frame returns before it on an empty draw list), so an
             // empty list runs no housekeeping or GC.
@@ -43,30 +51,13 @@ static void STDMETHODCALLTYPE hooked_resolvesubresource(ID3D11DeviceContext* sel
                 ID3D11Device* khsh_dev = RVExtBridge::get_d3d_device();
                 if (khsh_dev) {
                     // in_injection is raised as the world pass raises it, so the flush's draws are not counted as
-                    // engine draws. The dynamic-light world pass runs before the flush, so the flush's late draws and
-                    // chain take this cycle's pass; its cycle guard makes the later call a no-op.
-                    if (g_dls_world_cycle != g_topo_cycles) {
-                        g_dls_world_cycle = g_topo_cycles;
-                        kh_dls_world_pass(self);
-                    }
+                    // engine draws.
                     const bool khsh_prev = g_ro.in_injection;
                     g_ro.in_injection = true;
                     flush_locked(khsh_dev, self, true);
                     g_ro.in_injection = khsh_prev;
                 }
             }
-        }
-    }
-    if (src && g_topo_scene_tex_id &&
-        static_cast<void*>(src) == g_topo_scene_tex_id &&
-        self == g_reorder_target_ctx.load(std::memory_order_relaxed) &&
-        !g_ro.in_injection && reorder_on_render_thread()) {
-        if (g_dls_world_cycle != g_topo_cycles) {
-            // Once per cycle: a second resolve would multiply twice and darken the frame. This latch fires on the
-            // cycle's first resolve, ahead of the view model, so the world dynamic-light multiply does not reach the
-            // hands and weapon.
-            g_dls_world_cycle = g_topo_cycles;
-            kh_dls_world_pass(self);
         }
     }
 
@@ -81,43 +72,18 @@ static void STDMETHODCALLTYPE hooked_pssetshaderresources(ID3D11DeviceContext* s
         reorder_on_render_thread() &&
         !g_ro.in_injection && g_ls.atlas_tex && srvs) {
         // The engine binds the shadow atlas at t15 (from its own resolve shader) - inspect only that slot.
+        // KH_EA_ATLAS_T15: the view's resource is read on every such bind (a view pointer alone is no identity: a
+        // released view's address can be reused), so the verdict is that one compare - no view cache in front of it.
         if (start <= 15 && start + n > 15) {
             ID3D11ShaderResourceView* srv = srvs[15 - start];
 
             if (srv) {
-                int known_at = -1;
+                ID3D11Resource* res = nullptr;
+                srv->GetResource(&res);
 
-                for (uint32_t i = 0; i < g_atlas_srv_count; ++i) {
-                    if (g_atlas_srv_cache[i] == srv) { known_at = static_cast<int>(i); break; }
-                }
-
-                if (known_at >= 0) {
-                    ID3D11Resource* kres = nullptr;
-                    srv->GetResource(&kres);
-
-                    if (kres == static_cast<ID3D11Resource*>(g_ls.atlas_tex)) {
-                        g_mask.atlas_bound = true;
-                    } else {
-                        g_atlas_srv_cache[known_at] =
-                            g_atlas_srv_cache[--g_atlas_srv_count];
-                    }
-
-                    if (kres) kres->Release();
-                } else {
-                    ID3D11Resource* res = nullptr;
-                    srv->GetResource(&res);
-
-                    if (res) {
-                        if (res == static_cast<ID3D11Resource*>(g_ls.atlas_tex)) {
-                            g_mask.atlas_bound = true;
-
-                            if (g_atlas_srv_count < 8) {
-                                g_atlas_srv_cache[g_atlas_srv_count++] = srv;
-                            }
-                        }
-
-                        res->Release();
-                    }
+                if (res) {
+                    if (res == static_cast<ID3D11Resource*>(g_ls.atlas_tex)) g_mask.atlas_bound = true;
+                    res->Release();
                 }
             }
         }
@@ -566,7 +532,7 @@ static void STDMETHODCALLTYPE hooked_clear_depthstencil(ID3D11DeviceContext* sel
                 // change does not break, and the reset cost a frame of world cast (flicker). Do NOT clear map validity:
                 // the mask cast fire builds this frame's map itself ahead of its freshness gate (mask_cast_engine's
                 // once-per-frame render_sun_depth), and it has no analytic fallback to take (the AABB slab path is
-                // unreachable). The union's hash already carries the sun; zeroing it only makes the re-fit
+                // gone: KH_EA_SLAB_DEAD). The union's hash already carries the sun; zeroing it only makes the re-fit
                 // unconditional.
                 g_sun_map_hash = 0;
             }
@@ -576,23 +542,8 @@ static void STDMETHODCALLTYPE hooked_clear_depthstencil(ID3D11DeviceContext* sel
             g_sun_map_rendered_frame = false;
             if (g_fire_lock) { g_fire_lock->Release(); g_fire_lock = nullptr; }
             g_fire_lock_valid = false;   // New frame: first fire re-freezes.
-            g_fire_refreeze_pending = false;
             if (g_ls.resolve_seen_since_cast) {
                 g_ls.resolve_seen_since_cast = false;
-            }
-
-            {
-                const float khcp_t = static_cast<float>(effect_time_seconds());
-                if (g_ro.cycle_pv_valid) {
-                    if (!g_cycle_pv_prev_valid ||
-                        memcmp(g_ro.cycle_pv.view, g_cycle_pv_prev,
-                               sizeof(g_cycle_pv_prev)) != 0) {
-                        memcpy(g_cycle_pv_prev, g_ro.cycle_pv.view, sizeof(g_cycle_pv_prev));
-                        g_cycle_pv_prev_valid = true;
-                        g_cycle_pv_t = khcp_t;
-                    }
-                    g_cycle_pv_age_s = (g_cycle_pv_t >= 0.0f) ? khcp_t - g_cycle_pv_t : -1.0f;
-                }
             }
 
             // Learn unconditionally from the frame's own final count.
@@ -655,7 +606,7 @@ inline void kh_reorder_hook_fail_round(const char* khrr_what) {
     }
 
     g_reorder_hook_failed = true;
-    report_error(std::string("KH RenderIntegration: ") + khrr_what + " (phase "
+    report_error(std::string("KH RenderIntegration: context hooks: ") + khrr_what + " (phase "
                  + std::to_string(g_reorder_hook_fail_phase) + ", spec "
                  + std::to_string(g_reorder_hook_fail_slot) + ", MH status "
                  + std::to_string(g_reorder_hook_mh_status) + ", attempt "
@@ -669,9 +620,10 @@ inline void ensure_reorder_hook() {
     if (ctx && g_reorder_hook_active.load(std::memory_order_acquire) &&
         g_reorder_hook_vt && *reinterpret_cast<void***>(ctx) != g_reorder_hook_vt) {
         if (g_reorder_hook_vt_drift++ == 0) {
-            report_error("KH RenderIntegration: context vtable changed under installed hooks; "
-                         "composited draws miss the hooks if it points at other code "
-                         "(reported once per process)");
+            // KH_EA_ERR_CLASS: another overlay re-hooked the context - a warning (game thread: a plain log line).
+            sqf::diag_log("KH RenderIntegration: context hooks: context vtable changed under installed hooks; "
+                          "composited draws miss the hooks if it points at other code "
+                          "(reported once per process)");
         }
     }
     if (g_reorder_hook_active.load(std::memory_order_acquire) || g_reorder_hook_failed) return;
@@ -744,7 +696,13 @@ inline void ensure_reorder_hook() {
     }
 
     g_reorder_hook_mh_status = static_cast<int32_t>(khh_st);
-    for (size_t i = 0; i < created; ++i) MH_RemoveHook(vt[specs[i].slot]);
+    // KH_EA_HOOK_ORIG_NULL: MH_CreateHook stored each created hook's trampoline in its g_orig_* and MH_RemoveHook frees
+    // it - nulled with it, as kh_rp_extra_hooks does, so the direct callers' null tests (the skin / user-VS SO draws'
+    // g_orig_draw, KH_WSEE's g_orig_resolvesubresource) take the plain call instead of a freed trampoline.
+    for (size_t i = 0; i < created; ++i) {
+        MH_RemoveHook(vt[specs[i].slot]);
+        *specs[i].original = nullptr;
+    }
     kh_reorder_hook_fail_round("draw hook install failed");
 }
 
@@ -923,9 +881,6 @@ inline bool kh_fx_frame_template(ConstantData& khf_cbf, const RVExtBridge::Proje
                 khf_cbf.fog_uw_grad[0] = g_sky_probe.nb[68];
                 khf_cbf.fog_uw_grad[1] = g_sky_probe.nb[69];
                 khf_cbf.fog_uw_grad[2] = g_sky_probe.nb[70];
-                g_fog_uw_col[0] = khf_cbf.fog_uw[0];
-                g_fog_uw_col[1] = khf_cbf.fog_uw[1];
-                g_fog_uw_col[2] = khf_cbf.fog_uw[2];
             }
 
             // Twin at the injection fill and in kh_dlsw_fog_lanes (KH_DLSW_FOG_FILL). Camera altitude (engine Y-up),

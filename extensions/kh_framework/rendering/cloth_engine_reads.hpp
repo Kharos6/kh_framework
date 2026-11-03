@@ -68,7 +68,8 @@ inline void kh_cloth_ground_prepare() {
             }
         }
     } catch (...) {
-        report_error_once_safe("KH cloth ground: the terrain height query failed - cloth does not land on the terrain this mission");
+        report_error_once_safe("KH RenderIntegration: cloth ground: the terrain height query failed - cloth does not "
+                               "land on the terrain this mission");
         return;
     }
     // A class decides when every cell asked agreed. One with no cell to ask (flat country) takes the decided classes'
@@ -94,7 +95,7 @@ inline void kh_cloth_ground_prepare() {
         g_ground_split[khgp_k] = static_cast<uint8_t>(d);
     }
     if (khgp_smooth) {   // Information, not a fault (game thread: a plain log line, once per matrix).
-        sqf::diag_log("KH cloth ground: the terrain's triangle split was not recognised (grid " +
+        sqf::diag_log("KH RenderIntegration: cloth ground: the terrain's triangle split was not recognised (grid " +
                       std::to_string(khgp_c) + " m) - cloth lands, and meshes are clipped, on a smooth "
                       "fit of the terrain, which departs from it on uneven ground");
     }

@@ -42,9 +42,7 @@ inline void kh_session_scratch_reset() {
     g_fire_count_frame = 0;
     g_fire_clamp_painted = 0;
     g_svs_post_made = 0;
-    g_sun_band_reach[0] = g_sun_band_reach[1] = g_sun_band_reach[2] = -1.0f;
-    g_sun_band_reach[3] = -1.0f;   // Far band.
-    g_sun5_renders = 0; g_sun5_casters = 0;   // (validity clears at the pass gates).
+    g_sun5_renders = 0;   // (validity clears at the pass gates).
     g_topo_cycles = 0;
     g_topo_cycles_pub.store(0, std::memory_order_relaxed);
     // A cycle-stamped latch restarts with the counter above: a stamp left by the previous session matches once,
@@ -68,7 +66,7 @@ inline void kh_session_scratch_reset() {
     g_rp_pass_vol = g_rp_pass_mir = false;
     g_rp_rast_on = false;   // KH_REPLAY_RASTER.
     g_vmir_want_cycle = ~0ull;   // KH_MIR_GATE: a cycle stamp.
-    g_nzm_cycle = ~0ull;   // KH_NEARZ_MARK: likewise.
+    g_nzm_cycle.store(~0ull, std::memory_order_relaxed);   // KH_NEARZ_MARK: likewise.
     g_vmsee_want_cycle = ~0ull;   // KH_VM_SEE: likewise.
     g_vmsee_snap_cycle = ~0ull;
     g_vmsee_ok_cycle.store(~0ull, std::memory_order_relaxed);
@@ -247,11 +245,12 @@ inline void kh_rp_globals_reset() {
 // believed only inside a pass's scope, forgotten at both its ends); the upload scratch (written before every read);
 // the hook install's constant-buffer reuse verdict (g_rp_cbreuse_on: set where the hooks are installed, as the
 // install records); KH_VM_SEE's re-issue saves (g_vmsee_sv_*: null outside one draw's kh_vmsee_t_begin / _end pair)
-// and KH_WSEE's (g_wsee_sv_*: likewise, its kh_wsee_re_save / _restore pairs); the KH_PSV blob store, its books and
+// and KH_WSEE's (g_wsee_sv_*: likewise, its kh_wsee_re_save / _restore pairs; g_wsee_pd_vp / _vpn: read only under
+// g_wsee_pd_vp_ok, which the scratch reset clears); the KH_PSV blob store, its books and
 // serial (g_psv_store, g_psv_books, g_psv_ser: the engine's shaders outlive every mission - each blob goes at its
 // shader's release, KH_PSV_TOMB); g_ui_frame_rtv (kh_ui_mask_reset, below, releases it). Runs first in
-// reset_session_state, after every device object is released, so no COM pointer is dropped unreleased; the
-// hand-written resets below it still decide the values they set.
+// reset_session_state, after every device object is released, so no COM pointer is dropped unreleased; the calls
+// after it there (stats, scratch, UI mask, in-front frame, error dedupe, PIP, sun ring, dynamic lights) set the rest.
 inline void kh_session_globals_reset() {
     kh_rp_globals_reset();   // KH_VOL_REPLAY and its companions.
     g_stats_armed.store(false, std::memory_order_relaxed);
@@ -319,9 +318,6 @@ inline void kh_session_globals_reset() {
     g_flush_landed_this_frame = false;
     g_scene_vp_min_d = 0.011f;
     g_scene_vp_max_d = 0.999f;
-    g_cb_mirror_obj_b = 0;
-    g_cb_mirror_frame_b = 0;
-    g_cb_mirror_bad = false;
     g_cbr_supported = false;
     g_kh_ctx1_null_first = false;
     g_cb_offsetting = false;
@@ -515,7 +511,6 @@ inline void kh_session_globals_reset() {
     g_cam_step_m = -1.0f;
     g_boundary_pv_valid = false;
     g_boundary_t = -1.0f;
-    { const float khsg_v[3] = { -1.0f, -1.0f, -1.0f }; memcpy(g_fog_uw_col, khsg_v, sizeof(g_fog_uw_col)); }
     kh_reinit(g_proj_locator);
     kh_reinit(g_proj_pending);
     g_proj_last_m32 = 0.0f;
@@ -621,7 +616,6 @@ inline void kh_session_globals_reset() {
     g_sun_mat_chash = 0;
     kh_reinit(g_sun_mat_sun);
     g_sun_map_time = -1.0f;
-    g_sun_map_no_local = false;
     kh_reinit(g_sun_map_vp);
     kh_reinit(g_sun_anchor_now);
     kh_reinit(g_sun_cam_now);   // KH_DLS_LOD_CAM.
@@ -639,35 +633,30 @@ inline void kh_session_globals_reset() {
     g_sun2_half_diag = 0.0f;
     g_sun2_map_valid = false;
     g_sun2_renders = 0;
-    g_sun2_casters = 0;
     kh_reinit(g_sun3_map_vp);
     g_sun3_map_bias = 0.0f;
     g_sun3_cast_bias = 0.0f;
     g_sun3_half_diag = 0.0f;
     g_sun3_map_valid = false;
     g_sun3_renders = 0;
-    g_sun3_casters = 0;
     kh_reinit(g_sun4_map_vp);
     g_sun4_map_bias = 0.0f;
     g_sun4_cast_bias = 0.0f;
     g_sun4_half_diag = 0.0f;
     g_sun4_map_valid = false;
     g_sun4_renders = 0;
-    g_sun4_casters = 0;
     kh_reinit(g_sun5_map_vp);
     g_sun5_map_bias = 0.0f;
     g_sun5_cast_bias = 0.0f;
     g_sun5_half_diag = 0.0f;
     g_sun5_map_valid = false;
     g_sun5_renders = 0;
-    g_sun5_casters = 0;
     { const bool khsg_v[4] = { false, false, false, false }; memcpy(g_sun_pf_valid, khsg_v, sizeof(g_sun_pf_valid)); }
     { const bool khsg_v[4] = { false, false, false, false }; memcpy(g_sun_pf_fresh, khsg_v, sizeof(g_sun_pf_fresh)); }
     { const bool khsg_v[4] = { false, false, false, false }; memcpy(g_sun_pf_held, khsg_v, sizeof(g_sun_pf_held)); }
     { const uint64_t khsg_v[4] = { 0, 0, 0, 0 }; memcpy(g_sun_tier_key, khsg_v, sizeof(g_sun_tier_key)); }
     { const bool khsg_v[4] = { false, false, false, false }; memcpy(g_sun_tier_key_ok, khsg_v, sizeof(g_sun_tier_key_ok)); }
     g_sun_pf_done = ~0ull;
-    { const float khsg_v[4] = { -1.0f, -1.0f, -1.0f, -1.0f }; memcpy(g_sun_band_reach, khsg_v, sizeof(g_sun_band_reach)); }
     { const float khsg_v[4] = { -1.0f, -1.0f, -1.0f, -1.0f }; memcpy(g_sun_fwd_held, khsg_v, sizeof(g_sun_fwd_held)); }
     g_sun_union_rad_held = -1.0f;
     g_sun_union_lat_held = -1.0f;
@@ -688,10 +677,6 @@ inline void kh_session_globals_reset() {
     g_cascbind_feed_t = -1.0f;
     g_fire_clamp_target = 1;
     g_fire_clamp_painted = 0;
-    kh_reinit(g_cycle_pv_prev);
-    g_cycle_pv_prev_valid = false;
-    g_cycle_pv_t = -1.0f;
-    g_cycle_pv_age_s = -1.0f;
     g_fire_mask_srv_now = false;
     g_view_drop_path = 0;
     g_view_drop_bar = -1.0f;
@@ -701,8 +686,6 @@ inline void kh_session_globals_reset() {
     g_band_fall_flush = ~0ull;
     g_recv_health_ok = false;
     g_recv_health_since_ms = 0;
-    kh_reinit(g_fire_refreeze_view);
-    g_fire_refreeze_pending = false;
     kh_reinit(g_fire_cast_inv);
     g_fire_cast_inv_valid = false;
     kh_reinit(g_sun_locals);
@@ -722,9 +705,6 @@ inline void kh_session_globals_reset() {
     kh_reinit(g_dl);
     g_dl_harvest_cycle = ~0ull;
     g_dl_harvest_flush_last = false;
-    kh_reinit(g_dl_cd_bufs);
-    kh_reinit(g_dl_cd_first);
-    g_dl_cd_n = 0;
     kh_reinit(g_dl_phix);   // KH_DL_PRES_HIX: the pool's height index (with g_dl, above).
     kh_reinit(g_dls);
     g_dls_n = 0;
@@ -741,8 +721,6 @@ inline void kh_session_globals_reset() {
     g_ao_strength_bits.store(0x3F800000u, std::memory_order_relaxed);
     g_ao_dist_bits.store(0x3F000000u, std::memory_order_relaxed);
     kh_reinit(g_sr);
-    kh_reinit(g_atlas_srv_cache);
-    g_atlas_srv_count = 0;
     kh_reinit(g_cascbind);
     g_cascharv_ctr = 0;
     kh_reinit(g_mask);
@@ -1023,163 +1001,26 @@ inline void kh_session_objects_reset() {
 // those first, under the graphics lock); this resets what those don't. Must run with the render thread parked:
 // g_ro, the mask/live structs and the hoisted memories are render-thread state.
 inline void reset_session_state() {
-    kh_session_globals_reset();   // KH_SESSION_RESET: everything to its declared start; the lines below refine it.
+    kh_session_globals_reset();   // KH_SESSION_RESET: everything to its declared start; the calls below add the rest.
     reset_stat_counters();
     kh_session_scratch_reset();
     kh_ui_mask_reset();   // Learned backbuffers, phase machine, demand flag.
-    g_kh_track_wanted.store(false, std::memory_order_relaxed);   // Recomputes at the next flush.
-    g_infront_wanted.store(false, std::memory_order_relaxed);   // KH_INFRONT: likewise.
-    g_vm_watch_wanted.store(false, std::memory_order_relaxed);   // KH_SHOW_INFRONT.
     kh_infront_frame_reset();
-    g_vm_keep_ms = 0;
-    g_vm_meshes.clear();
-    g_ao_strength_bits.store(0x3F800000u, std::memory_order_relaxed);   // KH_SSAO: on, 1.0.
-    g_ao_dist_bits.store(0x3F000000u, std::memory_order_relaxed);       // Radius 0.5 m.
 
     {   // Error dedupe the session (a fresh session re-reports).
         std::lock_guard<std::mutex> g(g_err_once_mutex);
         g_err_once.clear();
         g_err_once_capped = false;   // KH_ERR_ONCE_CAP.
     }
+    {   // KH_EA_LOG_ONCE: the warnings' dedupe, likewise.
+        std::lock_guard<std::mutex> g(g_kh_log_once_mx);
+        g_kh_log_once.clear();
+        g_kh_log_once_capped = false;
+    }
 
-    g_sun_union_rad_held = -1.0f;
-    g_sun_union_lat_held = -1.0f;
-    for (int khfl_i = 0; khfl_i < 4; ++khfl_i) g_sun_fwd_held[khfl_i] = -1.0f;
-      g_ls.wipe_deferred = false;
-    // Cleared here, re-armed by the first stage_video_options.
-    g_obj_vis.store(0.0f, std::memory_order_relaxed);
-    g_video_opt_ms = 0;   // KH_VIDEO_OPT_CADENCE: the next poll is immediate.
-    g_dl_cell.store(0.0f, std::memory_order_relaxed);   // KH_DL_ORIGIN_GRID.
-    g_dl_q_cells = 0;
-     g_cascbind_feed_t = -1.0f;
-
-    // The view-lock count, the lock-settle stamp and the readiness latches are session-scoped (both teardown paths).
-      g_ls.view_locks = 0;
-    g_lock_churn_ms_v = 0;   // lock-settle: a fresh session starts unheld.
-    g_cast_ready = false;   // Readiness latch: a fresh session re-dwells.
-    g_cast_ready_since_ms = 0;
-    g_recv_health_ok = false; g_recv_health_since_ms = 0;
-
-    g_ls.pub_rej_streak = 0; g_ls.view_src_miss = 0;
-    g_ls.last_publish_rot_err = 1.0f;
-    g_ls.pub_exact_ms = 0;
-    g_ls.pub_fresh_ms = 0;
-
-    g_ls.cam[0] = g_ls.cam[1] = g_ls.cam[2] = 0.0f;
-    g_ls.stamp_counter = 0;
-    // Published / staged lighting.
-    g_sun_valid = false;
-    g_sun_dir_engine[0] = 0.0f; g_sun_dir_engine[1] = 1.0f; g_sun_dir_engine[2] = 0.0f;
-    g_blko_draws = 0; g_blko_n = 0; g_blko_open = false; g_blko_open_i = -1;   // KH_LIGHT_BASE.
-    g_sraw_cyc_n = 0;
-    g_sraw_last_sample_ms = 0;
-    g_sraw_last_src = 0; g_sraw_pub_gap_deg = -1.0f; g_sraw_sky_gap_deg = -1.0f;
     kh_pip_reset();   // KH_PIP.
-    g_sraw_sky_prev_valid = false; g_sraw_sky_step_deg = -1.0f; g_sraw_sky_prev[0] = g_sraw_sky_prev[1] = g_sraw_sky_prev[2] = 0.0f;
-    g_sraw_hold_until_ms = 0; g_sraw_cons_moved_ms = 0; g_sraw_unsettled_ms = 0; kh_sraw_ring_reset();   // KH_SRAW_SETTLE.
-    g_sun_jump_pending = false;
-    g_skysun_ref_valid = false;
-    g_skysun_ref[0] = g_skysun_ref[1] = g_skysun_ref[2] = 0.0f;
-    g_skysun_ref_ms = 0;
-    g_skysun_mot_ref_ms = 0; g_skysun_mot_deg = -1.0f;
-    g_pub_valid = false;
-    g_pub_dir[0] = g_pub_dir[1] = g_pub_dir[2] = 0.0f;
-    g_fog_staged_valid = false; g_fog_valid = false;
-
-    for (int k = 0; k < 3; ++k) { g_fog[k] = 0.0f; g_fog_staged[k] = 0.0f; }
-
-    g_pub_first = -1.0f;
-    g_pub_block_valid = false;
-    g_pub_block_amb[0] = g_pub_block_amb[1] = g_pub_block_amb[2] = 0.0f;
-    g_pub_block_sun[0] = g_pub_block_sun[1] = g_pub_block_sun[2] = 0.0f;
-    g_blko_gen_valid = false;   // KH_DLSW_GEN_AMB: goes with the publish.
-    g_blko_gen_amb[0] = g_blko_gen_amb[1] = g_blko_gen_amb[2] = 0.0f;
-    g_blko_gen_sun[0] = g_blko_gen_sun[1] = g_blko_gen_sun[2] = 0.0f;
-    g_lite_cand_n = 0; g_lite_cand_sl = 0.0f; g_lite_cand_al = 0.0f;   // KH_LIT_EVIDENCE.
-    g_prewarm_cand_res = nullptr; g_prewarm_cand_off = 0;
-    g_coldlock_cand_res = nullptr; g_coldlock_cand_off = 0;
-    g_last_pv_ms = 0;
-    g_cc_flush_opaques.store(0xFFFFFFFFu, std::memory_order_relaxed);
-    g_slot_keep_m22 = 0.0f; g_slot_keep_m32 = 0.0f;
-    g_slot_keep_near = -1.0f; g_slot_keep_ms = 0;
-    g_latch_cam_valid = false;
-    g_latch_cam[0] = g_latch_cam[1] = g_latch_cam[2] = 0.0f;
-    g_reorder_target_ctx.store(nullptr, std::memory_order_relaxed);
-    g_ro = ReorderState{};
-    g_rescue_frame_count = 0;
-    g_atlas_frame_cur = false; g_atlas_frame_prev = false;
-
-    g_dl_intensity_bits.store(0x3F800000u, std::memory_order_relaxed);
+    kh_sraw_ring_reset();   // KH_SRAW_SETTLE.
     dynlights_reset_session();
-
-    g_inj_enc_m22 = 0.0f; g_inj_enc_m32 = 0.0f; g_inj_enc_near = -1.0f; g_inj_enc_ms = 0;
-    g_khpe_p1 = -1.0f; g_khpe_p2 = -1.0f; g_khpe_m22 = 0.0f;
-    g_khpe_ms = 0; g_khpe_upd_ms = 0; g_khpe_skip1 = -1.0f;
-    g_khbl_stable = -1.0f; g_khbl_prev = -1.0f;
-    g_khlt_prev_ok = false; g_khlt_prev_step = 0.0f;
-    g_khlt_lp_ok = false;
-    g_khlt_ref_ok = false;
-
-    g_khfx_pair_near = -1.0f; g_khfx_cand_near = -1.0f; g_khfx_pair_ms = 0;
-    g_khfx_verdict_serial = ~0ull; g_khfx_verdict_held = false; g_khfx_verdict_cycle = ~0ull;   // KH_FX_PAIR_HOLD.
-    g_khfx_in_pair[0] = g_khfx_in_pair[1] = 0.0f;   // KH_FX_PAIR_KEY.
-    g_boundary_pv_valid = false;   // Session teardown: no stale cross-mission sample.
-    g_boundary_t = -1.0f;
-    g_carry_pending_serial.store(0, std::memory_order_relaxed);
-    g_sr = ShadowReconState{};
-    g_reorder_render_tid.store(0, std::memory_order_relaxed);
-    g_watch_clears.store(0, std::memory_order_relaxed);   // KH_WATCH_STALL (and the three below).
-    g_watch_cyc_seen = ~0ull;
-    g_watch_clears_seen = 0;
-    g_watch_still = 0;
-    g_main_depth_w = 0; g_main_depth_h = 0; g_wrong_pass_streak = 0;
-    g_proj_last_m32 = 0.0f;
-    g_mask = ShadowMaskState{};   // Device pointers already nulled by the release.
-    g_proj_locator_ever = false;
-    g_comp_fail_streak = 0; g_comp_next_retry = 0.0f; g_comp_last_err.clear();
-    g_snap_serial = 0; g_snap_ms = 0;
-    g_fx_park_cycle = ~0ull;   // The cycle counter restarts with the session.
-    // KH_FX_LATE: g_topo_cycles restarts with the session, so a stale backoff would otherwise hold the chain on the
-    // scene flush for the whole session.
-    g_fx_late_owed_cycle.store(~0ull, std::memory_order_relaxed);
-    g_fx_late_ran_cycle.store(~0ull, std::memory_order_relaxed);
-    g_fx_late_dry_cycle.store(~0ull, std::memory_order_relaxed);
-    g_fx_late_streak.store(0, std::memory_order_relaxed);
-    g_fx_late_backoff.store(0, std::memory_order_relaxed);
-    g_fx_late_miss_cycle.store(~0ull, std::memory_order_relaxed);
-    g_fx_late_miss_cycle2.store(~0ull, std::memory_order_relaxed);
-    g_flush_miss_seen_serial = 0; g_flush_landed_this_frame = false;   // KH_FLUSH_MISS.
-    g_composite_land_cycle = ~0ull;   // The cycle counter restarts with the session.
-    g_snap_pair_src = 0;
-    g_snap_vp_valid = false;
-    g_thm_data.clear();
-    g_thm_data.shrink_to_fit();
-    g_thm_w = g_thm_h = 0;
-    g_thm_origin[0] = g_thm_origin[1] = 0.0f;
-    g_thm_cell = 0.0f;
-    g_thm_split = KH_THM_SPLIT_SMOOTH;   // KH_THM_EXACT.
-    g_thm_dirty = false;
-    g_thm_valid = false;
-    g_thm_reupload = false;   // KH_THM_DEVRESET.
-    g_voc_thm_max.clear();
-    g_voc_thm_max.shrink_to_fit();
-    g_voc_thm_fine.clear();
-    g_voc_thm_fine.shrink_to_fit();
-    g_voc_thm_w = 0;
-    g_voc_thm_fw = g_voc_thm_fh = 0;
-    g_voc_thm_origin[0] = g_voc_thm_origin[1] = 0.0f;
-    g_voc_thm_cell = 0.0f;
-    g_voc_thm_valid = false;
-    g_thml_origin[0] = g_thml_origin[1] = 0.0f;
-    g_thml_cell = 0.0f;
-    g_thml_split = KH_THM_SPLIT_SMOOTH;   // KH_THM_EXACT.
-    g_thml_w = g_thml_h = 0;
-    g_thm_auto_state = 0;
-    g_thm_auto_cursor = 0;
-    g_thm_auto_retry = 0;
-    g_thmf_dim = 0;
-    g_thmf_cell = 0.0f;
-    g_fog_uw_col[0] = g_fog_uw_col[1] = g_fog_uw_col[2] = -1.0f;
 }
 
 inline void reset_retained_state() {
@@ -1313,7 +1154,6 @@ inline void rendering_integration_reset() {
         reset_stat_counters();
         g_mission_destroy_pending.store(true, std::memory_order_relaxed);
     }
-    g_reorder_target_ctx.store(nullptr, std::memory_order_relaxed);
 }
 
 // Waits up to khts_ms for a joinable thread to exit, terminates it if it has not, then joins it (detaching it if the
@@ -1346,7 +1186,7 @@ inline bool rendering_integration_is_initialized() {
            g_user_batch_own || !g_user_req.empty() ||
            g_khtl_running || !g_khtl_q.empty() || !g_khtl_done.empty() ||
            g_khmw_running || !g_khmw_q.empty() ||
-           !g_cloth_thr.empty() ||
+           !g_cloth_thr.empty() || !g_skin_thr.empty() ||   // KH_POOL_SPLIT: either pool's threads.
            g_mesh_publish_pending.load(std::memory_order_relaxed) ||
            g_mission_destroy_pending.load(std::memory_order_relaxed) ||
            !g_tex_cache.empty() || !g_user_ps_cache.empty() || !g_user_lut_cache.empty() ||

@@ -194,7 +194,6 @@ inline bool render_sun_depth(ID3D11DeviceContext* ctx) {
         g_sun5_map_valid = false;
         return false;
     }
-    g_sun_map_no_local = false;
     if (!ctx) return false;
 
     // The maps render from the live derivation - the axis the engine's own cascades are built from, the reference the
@@ -226,16 +225,11 @@ inline bool render_sun_depth(ID3D11DeviceContext* ctx) {
             const RenderObject& o = g_scene.objs[khsc_i];
             if (!kh_shadow_active(o)) continue;   // KH_SHADOW_ACTIVE.
 
-            if (cam_valid && !kh_sun_admits(o, cam_e, khsr_rad)) {   // KH_SKIN_CULL: the shared admission.
-                g_sun_map_no_local = true;   // Provisional: cleared below if any caster
-                                             // lands in radius.
-                continue;
-            }
+            if (cam_valid && !kh_sun_admits(o, cam_e, khsr_rad)) continue;   // KH_SKIN_CULL: the shared admission.
             casters.push_back(kh_sun_caster_of(o, cam_e));   // KH_SHADOW_LOD_DRAWN.
         }
     }
 
-    if (!casters.empty()) g_sun_map_no_local = false;   // At least one local caster.
     // KH_SHADOW_SWITCH: no caster, no map. A lit receiver with castShadow off is not a caster, so receivers can
     // outlive every caster; left claimed, the maps would keep the last caster's shadow on them. Every claim goes (the
     // next frame with a caster renders afresh).
@@ -245,7 +239,7 @@ inline bool render_sun_depth(ID3D11DeviceContext* ctx) {
     uint64_t input_hash = CryptoGenerator::FNV1A64_OFFSET;
     uint64_t khsh_caster_key = 0;   // KH_SUN_TIER_KEY: the caster hash (+ KH_TEX_LAND), set at the union hash.
     bool     khsh_did[4] = { false, false, false, false };   // KH_SUN_TIER_KEY: tiers that rendered this call.
-    auto khsh_render_cams = [&](bool khsh_standalone) -> void {
+    auto khsh_render_cams = [&]() -> void {
         if (!cam_valid || casters.empty()) {
             g_sun2_map_valid = false;
             g_sun3_map_valid = false;
@@ -307,8 +301,8 @@ inline bool render_sun_depth(ID3D11DeviceContext* ctx) {
             khsh_f[0] * khsh_r3[1] - khsh_f[1] * khsh_r3[0],
         };
 
-        // State envelope: its own on every call (both callers pass standalone - the union's from inside its own
-        // bracket, which this nests in) - one envelope for all bands.
+        // State envelope: its own on every call (the union's call from inside its own bracket, which this nests in;
+        // the hash-skip call alone) - one envelope for all bands.
         StateBackup khsh_bk;
         KhOmSave khsh_om;
         UINT khsh_nvp = D3D11_VIEWPORT_AND_SCISSORRECT_OBJECT_COUNT_PER_PIPELINE;
@@ -318,7 +312,7 @@ inline bool render_sun_depth(ID3D11DeviceContext* ctx) {
         ID3D11Buffer* khsh_ovb1 = nullptr;
         UINT khsh_ovb1_stride = 0, khsh_ovb1_offset = 0;
 
-        if (khsh_standalone) {
+        {
             g_ro.in_injection = true;
             khsh_bk.capture(ctx);
             // VB slot 1 is saved explicitly, as the union pass saves it (StateBackup covers slots 0 and 1 as well),
@@ -347,15 +341,12 @@ inline bool render_sun_depth(ID3D11DeviceContext* ctx) {
         KhBindScope khsh_bc(ctx);   // KH_BIND_FILTER: the tiers' alpha casters (nested in the union's, or alone).
 
         // The hero body, one band per call; outputs land in the band's own statics through the reference parameters.
-        // khsh_out_reach / khsh_out_casters are written only inside the completed-render block, so with valid false
-        // they are stale from the last completing frame.
         auto khsh_one = [&](float khsh_half, float khsh_dep, UINT khsh_size,
                             ID3D11DepthStencilView* khsh_dsv,
                             float (&khsh_out_vp)[4][4], float& khsh_out_bias,
                             float& khsh_out_cbias,   // KH_CAST_BIAS_CAP: the cast chain's own.
                             float& khsh_out_hd, bool& khsh_out_valid,
-                            uint64_t& khsh_out_renders, uint64_t& khsh_out_casters,
-                            float& khsh_out_reach,
+                            uint64_t& khsh_out_renders,
                             int khsh_pf_idx,
                             bool& khsh_out_pf) -> void {
             double khsh_dctr[3] = { 0.0, 0.0, 0.0 };
@@ -365,7 +356,7 @@ inline bool render_sun_depth(ID3D11DeviceContext* ctx) {
             const float khsh_r2 = khsh_half * 1.02f;
             const float khsh_tex = (2.0f * khsh_r2) / static_cast<float>(khsh_size);
             float khsh_ctr[3] = { cam_e[0], cam_e[1], cam_e[2] };
-                        const double khsh_dr3[3] = { khsh_r3[0], khsh_r3[1], khsh_r3[2] };
+            const double khsh_dr3[3] = { khsh_r3[0], khsh_r3[1], khsh_r3[2] };
             const double khsh_du3[3] = { khsh_u3[0], khsh_u3[1], khsh_u3[2] };
             const double khsh_dc[3] = { khsh_ctr[0], khsh_ctr[1], khsh_ctr[2] };
             const double khsh_dtex = static_cast<double>(khsh_tex);
@@ -648,9 +639,6 @@ inline bool render_sun_depth(ID3D11DeviceContext* ctx) {
                     khsh_out_hd = khsh_half;
                     khsh_out_valid = true;
                     khsh_out_renders++;
-                    khsh_out_casters = static_cast<uint64_t>(khsh_set.size());
-                    // Arming lane: the reach this fit actually took.
-                    khsh_out_reach = khsh_fwd;
                     // The band renders here; freshness is all this site marks (the pyramid convert happens where the
                     // maps are bound: kh_sun_pf_convert at the injection's and the flush's proven binds, and in the
                     // PIP and the in-front pass).
@@ -689,8 +677,7 @@ inline bool render_sun_depth(ID3D11DeviceContext* ctx) {
             if (khls_r > khls_cr) khls_cr = khls_r;
         }
 
-        float khls_s = 1.0f;
-        khls_s = khsr_rad / 200.0f;
+        float khls_s = khsr_rad / 200.0f;
         if (khls_s < 1.0f) khls_s = 1.0f;
         if (khls_s > 5.0f) khls_s = 5.0f;
         // The ensures above guarantee each texture is the wanted size; record it as the rendered size for the CB fills.
@@ -702,7 +689,7 @@ inline bool render_sun_depth(ID3D11DeviceContext* ctx) {
                                g_res.sun2_dsv, g_sun2_map_vp, g_sun2_map_bias,
                                g_sun2_cast_bias,
                                g_sun2_half_diag, g_sun2_map_valid,
-                               g_sun2_renders, g_sun2_casters, g_sun_band_reach[0],
+                               g_sun2_renders,
                                0,
                                g_sun_pf_valid[0]);
         if (khsh_ok1) khsh_one(KH_SUN_MID_HALF * khls_s, KH_SUN_MID_DEPTH * khls_s,
@@ -710,7 +697,7 @@ inline bool render_sun_depth(ID3D11DeviceContext* ctx) {
                                g_res.sun3_dsv, g_sun3_map_vp, g_sun3_map_bias,
                                g_sun3_cast_bias,
                                g_sun3_half_diag, g_sun3_map_valid,
-                               g_sun3_renders, g_sun3_casters, g_sun_band_reach[1],
+                               g_sun3_renders,
                                1,
                                g_sun_pf_valid[1]);
         if (khsh_ok2) khsh_one(KH_SUN_OUT_HALF * khls_s, KH_SUN_OUT_DEPTH * khls_s,
@@ -718,7 +705,7 @@ inline bool render_sun_depth(ID3D11DeviceContext* ctx) {
                                g_res.sun4_dsv, g_sun4_map_vp, g_sun4_map_bias,
                                g_sun4_cast_bias,
                                g_sun4_half_diag, g_sun4_map_valid,
-                               g_sun4_renders, g_sun4_casters, g_sun_band_reach[2],
+                               g_sun4_renders,
                                2,
                                g_sun_pf_valid[2]);
         // The far tier converts a moment pyramid like the camera tiers (sparse taps shimmer under a moving sun).
@@ -732,7 +719,7 @@ inline bool render_sun_depth(ID3D11DeviceContext* ctx) {
                                g_res.sun5_dsv, g_sun5_map_vp, g_sun5_map_bias,
                                g_sun5_cast_bias,
                                g_sun5_half_diag, g_sun5_map_valid,
-                               g_sun5_renders, g_sun5_casters, g_sun_band_reach[3],
+                               g_sun5_renders,
                                3,
                                g_sun_pf_valid[3]);
         // The anchor a tier's stored vp is relative to is the one it RENDERED
@@ -742,7 +729,7 @@ inline bool render_sun_depth(ID3D11DeviceContext* ctx) {
         if (khsh_ok2 && khsh_did[2]) memcpy(g_sun_tier_anchor[2], g_sun_anchor_now, sizeof(g_sun_anchor_now));
         if (khsh_ok3 && khsh_did[3]) memcpy(g_sun_tier_anchor[3], g_sun_anchor_now, sizeof(g_sun_anchor_now));
 
-        if (khsh_standalone) {
+        {
             khsh_om.restore(ctx);
             if (khsh_nvp > 0) ctx->RSSetViewports(khsh_nvp, khsh_ovp);
             ctx->IASetVertexBuffers(1, 1, &khsh_ovb1, &khsh_ovb1_stride, &khsh_ovb1_offset);
@@ -811,7 +798,7 @@ inline bool render_sun_depth(ID3D11DeviceContext* ctx) {
         // ensure_resources releases on its own failure paths.
         if (g_sun_map_valid && input_hash == g_sun_map_hash) {
             g_sun_map_time = effect_time_seconds();
-            khsh_render_cams(true);   // Camera bands render every call.
+            khsh_render_cams();   // Camera bands render every call.
             return true;
         }
     }
@@ -819,7 +806,7 @@ inline bool render_sun_depth(ID3D11DeviceContext* ctx) {
     ID3D11Device* dev = nullptr;
     ctx->GetDevice(&dev);
     if (!dev) return false;
-    const bool res_ok = kh_ensure_ok("sun-depth resources", ensure_resources(dev)) && ensure_sun_depth(dev);
+    const bool res_ok = kh_ensure_ok("sun shadow: sun-depth resources", ensure_resources(dev)) && ensure_sun_depth(dev);
     bool instanced = res_ok && g_res.vs_sundepth && g_res.layout_sundepth && g_res.obj_srv;   // KH_OBJBUF.
 
     // KH_SUN_INST_CAP: one 16-byte KhInstLane per caster (centre, extents and rotation live in the record buffer the
@@ -864,9 +851,9 @@ inline bool render_sun_depth(ID3D11DeviceContext* ctx) {
         ctr[0] = floorf(cam_e[0] * 0.5f) * 2.0f + 1.0f;
         ctr[1] = floorf(cam_e[1] * 0.5f) * 2.0f + 1.0f;
         ctr[2] = floorf(cam_e[2] * 0.5f) * 2.0f + 1.0f;
-        const float khsu_rng = fminf(fmaxf(
-            g_sun_range.load(std::memory_order_relaxed), 8.0f), 1000.0f);
-        hf[0] = hf[1] = hf[2] = khsu_rng / 1.7320508f;
+        // KH_EA_SUN_RNG_ONE: the call's one clamped range (khsr_rad), never a second read of the atomic - a game-thread
+        // store between the reads would fit the union to one range and admit / cull its casters by another.
+        hf[0] = hf[1] = hf[2] = khsr_rad / 1.7320508f;
         constexpr float KH_SUN_GROW_CAP = 3500.0f;   // enclosing-radius ceiling (~7 km span).
         const float khsg_h = KH_SUN_GROW_CAP / 1.7320508f;
 
@@ -923,8 +910,7 @@ inline bool render_sun_depth(ID3D11DeviceContext* ctx) {
     };
 
     if (g_sun_map_cam_anchor) {
-        const float khsl_rng = fminf(fmaxf(
-            g_sun_range.load(std::memory_order_relaxed), 8.0f), 1000.0f);
+        const float khsl_rng = khsr_rad;   // KH_EA_SUN_RNG_ONE.
         // Camera window term: its cell centre's lateral offset from the committed centre, plus the range.
         const float khsl_cc[3] = {
             floorf(cam_e[0] * 0.5f) * 2.0f + 1.0f,
@@ -1194,7 +1180,7 @@ inline bool render_sun_depth(ID3D11DeviceContext* ctx) {
     // failed map) - the same map, never an empty one committed as valid.
     if (!khsd_inst_drawn && khsd_frame_ok) khsd_drawn = kh_sun_draw_obj_t(ctx, casters, g_sun_anchor_now);
 
-    khsh_render_cams(true);
+    khsh_render_cams();
 
     khsd_om.restore(ctx);
     if (old_nvp > 0) ctx->RSSetViewports(old_nvp, old_vps);

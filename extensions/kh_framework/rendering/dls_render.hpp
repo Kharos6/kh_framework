@@ -45,7 +45,13 @@ static float    g_dls_mapfar[KH_DLS_MAX] = {};      // The far plane its matrice
 // Grow the depth array to hold khde_want slices. Recreated on growth (a Texture2DArray cannot be extended), so the
 // count only climbs. The old array goes before the new one is made, so a create refused on a card with little VRAM
 // (48 slices = 192 MB) leaves no DLS maps until one succeeds. KH_DLS_SLICES_MAX is declared in
-// rendering/dynamic_light_state.hpp, ahead of Resources, before KH_DLS_MAX exists; nothing checks they agree.
+// rendering/dynamic_light_state.hpp, ahead of Resources, before KH_DLS_MAX exists; KH_EA_DLS_SHAPE checks they agree,
+// with the slot bitmask (g_dls_map_valid) and the frame CB's per-face lanes.
+static_assert(KH_DLS_SLICES_MAX == static_cast<int>(KH_DLS_MAX) * KH_DLS_FACES && KH_DLS_MAX <= 64u &&
+              sizeof(ConstantData::dls_face_slice) ==
+                  sizeof(float) * 4u * KH_DLS_MAX * static_cast<size_t>(KH_DLS_FACES) &&
+              sizeof(ConstantData::dls_meta) == sizeof(float) * 4u * KH_DLS_MAX,
+              "KH_EA_DLS_SHAPE: the slice budget, the slot mask and the frame CB's DLS lanes disagree");
 
 inline bool kh_dls_ensure_maps(ID3D11Device* khde_dev, UINT khde_want) {
     if (!khde_dev || khde_want == 0) return false;
@@ -111,13 +117,15 @@ inline bool kh_dls_ensure_maps(ID3D11Device* khde_dev, UINT khde_want) {
 static constexpr float KH_DLS_BIAS_M = 0.01f;      // Constant compare bias (m).
 static constexpr float KH_DLS_BIAS_SLOPE = 0.0001f;   // Plus this per metre of range.
 // D3D11 silently unbinds a shader resource whose texture is bound as a depth target - which our own render pass does to
-// this array. If the mesh bind site already ran this frame, t36 is left null and every Load returns 0 (fully occluded).
+// this array. If the mesh bind site already ran this frame, t36 is left null: the readers' GetDimensions guard
+// (KhDlsShadow, KhDlfDlsVis) then answers lit - the shadow is lost, never inverted.
 
 // A slot the shader reads as a map: live, mapped this frame, with faces and a far plane - kh_dls_fill_cb publishes
 // dlsMeta.w = the far only for such a slot, and KhDlsShadow / PSDlsWorld's reach read w <= 0 as no map. A light whose
 // slot fails this casts nothing the pass can see; it lights the surface like any other light and is packed as one.
 // KH_DLS_SRV_GATE: g_dls_map_valid outlives Resources::release (the maps go, the bits stay until the next
-// kh_dls_render); with no map view t36 is unbound and reads 0 = fully occluded, so no view = no map. Reads
+// kh_dls_render); with no map view t36 is unbound (the shaders' GetDimensions guard answers lit), so no view = no
+// map - the light is packed and lit as an ordinary one, not sent to a lookup that cannot run. Reads
 // g_dls_map_valid (written by the render pass), so it must be declared above its readers.
 inline bool kh_dls_published(uint32_t khdp_s) {
     return khdp_s < KH_DLS_MAX && g_res.dls_srv && g_dls[khdp_s].live &&
@@ -198,29 +206,9 @@ inline bool kh_dls_fill_dl_world(ID3D11DeviceContext* khd_ctx, ConstantData& khd
     khd_cb.dl_first[1] = 0.0f;
     khd_cb.dl_first[2] = 0.0f;
     khd_cb.dl_first[3] = 0.0f;
-
-    khd_cb.dl_ctl[0] = 3.0f;
-    khd_cb.dl_ctl[1] = static_cast<float>(khd_pn);
-    khd_cb.dl_ctl[2] = static_cast<float>(khd_out - khd_pn);
-    khd_cb.dl_ctl[3] = (g_dl.main_ref_valid && g_dl.main_scale > 1.0e-6f)
-                     ? g_dl.main_scale : 1.0f;
-    if (g_dl.main_ref_valid &&
-        (g_dl.main_gdiff[0] > 0.0f || g_dl.main_gdiff[1] > 0.0f || g_dl.main_gdiff[2] > 0.0f)) {
-        khd_cb.dl_global[0] = g_dl.main_gdiff[0];
-        khd_cb.dl_global[1] = g_dl.main_gdiff[1];
-        khd_cb.dl_global[2] = g_dl.main_gdiff[2];
-    } else {
-        khd_cb.dl_global[0] = 1.0f;
-        khd_cb.dl_global[1] = 1.0f;
-        khd_cb.dl_global[2] = 1.0f;
-    }
-    // The global intensity (g_dl_intensity_bits), exactly as fill_dynlights_cb reads it.
-    {
-        const uint32_t khd_bits = g_dl_intensity_bits.load(std::memory_order_relaxed);
-        float khd_int = 1.0f;
-        memcpy(&khd_int, &khd_bits, sizeof(khd_int));
-        khd_cb.dl_global[3] = khd_int;
-    }
+    // The mesh fill's own control and global lanes (fill_dynlights_cb): mode 3, the split, the distance scale, the
+    // main pass's diffuse multiplier and the global intensity - one writer, so the two cannot drift.
+    kh_dl_fill_ctl(khd_cb, khd_out, khd_pn, khd_scale);
     return true;
 }
 // KH_DLF - dynamicLightFog's lights (effect.hlsl's KH_DLF note). A fresh pool (kh_dl_select's staleness rule)
@@ -382,11 +370,9 @@ inline void kh_dls_fill_cb(ConstantData& khf_cb) {
     // dlsFaceSlice[].y is our own lane and this fill is its only writer, so the mesh path's arm lives there.
     for (uint32_t khf_s = 0; khf_s < KH_DLS_MAX; ++khf_s) {
         // Publishable only if live and mapped this frame: a light selected but not rendered (slice budget, failed
-        // upload) publishes w = 0 and reads as lit rather than sampling another light's slice.
-        const bool khf_ok = g_res.dls_srv && g_dls[khf_s].live &&   // KH_DLS_SRV_GATE (kh_dls_published).
-                            (g_dls_map_valid & (1ull << khf_s)) != 0ull &&
-                            g_dls_facen[khf_s] > 0;
-        if (!khf_ok) {
+        // upload) publishes w = 0 and reads as lit rather than sampling another light's slice. The world pass's and
+        // the fog's own test (kh_dls_published, KH_DLS_SRV_GATE included); the mesh pack's lane reads it through w.
+        if (!kh_dls_published(khf_s)) {
             khf_cb.dls_meta[khf_s][3] = 0.0f;
             for (int khf_z = 0; khf_z < 6; ++khf_z) {
                 khf_cb.dls_face_slice[static_cast<int>(khf_s) * 6 + khf_z][0] = -1.0f;
@@ -657,7 +643,7 @@ inline void kh_dls_render(ID3D11DeviceContext* khdr_ctx,
             const UINT khdr_sl = khdr_next++;
             g_dls_faceslice[khdr_s][khdr_f] = static_cast<uint16_t>(khdr_sl);
             ID3D11DepthStencilView* khdr_dsv = g_res.dls_dsv[khdr_sl];
-            if (!khdr_dsv) continue;
+            if (!khdr_dsv) { khdr_fail = true; continue; }   // KH_EA_DLS_DSV: an undrawn face is an incomplete map.
 
             // Cull to this face. Partitioned opaque-first: the instanced runs cover [0, khdr_opq) and the alpha tail
             // [khdr_opq, n) draws per caster through the alpha twins; the instance stream is written in this order,

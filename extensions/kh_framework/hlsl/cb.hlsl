@@ -16,6 +16,11 @@ cbuffer CBObj : register(b0)
     float4 fxMeta;   // x = effect id, y = time (s), z = screen width, w = screen height.
     float4 depthParams;   // x = proj m22, y = proj m32, z = viewport MinDepth, w = MaxDepth.
     float4 sizeAxes;   // xyz = mesh edge lengths (engine axes), w = blend mode id.
+    // localParams0 / localParams1 below: the localization mask's lanes (a fullscreen pass alone is localized). An
+    // effect mesh with the far-frame arbitration armed takes localParams0 = its encode (m22, m32, MinDepth,
+    // MaxDepth) and localParams1.zw = the guard's base (m, also the arm) and relative margin (C++ flush); builtin
+    // effect side draws (glow / anamorphic pyramids, the SSGI and dynamicLightFog grids) carry their own values in
+    // localParams0 - see the readers.
     float4 localParams0;   // xyz = mask center (engine space), w = shape (0 sphere, 1 cube).
     float4 localParams1;   // x = falloff (normalized to mean radius), y = localized flag.
     float4 localRadii;   // xyz = mask radii (engine axes).
@@ -53,13 +58,13 @@ cbuffer CBObj : register(b0)
     float4 fuseMeta;
     float4 fuseStage[12];   // [4s] = effect, blend, age (KH_FUSE_CLOCK), 0; then p0, p1, colour. C++ fuse_stage.
     float4 fxParams2;   // Effect parameters [8..11] (C++ twin fx2).
-    // x = mode (0 off, 1 camera-relative world, 2 view space, 3 absolute pool),
+    // x = mode (3 = absolute pool, armed; 0 = off - the only two values the fills write),
     // y = point count, z = spot count, w = global distance scale (cb10[2].x).
     float4 dlCtl;
     // xyz = global diffuse multiplier (cb10[3]); w = the global intensity (C++ g_dl_intensity_bits: no command sets it,
     // so 1), applied to the whole DynLights sum.
     float4 dlGlobal;
-    // View matrix columns (world->view rotation) for mode 2, captured with the light list.
+    // Unused: the retired mode 2's view columns - nothing fills or reads them; the lane keeps the layout.
     float4 dlView[3];
     // KH_DL_RING: x = where this draw's light records start in khDlRecs (t40),
     // as uint bits - read it through KhDlRec, never directly. C++ twin dl_first.
@@ -142,7 +147,8 @@ cbuffer CBObj : register(b0)
     float4 fogEngine;
     // fogSky: the fog colour's view-elevation gains (x nadir, y horizon, z zenith), w = armed - filled (1, 1, 1, 1)
     // once the sky CB matched (in the fill's fog block), so the target is fogSkyCol.rgb. fogSkyCol.rgb: the sky
-    // CB's row 1. KH_FOG_SKY_DOC.
+    // CB's row 1. KH_FOG_SKY_DOC. fogSkyCol.w: the engine fog layer's altitude, KhHazeT's branch point (0 unless
+    // the haze arms; C++ twin fog_sky_col[3]).
     float4 fogSky;
     float4 fogSkyCol;
     float4 hazePars;   // Engine distance haze, the sky CB's row 14.
@@ -748,7 +754,7 @@ void KhObjLanesRec(KhObjRec khor_r, float khor_dither, uint khor_slot, out float
 //                at infinity: false behind the camera or well off screen), KhSunFlareVis(sp) (how much sky shows at
 //                it, 25 depth taps - through KH_WSEE's layers by their transmittance), KhSunFlareEdge(spos) (its fade
 //                leaving the frame).
-// The dynamic-light lanes (dlCtl, dlGlobal, dlView, dlFirst) are filled for a lit object alone: an effect mesh is lit
+// The dynamic-light lanes (dlCtl, dlGlobal, dlFirst) are filled for a lit object alone: an effect mesh is lit
 // by default (updateRender3D's "lit"), and DynLights then returns the lights that reach it; a fullscreen pass is not
 // lit and reads zero. The builtin rain lens's own lanes are its alone.
 // The builtin's first and last lines, opt-in (one body with its own shader):
@@ -798,7 +804,7 @@ void KhObjLanesRec(KhObjRec khor_r, float khor_dither, uint khor_slot, out float
 // passes, the scene and UI effect chains, the PIP's effect passes).
 //   KhUserTime()          the object's age: seconds since it was created - the animation clock. Per object, bucket
 //                         instances included. Formed in float on a clock that restarts with each mission, so it
-//                         resolves ~0.5 ms after an hour of mission (an effect's fxMeta.y is exact).
+//                         resolves ~0.25 ms after an hour of mission (an effect's fxMeta.y is exact).
 //   KhUserSessionTime()   seconds since the mission's render clock started; one
 //                         value for every object - a shared clock.
 //   KhUserCameraValid()   true when the camera lanes below are filled.
@@ -2280,27 +2286,15 @@ static float3 khDlsGeomN = float3(0.0f, 0.0f, 0.0f);
 // the ambient and sun by ApplyLighting (the untextured combine); the textured path's twin is KhDynLightsPBR.
 float3 DynLights(float3 wpos, float3 nrm)
 {
-    if (dlCtl.x < 0.5f) return float3(0.0f, 0.0f, 0.0f);
+    // KH_EA_DL_MODE3: mode 3 alone - absolute world positions (engine axes; the CPU merged the pool in world space),
+    // the only mode the C++ fills write (kh_dl_fill_ctl, the DLS render: dlCtl.x = 3; 0 = off); any other value stands
+    // down, as KhDlsWorldFactor does. TWIN: KhDynLightsPBRE's head.
+    if (dlCtl.x < 2.5f) return float3(0.0f, 0.0f, 0.0f);
     int pointN = (int)dlCtl.y;
     // KH_DL_RING: no count cap.
     int totalN = pointN + (int)dlCtl.z;
     float3 n = normalize(nrm);
-    float3 p;
-
-    if (dlCtl.x >= 2.5f) {
-        // Mode 3: absolute world positions (engine axes); the CPU merged the pool in world space.
-        p = wpos;
-    } else {
-        // Modes 1/2: camera-origin decodes. fxParams0.xyz carries the camera on the solid-mesh paths (the
-        // ClipEdgeSliver contract); a zeroed camera cannot decode camera-origin lights, so stand down.
-        if (dot(fxParams0.xyz, fxParams0.xyz) < 1.0f) return float3(0.0f, 0.0f, 0.0f);
-        p = wpos - fxParams0.xyz;
-
-        if (dlCtl.x >= 1.5f) {
-            p = float3(dot(p, dlView[0].xyz), dot(p, dlView[1].xyz), dot(p, dlView[2].xyz));
-            n = float3(dot(n, dlView[0].xyz), dot(n, dlView[1].xyz), dot(n, dlView[2].xyz));
-        }
-    }
+    const float3 p = wpos;
 
     float3 acc = float3(0.0f, 0.0f, 0.0f);
     const float khs_fwp = length(fwidth(wpos));   // Footprint priced outside the loop.
@@ -4076,7 +4070,7 @@ float3 KhPbrAmbSplit(float khms_ndv, float khms_rough, float3 khms_F0)
     return KhPbrAmbSplitF(khms_ndv, khms_rough, khms_F0, khms_fms);
 }
 
-// Engine dynamic lights on the PBR path: modes 1 camera-relative world / 2 view space / 3 absolute, offset +
+// Engine dynamic lights on the PBR path: absolute world positions (mode 3), offset +
 // a0/a1/a2 attenuation on the scaled distance, the spot cone log/mul/exp pow with its degenerate-exponent guard, and
 // the hard range fade. KH_DL_AMB_OCC: occ is the material's occlusion (s.occ), for the per-light ambient alone, as
 // KhPbrAmbient takes it for the sky ambient; the direct terms do not take it. KH_AMB_E_ONCE: envE is the ambient
@@ -4086,33 +4080,19 @@ float3 KhPbrAmbSplit(float khms_ndv, float khms_rough, float3 khms_F0)
 float3 KhDynLightsPBRE(float3 wpos, float3 nrm, float3 albedo, float3 F0, float rough, float metal, float occ,
                        float3 envE, float3 envFms, bool envKnown)
 {
-    if (dlCtl.x < 0.5f) return float3(0.0f, 0.0f, 0.0f);
+    // KH_EA_DL_MODE3: mode 3 alone - absolute world positions (engine axes), the only mode the C++ fills write
+    // (kh_dl_fill_ctl, the DLS render: dlCtl.x = 3; 0 = off); any other value stands down, as KhDlsWorldFactor does.
+    // The view vector alone consumes fxParams0 (zeroed camera = diffuse-only).
+    if (dlCtl.x < 2.5f) return float3(0.0f, 0.0f, 0.0f);
     int pointN = (int)dlCtl.y;
     // KH_DL_RING: no count cap.
     int totalN = pointN + (int)dlCtl.z;
     float3 n = normalize(nrm);
-    float3 p;
+    const float3 p = wpos;
     float specOn = 1.0f;
     float3 v = float3(0.0f, 0.0f, 1.0f);
-
-    if (dlCtl.x >= 2.5f) {
-        // Mode 3: absolute world positions (engine axes); the view vector alone consumes fxParams0 (zeroed camera =
-        // diffuse-only).
-        p = wpos;
-        if (dot(fxParams0.xyz, fxParams0.xyz) < 1.0f) specOn = 0.0f;
-        else v = normalize(fxParams0.xyz - wpos);
-    } else {
-        if (dot(fxParams0.xyz, fxParams0.xyz) < 1.0f) return float3(0.0f, 0.0f, 0.0f);
-        p = wpos - fxParams0.xyz;
-
-        if (dlCtl.x >= 1.5f) {
-            p = float3(dot(p, dlView[0].xyz), dot(p, dlView[1].xyz), dot(p, dlView[2].xyz));
-            n = float3(dot(n, dlView[0].xyz), dot(n, dlView[1].xyz), dot(n, dlView[2].xyz));
-        }
-
-        // Camera-at-origin: the fragment sits at p, the camera at 0.
-        v = -p / max(length(p), 1.0e-4f);
-    }
+    if (dot(fxParams0.xyz, fxParams0.xyz) < 1.0f) specOn = 0.0f;
+    else v = normalize(fxParams0.xyz - wpos);
 
     float kdM = 1.0f - saturate(metal);
     // KH_DL_AMB_SPEC: a lamp's ambient is a uniform radiance (no direction, no N.L), so it takes the split-sum
@@ -4134,6 +4114,9 @@ float3 KhDynLightsPBRE(float3 wpos, float3 nrm, float3 albedo, float3 F0, float 
     const float khs_fwp = length(fwidth(wpos));   // Footprint priced outside the loop.
     // KH_DLS_GEOM_N: the shadow lookup's normal; n (shading) keeps the N.L term.
     const float3 khs_rn = (dot(khDlsGeomN, khDlsGeomN) > 0.25f) ? khDlsGeomN : nrm;
+    // KH_EA_DL_RMIN: the lobe's roughness held to KH_ROUGH_MIN before the emitter widens it (KH_DL_RADIUS), as
+    // KhApplyPBR floors it before KH_SUN_DISC - a public call below the floor shades as 0.045 does (KH_GGX_EXACT).
+    const float khs_rr = max(rough, KH_ROUGH_MIN);
 
     [loop] for (int i = 0; i < totalN; ++i) {
         int b = i * 6;
@@ -4178,7 +4161,7 @@ float3 KhDynLightsPBRE(float3 wpos, float3 nrm, float3 albedo, float3 F0, float 
             float3 khsF;
             // KH_DL_RADIUS: the lobe widened by the emitter's angular radius at this distance (dist: metres to the
             // light, before dlCtl.w's attenuation scale) - KhApplyPBR's KH_SUN_DISC rule for a lamp.
-            const float khsRw = sqrt(min(rough * rough + KH_DL_RADIUS_M / (3.0f * max(dist, 1.0e-3f)), 1.0f));
+            const float khsRw = sqrt(min(khs_rr * khs_rr + KH_DL_RADIUS_M / (3.0f * max(dist, 1.0e-3f)), 1.0f));
             khsSpec = KhGGXSpec(n, v, L, khsRw, F0, khsF)
                     * (khs_fms * diffI * KH_PBR_PI);   // KH_PBR_PI; KH_MS_DIRECT: the compensation.
             khsKd *= saturate(1.0f - khsF);   // KH_DL_KD_F. The arma tint may exceed 1.
@@ -4236,7 +4219,7 @@ float3 KhPbrAmbient(float3 khpa_n, float3 khpa_v, bool khpa_vOk, float khpa_roug
     return KhPbrAmbientE(khpa_n, khpa_v, khpa_vOk, khpa_rough, khpa_metal, khpa_albedo, khpa_amb, khpa_occ, khpa_E);
 }
 
-    // Compact GGX (Cook-Torrance specular + Lambert diffuse).
+// Compact GGX (Cook-Torrance specular + Lambert diffuse).
 float3 KhApplyPBR(KhMatSurf m, float3 wpos, float3 n, float smf)
 {
     if (lighting0.x < 0.5f || lighting1.w < 0.5f) return m.albedo * m.occ + m.emissive;
@@ -4323,7 +4306,7 @@ float3 KhDlsWorldFactor(float3 khw_wpos, float3 khw_nrm, float khw_zunc,
                         float khw_nrel, float khw_fwp)
 {
     if (dlCtl.x < 0.5f) return float3(1.0f, 1.0f, 1.0f);
-    // Mode 3 only: modes 1/2 decode light positions relative to the camera through lanes this pass does not fill.
+    // Mode 3 only (absolute pool), as DynLights and KhDynLightsPBRE take it (KH_EA_DL_MODE3).
     if (dlCtl.x < 2.5f) return float3(1.0f, 1.0f, 1.0f);
 
     const int khw_pointN = (int)dlCtl.y;
@@ -4383,7 +4366,7 @@ float3 KhDlsWorldFactor(float3 khw_wpos, float3 khw_nrm, float khw_zunc,
 
     return saturate(1.0f - khw_blocked / max(khw_total, 1e-4f));
 }
- 
+
 struct VSIn  { float3 pos : POSITION; float3 nrm : NORMAL;
 #if KH_TEXTURED
     float2 uv : TEXCOORD0; float4 tan : TANGENT;   // 48-byte lanes (layout_tex).
@@ -6264,15 +6247,11 @@ float3 KhWorldPosRelFenced(int2 px, float2 uv, out float khwr_d)
 
 float3 KhWorldPosFenced(int2 px, float2 uv, out float khwf_d)
 {
-    float khwf_raw = LinDepth(LoadDepthPS(px));
-    khwf_d = min(khwf_raw, KhEncFence() * 0.999f);
-    float4 khwf_nd = float4(uv.x * 2.0f - 1.0f, 1.0f - uv.y * 2.0f,
-                            depthParams.x + depthParams.y / max(khwf_d, 1.0e-3f), 1.0f);   // KH_NEAR_RECON.
-    float4 khwf_wp = mul(khwf_nd, invViewProj);
     // With fxCam armed the inverse is of a rotation-only view (camera at the origin) - small numbers, exact in fp32 -
     // and the camera is added here, once. An absolute inverse mixes the camera's kilometres into every entry and
-    // cancels them per pixel, which jitters the reconstruction by centimetres frame to frame.
-    return khwf_wp.xyz / khwf_wp.w + (fxCam.w > 0.5f ? fxCam.xyz : float3(0.0f, 0.0f, 0.0f));
+    // cancels them per pixel, which jitters the reconstruction by centimetres frame to frame. KH_EA_RECON_ONE: the
+    // reconstruction is KhWorldPosRelFenced's (one body, KhWorldPosRelAt).
+    return KhWorldPosRelFenced(px, uv, khwf_d) + (fxCam.w > 0.5f ? fxCam.xyz : float3(0.0f, 0.0f, 0.0f));
 }
 
 // The projection's x / y scales (KhgVpos's vp_m00 / vp_m11, KhFxFogEngine's fs_m00 / fs_m11): the lengths of
@@ -6305,21 +6284,17 @@ float KhFxFogEngine(float2 fs_px, float fs_d, float2 fs_res, float fs_m00, float
 
     if (fogParams.w >= 0.5f && depthParams.y < -1.0e-3f)
     {
-        // The encode pair's far fence (the m32 gate above guarantees the standard-z shape: 1 - m22 < 0, m32 < 0 ->
-        // positive fence).
-        float fs_fden = 1.0f - depthParams.x;
-        float fs_far = fs_fden < -1.0e-7f ? depthParams.y / fs_fden : 20000.0f;
-        float fs_fence = clamp(fs_far, 500.0f, 100000.0f) * 0.999f;
-        float fs_de = min(fs_d, fs_fence);
+        // The encode pair's far fence (KhEncFence; the m32 gate above guarantees the standard-z shape: 1 - m22 < 0,
+        // m32 < 0 -> positive fence).
+        const float fs_fence = KhEncFence() * 0.999f;
+        // KH_EA_RECON_ONE: the view depth held to that fence (fs_de) and the point there are KhWorldPosRelAt's - the
+        // height at the clamped distance from fs_de's analytic ndcZ, immune to the beyond-far mirror and raw-depth
+        // teeter. With fxCam armed the inverse is camera-relative and the height comes back relative too; fogColor.w
+        // is the camera's absolute altitude, so the camera's own is added here, as the position is.
+        float fs_de;
+        const float3 fs_rel = KhWorldPosRelAt((fs_px + 0.5f) / fs_res, fs_d, fs_de);
         float fs_distM = length(KhgVpos(fs_px, fs_de, fs_res, fs_m00, fs_m11));
-        // Height at the clamped distance: fs_de's analytic ndcZ, immune to the beyond-far mirror and raw-depth teeter.
-        float2 fs_uv = (fs_px + 0.5f) / fs_res;
-        float4 fs_nd = float4(fs_uv.x * 2.0f - 1.0f, 1.0f - fs_uv.y * 2.0f,
-                              depthParams.x + depthParams.y / max(fs_de, 1.0e-3f), 1.0f);   // KH_NEAR_RECON.
-        float4 fs_wp = mul(fs_nd, invViewProj);
-        // With fxCam armed the inverse is camera-relative and the height comes back relative too; fogColor.w is the
-        // camera's absolute altitude, so the camera's own is added here, as the position is.
-        float fs_hgt = fs_wp.y / fs_wp.w + (fxCam.w > 0.5f ? fxCam.y : 0.0f);
+        float fs_hgt = fs_rel.y + (fxCam.w > 0.5f ? fxCam.y : 0.0f);
         float fs_camY = fogColor.w;
         float fs_tr;
         // KH_FOG_SKY: the density model is the branch's own - the engine terms' (fogEngine.x at sea level, falling
@@ -6865,7 +6840,7 @@ float4 KhFxFinish(float3 scene, float3 outc, float2 pos)
         else if (bm == 3) comp = scene + outc * a - scene * outc * a;   // Screen.
         else if (bm == 4) comp = max(scene, mixed);   // Lighten.
         else if (bm == 5) comp = min(scene, mixed);   // Darken.
-         else              comp = mixed;   // Normal.
+        else              comp = mixed;   // Normal.
 
         if (centerSize.w > 1.5f) {
             float4 khuRaw = sceneColor.Load(int3(clamp(px, int2(0, 0),

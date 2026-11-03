@@ -333,23 +333,19 @@ static float    g_sun2_map_vp[4][4] = {};
 static float    g_sun2_map_bias = 0.0f;
 static float    g_sun2_half_diag = 0.0f;
 static uint64_t g_sun2_renders = 0;
-static uint64_t g_sun2_casters = 0;
 static float    g_sun3_map_vp[4][4] = {};
 static float    g_sun3_map_bias = 0.0f;
 static float    g_sun3_half_diag = 0.0f;
 static uint64_t g_sun3_renders = 0;
-static uint64_t g_sun3_casters = 0;
 static float    g_sun4_map_vp[4][4] = {};
 static float    g_sun4_map_bias = 0.0f;
 static float    g_sun4_half_diag = 0.0f;
 static uint64_t g_sun4_renders = 0;
-static uint64_t g_sun4_casters = 0;
 // KH_SUN_FAR_BAND state - the hero pattern once more (band 4).
 static float    g_sun5_map_vp[4][4] = {};
 static float    g_sun5_map_bias = 0.0f;
 static float    g_sun5_half_diag = 0.0f;
 static uint64_t g_sun5_renders = 0;
-static uint64_t g_sun5_casters = 0;
 
 // The four camera-anchored bands fill CBFrame identically (rebased VP + meta: valid, size, bias, half-diag); one helper
 // keeps the flush and injection fills from drifting. A stood-down band leaves its lanes zeroed, which the shader reads
@@ -629,8 +625,6 @@ inline void kh_sun_pf_convert(ID3D11DeviceContext* ctx, const ConstantData* khpc
     KH_SAFE_RELEASE(khpc_sr[0]);
     KH_SAFE_RELEASE(khpc_sr[1]);
 }
-// -1 = the band never fitted.
-static float    g_sun_band_reach[4] = { -1.0f, -1.0f, -1.0f, -1.0f };   // [3] = far.
 // Texel-priced like KH_BAND_BIAS_TEXELS (ladder texels run 1 / 4 / 16 / 100 mm hero..far). The cast cannot acne (the
 // receiver is never in our map), so this bias only absorbs the caster's own stored depth error.
 static constexpr float KH_CAST_BIAS_CAP_M = 0.04f;

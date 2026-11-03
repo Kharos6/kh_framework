@@ -4,8 +4,6 @@
 // file commit, the trim and the writer thread. Never include it on its own.
 namespace RenderIntegration {
 
-struct KhTexBlob;
-
 // Defined in rendering/mesh_cache.hpp (declared here for the uses below).
 inline void kh_mesh_cache_store(uint64_t khmc_hash, const MeshDef& khmc_d);
 
@@ -289,28 +287,26 @@ inline void kh_mesh_cache_writer_stop() {
     g_khmw_running = false;
 }
 
+// KH_EA_MW_INLINE: only hands the write to a running writer, else drops it (it is only a cache), so the publish
+// landing (the render thread) never writes a mesh-cache file or (re)spawns the writer. The import starts the writer,
+// or writes inline on the game thread when it cannot (kh_fbx_import).
 inline void kh_mesh_cache_queue(uint64_t khmw_h, int khmw_id) {
-    if (!kh_mesh_cache_writer_start()) {
-        kh_mesh_cache_store(khmw_h, mesh_def(khmw_id));
-        std::lock_guard<std::mutex> khmw_tl(g_khsm_trim_mu);
-        kh_mesh_cache_trim();
-        return;
-    }
     {
         std::lock_guard<std::mutex> khmw_l(g_khmw_mu);
+        if (!g_khmw_running) return;
         KhMeshWriteJob khmw_j = { khmw_h, khmw_id, nullptr };
         g_khmw_q.push_back(khmw_j);
     }
     g_khmw_cv.notify_one();
 }
-// KH_MESH_CACHE_LATER: an import whose publish kh_fbx_register had to defer (the graphics lock refused three times)
-// has no published id until the next injection or flush lands it (g_mesh_publish_pending), and the writer drops an
-// unpublished id - so its disk-cache write waits here and is queued where that publish lands (kh_mesh_publish_land:
-// the injection ahead of its scene sync, or flush_locked's housekeeping). A landing between the register and the
-// stash is caught by the stash itself (the id already published: it queues at once). An id released meanwhile is
-// dropped (the writer's inline fallback would read mesh 0 in its place). One appended but not yet published - its
-// register lost the lock after this landing's publish ran, and its pending flag stands - waits for the next landing
-// (KH_MESH_STAGED). Emptied with the pending flag (kh_mesh_release_session).
+// KH_MESH_CACHE_LATER: an import (kh_fbx_register defers every publish, KH_EA_FBX_NO_PARK) has no published id until
+// the next injection or flush lands it (g_mesh_publish_pending), and the writer drops an unpublished id - so its
+// disk-cache write waits here and is queued where that publish lands (kh_mesh_publish_land: the injection ahead of its
+// scene sync, or flush_locked's housekeeping). A landing between the register and the stash is caught by the stash
+// itself (the id already published: it queues at once). An id released meanwhile is dropped, and so is every write
+// while no writer runs (kh_mesh_cache_queue, KH_EA_MW_INLINE). One appended but not yet published - its register ran
+// after this landing's publish, and its pending flag stands - waits for the next landing (KH_MESH_STAGED). Emptied
+// with the pending flag (kh_mesh_release_session).
 static std::mutex g_mesh_cache_later_mu;
 static std::vector<std::pair<uint64_t, int>> g_mesh_cache_later_q;   // (content hash, id), under the mutex.
 inline void kh_mesh_cache_later_land() {

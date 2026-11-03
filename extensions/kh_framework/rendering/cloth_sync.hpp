@@ -4,20 +4,13 @@
 // releases. Never include it on its own.
 namespace RenderIntegration {
 
-inline void kh_cloth_release_all();   // KH_CLOTH: the per-instance vertex buffers (defined with the runtime).
 inline bool kh_uvs_draws_from(uint32_t khud_slot, const ID3D11Buffer* khud_src);   // KH_USER_VS: the slot draws a vertex stage's buffer deformed from this one.
 inline void kh_uvs_src_wrote(uint32_t khsw_slot);   // KH_USER_VS: a slot's own per-instance vertex buffer was just written (every writer of one calls it).
-// KH_CLOTH_PIN_STEP (defined below): the same for a skeletal binding whose mesh simulates (its cloth's or
-// chain's bound part re-placed).
-inline void kh_cloth_pin_draw_step(KhAttach& khcp_a, RenderObject& khcp_o, ID3D11DeviceContext* khcp_ctx, bool& khcp_moved);
-
-inline float effect_time_seconds();
 // KH_SKEL: a skeletal binding's pose for its cloth (defined with the skin runtime; read by kh_cloth_sync and
 // kh_cloth_pin_fresh).
 inline bool kh_skin_guide_of(uint64_t khgo_seq, int khgo_mesh, std::vector<float>& khgo_out);
 
-inline float effect_time_seconds();   // Defined in rendering/effect_clock.hpp; a repeat of the forward declaration
-                                      // above its first use.
+inline float effect_time_seconds();   // Defined in rendering/effect_clock.hpp (declared here for the use below).
 
 // Defined in rendering/skinning.hpp (declared here for the uses below).
 inline void kh_skin_col_take(bool khst_snap);
@@ -93,6 +86,7 @@ inline void kh_cloth_sync(float khcs_dt, bool khcs_wanted) {
     const bool khcs_lview = kh_simlod_read(khcs_lcam, khcs_lm11, khcs_lt) &&
                             effect_time_seconds() - khcs_lt <= KH_SIMLOD_STALE_S;
     uint64_t khcs_lwork = 0, khcs_lfull = 0;
+    const uint32_t khcs_pub = mesh_count();   // KH_EA_FBX_NO_PARK (below).
     for (size_t khcs_i = 0; khcs_i < khcs_objs.size(); ++khcs_i) {
         const RenderObject& khcs_o = khcs_objs[khcs_i];
         // KH_CHAIN: a chain takes this loop too, with its own build, settings (by handle, KhChainCfg) and refusals;
@@ -105,6 +99,12 @@ inline void kh_cloth_sync(float khcs_dt, bool khcs_wanted) {
             if (khcs_ci != g_chain_cfg.end() && khcs_ci->second.seq == khcs_o.seq) khcs_cfg = &khcs_ci->second;
         }
         if (khcs_o.slot == 0xFFFFFFFFu) continue;
+        // KH_EA_FBX_NO_PARK: a mesh appended but not yet published (an import, a generated mesh - until the next
+        // injection or flush lands it) is no verdict: clamped to the box it would be refused and reported as 'box'.
+        // The object waits, as kh_skin_sync and the collider gather wait on kh_mesh_alive; the retire walk above
+        // already ended an instance of its old mesh, as it would for any new one. A released id (below the count)
+        // keeps the path below.
+        if (static_cast<uint32_t>(khcs_o.mesh) >= khcs_pub) continue;
         const int khcs_mid = mesh_id_clamp(khcs_o.mesh);
         // KH_CHAIN: a refusal is counted and named once per mesh and reason.
         auto khcs_refuse = [&](const std::string& khcs_why) {
@@ -112,7 +112,7 @@ inline void kh_cloth_sync(float khcs_dt, bool khcs_wanted) {
             for (const std::string& khcs_w : g_chain_warned) if (khcs_w == khcs_key) return;
             if (g_chain_warned.size() >= 64u) return;
             g_chain_warned.push_back(khcs_key);
-            report_error_once_safe("KH chain: mesh '" + mesh_def(khcs_mid).name + "' " + khcs_why +
+            report_error_once_safe("KH RenderIntegration: chain: mesh '" + mesh_def(khcs_mid).name + "' " + khcs_why +
                                    ", so it cannot simulate as a chain");
         };
         const std::string khcs_start = khcs_cfg ? khcs_cfg->start : std::string();
@@ -191,7 +191,7 @@ inline void kh_cloth_sync(float khcs_dt, bool khcs_wanted) {
             }
             if (!khcs_seen && g_cloth_warned.size() < 64u) {
                 g_cloth_warned.push_back(khcs_mid);
-                report_error_once_safe("KH cloth: mesh '" + mesh_def(khcs_mid).name +
+                report_error_once_safe("KH RenderIntegration: cloth: mesh '" + mesh_def(khcs_mid).name +
                                        "' carries no kh_cloth_sim / kh_cloth_pin weights - "
                                        "no vertex group reached the FBX as a skin cluster and no colour "
                                        "set of either name was found, so it cannot simulate");
@@ -393,7 +393,7 @@ inline void kh_cloth_sync(float khcs_dt, bool khcs_wanted) {
             khcs_lwork += static_cast<uint64_t>(khcs_wit) * khcs_wsb;
             khcs_lfull += static_cast<uint64_t>(khcs_dit < 1u ? 1u : khcs_dit) * (khcs_dsb < 1u ? 1u : khcs_dsb);
         }
-        kh_cloth_ground_patch(*khcs_in, khcs_wc, khcs_reach);   // KH_CLOTH_GROUND.
+        kh_cloth_ground_patch(*khcs_in, khcs_wc, khcs_reach, khcs_tele);   // KH_CLOTH_GROUND.
         // Each collider's pose at THIS cloth's last step, matched by slot and mesh, becomes its prev, so the step
         // sweeps it over exactly the interval it sweeps the cloth's own frame - across a skipped frame too.
         // KH_SUB_CLOCK: its pose where the simulation stands, st.sub_t of the way along what that step swept it over
@@ -505,6 +505,9 @@ inline void kh_cloth_sync(float khcs_dt, bool khcs_wanted) {
 }
 // KH_SESSION_RESET: outside the function so the session reset reaches it.
 static double g_cloth_dt_last = 0.0;
+// The frame delta kh_cloth_sync steps on, from the effect clock (game thread, flush_frame): its contract - steady wall
+// time, the clock's age on a session's first frame, 0 after a gap over 10 s - is the note above effect_time_seconds_d's
+// declaration in rendering/physics_affectors.hpp.
 inline float kh_cloth_frame_dt() {
     const double khfd_now = effect_time_seconds_d();
     const double khfd_d = khfd_now - g_cloth_dt_last;
@@ -629,10 +632,10 @@ inline bool kh_cloth_pin_place(KhClothInst& khpf_in, uint32_t khpf_f, const floa
 }
 // KH_CLOTH_STEP_SHAPE - the key of bytes a consume-point writer made from a front rather than the front itself
 // (kh_cloth_pin_seal: the pin re-placement; kh_chain_end_draw: the chain end's correction), by KH_CLOTH_SHAPE's rule
-// on metric positions, as kh_chain_writeback keys a front: a new key from the process-wide serial when some vertex
-// has left the shape that took khck_key by more than KH_CLOTH_SHAPE_M on any axis, else khck_key again. Under the
-// front's key the caching passes (the footprint seam, the sun ladder, the point-light maps) would keep what the
-// writer moved where the job left it while the job's front stands.
+// on metric positions, as kh_chain_writeback keys a front (through this helper too): a new key from the process-wide
+// serial when some vertex has left the shape that took khck_key by more than KH_CLOTH_SHAPE_M on any axis, else
+// khck_key again. Under the front's key the caching passes (the footprint seam, the sun ladder, the point-light maps)
+// would keep what the writer moved where the job left it while the job's front stands.
 inline uint32_t kh_cloth_step_shape(std::vector<float>& khck_ref, uint32_t& khck_key,
                                     const std::vector<float>& khck_met) {
     bool khck_moved = khck_key == 0u || khck_ref.size() != khck_met.size();
@@ -859,7 +862,8 @@ inline void kh_cloth_upload(ID3D11DeviceContext* khcu_ctx, ID3D11Device* khcu_de
 }
 
 // Device teardown: every buffer goes and the slot tables empty (kh_skin_release_all relies on it); workers keep
-// running (they hold no device object). Under a park or on the render thread.
+// running (they hold no device object). Under a park or on the render thread (on_engine_reset's best effort, after
+// its lock attempts failed, is neither).
 inline void kh_cloth_release_all() {
     std::vector<ID3D11Buffer*> khcr_vbs;
     {

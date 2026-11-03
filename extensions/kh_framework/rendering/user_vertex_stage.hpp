@@ -96,9 +96,9 @@ inline void kh_uvs_release_all() {
 }
 // The slot table names this slot's vertex-stage buffer, installed this flush and deformed from khud_src: what the
 // slot draws is khud_src through the stage. For a step that writes a per-instance buffer only once an upload has
-// installed it (kh_cloth_pin_draw_step): with a stage over it the table names OUR buffer, and the bytes it writes
-// still reach the draw - the record is src_own, so kh_uvs_step (after kh_attach_step at every site) copies the source
-// whole before it deforms. The tables' thread.
+// installed it (kh_cloth_pin_draw_step, kh_chain_end_draw): with a stage over it the table names OUR buffer, and the
+// bytes it writes still reach the draw - the record is src_own, so kh_uvs_step (after kh_attach_step at every site)
+// copies the source whole before it deforms. The tables' thread.
 inline bool kh_uvs_draws_from(uint32_t khud_slot, const ID3D11Buffer* khud_src) {
     if (!khud_src || khud_slot >= g_cloth_vb_slot.size()) return false;
     const auto khud_it = g_uvs.find(khud_slot);
@@ -196,8 +196,8 @@ inline void kh_uvs_step(ID3D11DeviceContext* khus_ctx) {
         if (o.seq != r.seq || !o.materials || !o.materials->vertex_any || mesh_id_clamp(o.mesh) != r.mesh) continue;
         // Nothing draws it. An invisible casterOnly object still casts while a shadow map takes it (kh_shadow_active,
         // KH_SHADOW_SWITCH, KH_SHADOW_OFF: the maps draw this buffer); an inFront one in any view (KH_SKIN_CASTER_VM).
-        // TWIN: kh_skin_pose_drawn.
-        if (!kh_obj_vis(o) && !(o.caster_only && kh_shadow_active_any_view(o))) continue;   // KH_SHOW_INFRONT.
+        // KH_EA_UVS_GATE: the skin's own gate, called rather than restated.
+        if (!kh_skin_pose_drawn(o)) continue;   // KH_SHOW_INFRONT.
         // KH_USER_VS_SRC_DIRTY: evaluated this cycle already (so: over a source of the object's own) - again only if
         // something the stage reads has moved since: the source's bytes (kh_uvs_src_wrote - the step before us
         // re-posed it), the object's lanes or set (that step moved it), the pass camera (a stale cycle adopts its
@@ -370,7 +370,8 @@ inline void kh_uvs_upload(ID3D11DeviceContext* khuu_ctx, ID3D11Device* khuu_dev)
             if (FAILED(khuu_dev->CreateBuffer(&khuu_bd, nullptr, &r.vb))) {
                 r.vb = nullptr;
                 r.failed = true;
-                report_error_once_safe("KH user vertex stage: a deformed vertex buffer could not be made (the mesh draws undeformed)");
+                report_error_once_safe("KH RenderIntegration: user vertex stage: a deformed vertex buffer could not "
+                                       "be made (the mesh draws undeformed)");
                 continue;
             }
             r.src = KhVbRef();

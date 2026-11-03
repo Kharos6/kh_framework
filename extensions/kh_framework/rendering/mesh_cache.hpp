@@ -16,9 +16,9 @@ static constexpr uint32_t KH_SKIN_CACHE_MAGIC = 0x334B534Bu;             // "KSK
                                                                           // (KH_LOD_SKIN). KSK2: twin or none;
                                                                           // an earlier build could derive the
                                                                           // parents from a freed scene.
-// KH_LOD_SKIN: a KSK2 chunk that carries no influences is read as it stands - nothing in it is derived
-// differently now - so only a skinned mesh's file is a miss and re-imports.
-static constexpr uint32_t KH_SKIN_CACHE_MAGIC_KSK2 = 0x324B534Bu;
+// KH_EA_KSK2_DEAD: the KSK2 reading (KH_LOD_SKIN: a chunk without influences read as it stands) is gone - every
+// KSK2 file carries an older version word (KH_MESH_CACHE_VERSION has been bumped since KSK3), which the loader refuses
+// before the chunk.
 // KH_OCC_BOX: the occluder-box chunk (kh_mesh_occ_accept), written after the
 // skin chunk for every import and required by the loader. A change to how the
 // box is DERIVED must change this magic, for the reason above.
@@ -118,10 +118,10 @@ inline bool kh_mesh_cache_load_one(const std::filesystem::path& khmc_p, bool khm
         // per-level test above implies it).
         if (khmc_ln > 0 && khmc_d.lod_istart[0] > khmc_ni) return false;
         // KH_CLOTH: the weight chunk, probed by its magic (no chunk precedes it since version 10; the distance-field
-        // chunk of versions 8 and 9 is gone with the field, KH_SSAO). A file written before the chunk existed carries
-        // none and the mesh re-imports its weights on the next cold load; a length that does not match the vertex
-        // array is a chunk from another build: the offset rewinds, the skin chunk's magic test below then reads this
-        // one's and fails, and the whole file is a miss (a re-import).
+        // chunk of versions 8 and 9 is gone with the field, KH_SSAO). The store writes it only for a mesh with cloth
+        // authoring, so its absence is a mesh without; a length that does not match the vertex array (a damaged
+        // file) rewinds the offset, the skin chunk's magic test below then reads this one's and fails, and the whole
+        // file is a miss (a re-import).
         khmc_d.cloth_w.clear();
         if (khmc_b.size() - khmc_o >= 8u) {
             uint32_t khmc_cm = 0, khmc_cn = 0;
@@ -140,9 +140,7 @@ inline bool kh_mesh_cache_load_one(const std::filesystem::path& khmc_p, bool khm
         khmc_d.skin_inf.clear();
         {
             uint32_t khmc_km = 0, khmc_kb = 0, khmc_ki = 0;
-            if (!khmc_rd(&khmc_km, 4) || (khmc_km != KH_SKIN_CACHE_MAGIC && khmc_km != KH_SKIN_CACHE_MAGIC_KSK2)) {
-                return false;
-            }
+            if (!khmc_rd(&khmc_km, 4) || khmc_km != KH_SKIN_CACHE_MAGIC) return false;
             if (!khmc_rd(khmc_d.native_ctr, 12) || !khmc_rd(khmc_d.native_ext, 12)) return false;
             for (int k = 0; k < 3; ++k) {   // The skinning divides by the extent.
                 if (!(khmc_d.native_ext[k] > 0.0f && khmc_d.native_ext[k] < 1.0e7f)) return false;
@@ -164,7 +162,6 @@ inline bool kh_mesh_cache_load_one(const std::filesystem::path& khmc_p, bool khm
                     khmc_sb.parent == static_cast<int32_t>(khmc_b)) return false;
             }
             if (!khmc_rd(&khmc_ki, 4) || (khmc_ki != 0u && khmc_ki != khmc_nv)) return false;
-            if (khmc_ki != 0u && khmc_km != KH_SKIN_CACHE_MAGIC) return false;   // KH_LOD_SKIN: KSK2 influences.
             if (khmc_ki) {
                 khmc_d.skin_inf.resize(khmc_ki);
                 if (!khmc_rd(khmc_d.skin_inf.data(), static_cast<size_t>(khmc_ki) * sizeof(KhSkinInf))) return false;
@@ -316,9 +313,9 @@ inline void kh_mesh_cache_store(uint64_t khmc_hash, const MeshDef& khmc_d) {
     }
 }
 
-// Registration tail shared by the ufbx import and the cache hit (kh_fbx_register): name the def, append, publish + GPU
-// top-up under the park (deferred to the next injection or flush, kh_mesh_publish_land, when it cannot park). Game
-// thread. g_mesh_last_ref: per id, GetTickCount64 of the last reference note (the mesh GC's input). KH_MESH_REF_LOCK:
+// Registration tail shared by the ufbx import and the cache hit (kh_fbx_register): name the def, append, and leave the
+// publish + GPU top-up to the next injection or flush (kh_mesh_publish_land; never parked). Game thread.
+// g_mesh_last_ref: per id, GetTickCount64 of the last reference note (the mesh GC's input). KH_MESH_REF_LOCK:
 // under g_mesh_ref_mu, which nests nothing but the store's append_mx (kh_mesh_gc's KH_GC_RECHECK tombstone; append_mx
 // nests nothing): game-thread writers (flush_frame's census, kh_fbx_register) may resize it while kh_mesh_gc - which
 // also writes it (its own walk's note) - reads it on the flush's thread (the render thread, or the game thread under

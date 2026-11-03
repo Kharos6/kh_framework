@@ -15,6 +15,22 @@ inline void* reorder_dsv_identity(ID3D11DepthStencilView* dsv);
 inline void kh_rp_pass_end(ID3D11DeviceContext* ctx);
 
 
+// KH_EA_CBC_BEST: the census entry (kh_cbc_find) of the freshest upload among the buffers bound at VS / PS b0 - b3,
+// or none - the take's two census reads (the still-camera rescue and the depth pair) ask the same question.
+inline const KhCbCensusEntry* kh_svs_cbc_best(ID3D11DeviceContext* ctx) {
+    ID3D11Buffer* khcb_b[8] = {};
+    ctx->VSGetConstantBuffers(0, 4, khcb_b);
+    ctx->PSGetConstantBuffers(0, 4, khcb_b + 4);
+    const KhCbCensusEntry* khcb_best = nullptr;
+    for (int khcb_i = 0; khcb_i < 8; ++khcb_i) {
+        if (!khcb_b[khcb_i]) continue;
+        const KhCbCensusEntry* const khcb_e = kh_cbc_find(khcb_b[khcb_i]);
+        if (khcb_e && (!khcb_best || khcb_e->ms > khcb_best->ms)) khcb_best = khcb_e;
+    }
+    for (ID3D11Buffer*& khcb_r : khcb_b) KH_SAFE_RELEASE(khcb_r);
+    return khcb_best;
+}
+
 // The seam's camera take: the engine's camera projection for this frame, pre-clear, where no latch of this frame exists
 // yet - the live bridge sample reconciled against the latch and the encode-pair witnesses. Shared verbatim with the
 // view-model seam (kh_infront_seam_inject), which calls it only when the world seam did not run this window: the step
@@ -27,7 +43,7 @@ inline bool kh_svs_take_pv(ID3D11DeviceContext* ctx, RVExtBridge::ProjectionView
     float khv_latch_cam[3] = {};
     bool  khv_latch_cam_ok = false;
     if (g_ro.cycle_pv_valid) {
-        kh_cam_of_site(g_ro.cycle_pv.view, khv_latch_cam, 2);
+        kh_cam_of(g_ro.cycle_pv.view, khv_latch_cam);
         khv_latch_cam_ok = (khv_latch_cam[0] == khv_latch_cam[0]) &&
                            (khv_latch_cam[1] == khv_latch_cam[1]) &&
                            (khv_latch_cam[2] == khv_latch_cam[2]);
@@ -56,8 +72,8 @@ inline bool kh_svs_take_pv(ID3D11DeviceContext* ctx, RVExtBridge::ProjectionView
         float khlt_lc[3];   // The translation anchor the take builds on.
         float khlt_vc[3];   // The camera the bridge holds at this instant.
         // The honest inverse on all three.
-        kh_cam_of_site(khv_pv.view, khlt_ac, 2);
-        kh_cam_of_site(khlt_live.view, khlt_vc, 2);
+        kh_cam_of(khv_pv.view, khlt_ac);
+        kh_cam_of(khlt_live.view, khlt_vc);
 
         if (khv_latch_cam_ok) {
             khlt_lc[0] = khv_latch_cam[0];
@@ -143,27 +159,7 @@ inline bool kh_svs_take_pv(ID3D11DeviceContext* ctx, RVExtBridge::ProjectionView
                             float khwg_cn = -1.0f;
 
                             if (kh_cbc_on()) {
-                                ID3D11Buffer* khwg_vs[4] = {};
-                                ID3D11Buffer* khwg_ps[4] = {};
-                                ctx->VSGetConstantBuffers(0, 4, khwg_vs);
-                                ctx->PSGetConstantBuffers(0, 4, khwg_ps);
-                                const KhCbCensusEntry* khwg_best = nullptr;
-
-                                for (int khwg_i = 0; khwg_i < 8; ++khwg_i) {
-                                    ID3D11Buffer* khwg_b = khwg_i < 4
-                                        ? khwg_vs[khwg_i] : khwg_ps[khwg_i - 4];
-                                    if (!khwg_b) continue;
-                                    const KhCbCensusEntry* khwg_e = kh_cbc_find(khwg_b);
-                                    if (khwg_e && (!khwg_best ||
-                                                   khwg_e->ms > khwg_best->ms)) {
-                                        khwg_best = khwg_e;
-                                    }
-                                }
-
-                                for (int khwg_i = 0; khwg_i < 4; ++khwg_i) {
-                                    KH_SAFE_RELEASE(khwg_vs[khwg_i]);
-                                    KH_SAFE_RELEASE(khwg_ps[khwg_i]);
-                                }
+                                const KhCbCensusEntry* const khwg_best = kh_svs_cbc_best(ctx);
 
                                 if (khwg_best &&
                                     fabsf(khwg_best->m22) > 1.0e-9f) {
@@ -371,28 +367,7 @@ inline bool kh_svs_take_pv(ID3D11DeviceContext* ctx, RVExtBridge::ProjectionView
     // The engine uploads frame k+1's projection into the bound b2 before our pre-clear seam runs; identity reads it
     // where value arbitration structurally cannot.
     if (kh_cbc_on()) {
-        ID3D11Buffer* khcb_vs[4] = {};
-        ID3D11Buffer* khcb_ps[4] = {};
-        ctx->VSGetConstantBuffers(0, 4, khcb_vs);
-        ctx->PSGetConstantBuffers(0, 4, khcb_ps);
-
-        const KhCbCensusEntry* khcb_best = nullptr;
-
-        for (int khcb_i = 0; khcb_i < 8; ++khcb_i) {
-            ID3D11Buffer* khcb_b =
-                khcb_i < 4 ? khcb_vs[khcb_i] : khcb_ps[khcb_i - 4];
-            if (!khcb_b) continue;
-            const KhCbCensusEntry* khcb_e = kh_cbc_find(khcb_b);
-
-            if (khcb_e) {
-                if (!khcb_best || khcb_e->ms > khcb_best->ms) khcb_best = khcb_e;
-            }
-        }
-
-        for (int khcb_i = 0; khcb_i < 4; ++khcb_i) {
-            KH_SAFE_RELEASE(khcb_vs[khcb_i]);
-            KH_SAFE_RELEASE(khcb_ps[khcb_i]);
-        }
+        const KhCbCensusEntry* const khcb_best = kh_svs_cbc_best(ctx);
 
         if (khcb_best) {
             const float khcb_near = fabsf(khcb_best->m22) > 1.0e-9f
@@ -1502,10 +1477,7 @@ inline void kh_volume_seam_track(ID3D11DeviceContext* ctx, ID3D11DepthStencilVie
     // This DSV is the volume buffer, so the draws that follow are counting draws until the next bind.
     g_svs_vol_dsv_now = true;
 
-    if (g_svs_injected_frame) {
-          return;
-
-    }
+    if (g_svs_injected_frame) return;
 
     g_svs_pending = true;
     g_svs_pend_w = khv_td.Width;
@@ -1746,25 +1718,11 @@ inline void kh_svs_vol_copy(ID3D11DeviceContext* khc_ctx) {
     if (!khc_ok) {  return; }
 
     // The bracket state is not touched here: kh_svs_bracket_post consumes it.
-    const bool khc_prev = g_ro.in_injection;
-    g_ro.in_injection = true;
-
     // KH_OM_SAVE_VOL: the engine's full OM set - render targets, depth and the unordered-access views behind them -
     // saved and put back through KhOmSave, as every target swap is (a plain get / set pair dropped the UAVs of the
-    // engine draw this runs ahead of).
-    KhOmSave khc_om;
-    khc_om.capture(khc_ctx);
-    // KH_PRED_ASIDE: a predicate the engine left bound at this draw would skip the copy, and the seam and replay
-    // would read the last frame's counts (g_svs_vol_seq is stamped below regardless).
-    KhPredAside khc_pa;
-    khc_pa.begin(khc_ctx);
-
-    khc_ctx->OMSetRenderTargets(0, nullptr, nullptr);
-    khc_ctx->CopyResource(g_svs_vol_tex, g_svs_vol_src);
-    khc_pa.end();
-    khc_om.restore(khc_ctx);
-    khc_om.release();
-    g_ro.in_injection = khc_prev;   // Cleared after the restore, deliberately.
+    // engine draw this runs ahead of). KH_PRED_ASIDE: a predicate the engine left bound at this draw would skip the
+    // copy, and the seam and replay would read the last frame's counts (g_svs_vol_seq is stamped below regardless).
+    kh_svs_copy_aside(khc_ctx, g_svs_vol_tex, g_svs_vol_src);   // KH_EA_VOL_COPY.
     g_svs_vol_primed = true;
     // The epoch this copy belongs to.
     g_svs_vol_seq = g_svs_frame_seq;

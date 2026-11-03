@@ -115,7 +115,8 @@ inline bool kh_cloth_proxy_eh_ready() {
             if (!g_cloth_proxy_eh_exploded.is_nil() && !g_cloth_proxy_eh_fired.is_nil()) g_cloth_proxy_eh_state = 1;
         } catch (...) {}
         if (g_cloth_proxy_eh_state != 1) {
-            report_error_once_safe("KH cloth: the physics proxy's event handlers did not compile; proxies spawn without them");
+            report_error_once_safe("KH RenderIntegration: cloth: the physics proxy's event handlers did not compile; "
+                                   "proxies spawn without them");
         }
     }
     return g_cloth_proxy_eh_state == 1;
@@ -170,8 +171,9 @@ inline void kh_cloth_proxy_step() {
             const bool khpx_mine = khpx_it != g_cloth_proxy.end() && khpx_it->second.seq == khpx_j.seq;
             if (sqf::is_null(khpx_o)) {
                 if (khpx_mine) khpx_it->second.failed = true;
-                report_error_once_safe(std::string("KH cloth: could not create the physics proxy (") +
-                                       KH_CLOTH_PROXY_TYPE + " missing from the loaded mods?)");
+                report_error_once_safe(std::string("KH RenderIntegration: cloth: could not create the physics "
+                                                   "proxy (") + KH_CLOTH_PROXY_TYPE +
+                                       " missing from the loaded mods?)");
                 continue;
             }
             if (!khpx_mine) {   // Its entry went while the spawn ran.

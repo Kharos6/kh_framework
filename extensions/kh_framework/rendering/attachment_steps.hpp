@@ -407,8 +407,9 @@ inline const KhGtSnap* kh_gts_for_cycle(KhAttach& khgc_a, uint64_t khgc_cyc, boo
 // binding is placed from) through that character's helper brings it in too: the lane is turned as that character is
 // drawn (its rows, from the same rigid move).
 // GAME THREAD maintains it (kh_crew_sync, from flush_frame; the events): inserted, erased and every field the render
-// thread reads (in, d_ok, helper, veh, l_ok, l, lq, r_*) written under g_draw_list_mutex; t / tr / seen are the game
-// thread's alone. Never destructed (game values); the mission edge empties it (kh_crew_clear_all, outside the mutex:
+// thread reads (in, d_ok, helper, veh, l_ok, l, lq) written under g_draw_list_mutex; r_* are the render thread's own
+// page caches (the paint read, under the mutex too); t / tr with their flags, and seen, are the game thread's alone.
+// Never destructed (game values); the mission edge empties it (kh_crew_clear_all, outside the mutex:
 // dropping an entry removes its event handlers, an SQF call).
 struct KhCrewEnt {
     game_value man;

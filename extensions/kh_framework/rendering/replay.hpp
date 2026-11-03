@@ -22,7 +22,7 @@ namespace RenderIntegration {
 // the same take made here. Depth only, level 0, the solid texels of an alpha material through PSInjDepthA (the slice
 // prepass's recipe). Defined in rendering/view_model_seam.hpp.
 inline void kh_infront_seam_inject(ID3D11DeviceContext* ctx, const D3D11_VIEWPORT& khvs_vp);
-// KH_VOL_REPLAY - the recorder and the replay (the design note is with the stage state, above the lane fill).
+// KH_VOL_REPLAY - the recorder and the replay (the design note is with the shared state, rendering/replay_state.hpp).
 // Render thread. A pass is every draw with the volume buffer bound from its first counting draw to the stencil
 // resolve (the bracket): the counting draws and the uncounted ones beside a target (the engine's hands prepass among
 // them), in order. A draw is recorded with everything it had bound but its outputs, its class instances and its
@@ -743,18 +743,8 @@ inline void kh_rp_pass_begin(ID3D11DeviceContext* ctx) {
     if (dev) dev->Release();
     if (!ok) { g_rp_ok = false; kh_stat(g_rp_c.refused); return; }
     if (g_rp_withheld_seq == g_rp_pass) return;
-    const bool prev = g_ro.in_injection;
-    g_ro.in_injection = true;
-    KhOmSave om;
-    om.capture(ctx);
-    KhPredAside pa;   // KH_PRED_ASIDE: a draw hook's copy - not skipped by a predicate the engine left bound.
-    pa.begin(ctx);
-    ctx->OMSetRenderTargets(0, nullptr, nullptr);
-    ctx->CopyResource(g_rp_pre, g_svs_vol_src);
-    pa.end();
-    om.restore(ctx);
-    om.release();
-    g_ro.in_injection = prev;
+    // KH_PRED_ASIDE: a draw hook's copy - not skipped by a predicate the engine left bound (KH_EA_VOL_COPY).
+    kh_svs_copy_aside(ctx, g_rp_pre, g_svs_vol_src);
 }
 // The volume buffer as the engine left it for this frame's count, before our world seam's footprint: replay B's start,
 // copied into its target (g_rp_tgtb).
@@ -766,18 +756,8 @@ inline void kh_rp_snap_engine(ID3D11DeviceContext* ctx) {
         const bool ok = kh_rp_ensure_tex(dev);
         if (dev) dev->Release();
         if (!ok) return;
-        const bool prev = g_ro.in_injection;
-        g_ro.in_injection = true;
-        KhOmSave om;
-        om.capture(ctx);
-        KhPredAside pa;   // KH_PRED_ASIDE: ahead of the seam's StateBackup - the copy is not skipped by a predicate.
-        pa.begin(ctx);
-        ctx->OMSetRenderTargets(0, nullptr, nullptr);
-        ctx->CopyResource(g_rp_tgtb, g_svs_vol_src);
-        pa.end();
-        om.restore(ctx);
-        om.release();
-        g_ro.in_injection = prev;
+        // KH_PRED_ASIDE: ahead of the seam's StateBackup - the copy is not skipped by a predicate (KH_EA_VOL_COPY).
+        kh_svs_copy_aside(ctx, g_rp_tgtb, g_svs_vol_src);
         g_rp_eng_seq = g_svs_frame_seq;
     } catch (...) {}
 }
@@ -1265,6 +1245,11 @@ static constexpr float    KH_VMIR_REACH_MUL = 2.0f;
 static constexpr float    KH_VMIR_MOTION_M = 1.0f;
 static constexpr uint64_t KH_VMIR_HOLD = 8u;
 static uint64_t g_vmir_want_cycle = ~0ull;   // The last cycle that wanted the mirror (~0 = none).
+// KH_MIR_BAND_RECT: a reader through its texels anywhere (an inFront mesh, a translucent texel) rather than through
+// the near fade's band alone - the readers the gate, the rectangles and every pass always count.
+inline bool kh_rp_mir_flagged(const RenderObject& o) {
+    return kh_in_front(o) || o.timed || o.color[3] < 0.999f || kh_mat_set_has_alpha(o.materials);
+}
 inline bool kh_vmir_wanted(const float khvw_cam[3], const float khvw_proj[4][4]) {
     const float khvw_band = kh_rp_mir_band(khvw_proj);
     bool khvw_want = khvw_band < 0.0f;
@@ -1274,8 +1259,7 @@ inline bool kh_vmir_wanted(const float khvw_cam[3], const float khvw_proj[4][4])
         if (!g_scene.alive[i]) continue;
         const RenderObject& o = g_scene.objs[i];
         if (!kh_obj_vis(o)) continue;   // KH_SHOW_INFRONT.
-        if (kh_in_front(o) || o.timed || o.color[3] < 0.999f || kh_mat_set_has_alpha(o.materials) ||
-            kh_rp_box_dist(o, khvw_cam) < khvw_reach) khvw_want = true;
+        if (kh_rp_mir_flagged(o) || kh_rp_box_dist(o, khvw_cam) < khvw_reach) khvw_want = true;
     }
     if (khvw_want) g_vmir_want_cycle = g_topo_cycles;
     return khvw_want || (g_vmir_want_cycle != ~0ull && g_topo_cycles >= g_vmir_want_cycle &&
@@ -1284,11 +1268,9 @@ inline bool kh_vmir_wanted(const float khvw_cam[3], const float khvw_proj[4][4])
 // KH_REPLAY_SCISSOR: one object's bound in NDC through the cycle latch - its bounding sphere (radius x1.25 + 5 cm, for
 // the witness ring and skinned motion) clipped at KH_RP_CLIP_NEAR_M. 0 = nothing of it can be drawn (behind the camera
 // or wholly nearer than that), 1 = khro_b holds [x0, y0, x1, y1], 2 = no bound (an inFront mesh, drawn under its own
-// projection). khro_d = the sphere's nearest distance to khro_cam (m, world). The caller has checked the latch.
+// projection). The caller has checked the latch.
 // KH_REPLAY_RASTER: the latch's view, the screen terms of the replay's raster (the copy's where it parted).
-inline int kh_rp_obj_ndc(const RenderObject& o, const float (*khro_v)[4], const float khro_cam[3], float khro_b[4],
-                         float& khro_d) {
-    khro_d = 0.0f;
+inline int kh_rp_obj_ndc(const RenderObject& o, const float (*khro_v)[4], float khro_b[4]) {
     if (kh_in_front(o)) return 2;
     const float (*V)[4] = khro_v;   // KH_RP_ADOPT: the caller's view (kh_rp_view_of).
     const float (*Pm)[4] = g_ro.cycle_pv.projection;
@@ -1297,8 +1279,6 @@ inline int kh_rp_obj_ndc(const RenderObject& o, const float (*khro_v)[4], const 
     const float ox = khro_r ? g_rp_rast[2] : Pm[2][0] / Pm[2][3], oy = khro_r ? g_rp_rast[3] : Pm[2][1] / Pm[2][3];
     float c[3];
     const float rad = kh_rp_sphere_of(o, c);   // KH_MIR_BAND: the sphere, shared.
-    const float dx = c[0] - khro_cam[0], dy = c[1] - khro_cam[1], dz = c[2] - khro_cam[2];
-    khro_d = sqrtf(dx * dx + dy * dy + dz * dz) - rad;
     const float vx = c[0] * V[0][0] + c[1] * V[1][0] + c[2] * V[2][0] + V[3][0];
     const float vy = c[0] * V[0][1] + c[1] * V[1][1] + c[2] * V[2][1] + V[3][1];
     const float vz = c[0] * V[0][2] + c[1] * V[1][2] + c[2] * V[2][2] + V[3][2];
@@ -1311,11 +1291,6 @@ inline int kh_rp_obj_ndc(const RenderObject& o, const float (*khro_v)[4], const 
     khro_b[1] = fminf(sy * ty0, sy * ty1) + oy;
     khro_b[3] = fmaxf(sy * ty0, sy * ty1) + oy;
     return 1;
-}
-// KH_MIR_BAND_RECT: a reader through its texels anywhere (an inFront mesh, a translucent texel) rather than through
-// the near fade's band alone.
-inline bool kh_rp_mir_flagged(const RenderObject& o) {
-    return kh_in_front(o) || o.timed || o.color[3] < 0.999f || kh_mat_set_has_alpha(o.materials);
 }
 // KH_MIR_BAND_RECT: where a band-only mirror reader (not kh_rp_mir_flagged) can draw a fragment in the fade's band,
 // as an NDC bound - its drawn box (kh_rp_box_dist's: the world-axis box around the rotated, grown size) cut to view
@@ -1388,7 +1363,7 @@ inline bool kh_rp_mir_reader(const RenderObject& o, const float khmr_cam[3]) {
 // 50) and its drawn box within near + 2 m (KH_NEARZ_BOUNDS; the passes' other conditions only narrow that) - and
 // only when that box comes within the band's reach (KH_MIR_BAND).
 inline bool kh_rp_mir_reads(const RenderObject& o, const float khmp_proj[4][4], const float khmp_cam[3]) {
-    if (kh_in_front(o) || o.timed || o.color[3] < 0.999f || kh_mat_set_has_alpha(o.materials)) return true;
+    if (kh_rp_mir_flagged(o)) return true;
     const float khmp_near = khmp_proj[2][2] > 1.0e-6f ? -khmp_proj[3][2] / khmp_proj[2][2] : 0.0f;
     if (!(khmp_near > KH_CAM_NEAR_MIN && khmp_near < 50.0f)) return false;
     const float khmp_r = khmp_near + 2.0f;
@@ -1450,8 +1425,8 @@ inline void kh_rp_scissor_rects(KhRpRect& khsr_all, KhRpRect& khsr_mir) {
         if (!g_scene.alive[i]) continue;
         const RenderObject& o = g_scene.objs[i];
         if (!kh_obj_vis(o)) continue;   // KH_SHOW_INFRONT.
-        float b[4], d = 0.0f;
-        const int k = kh_rp_obj_ndc(o, khsr_v, cam, b, d);
+        float b[4];
+        const int k = kh_rp_obj_ndc(o, khsr_v, b);
         if (k == 0) continue;
         if (k == 2) return;   // Both whole.
         kh_rp_rect_add(a, b);
@@ -1492,8 +1467,8 @@ inline void kh_rp_covered(const std::vector<RenderObject>& khrc_list, bool& khrc
         for (const RenderObject& o : khrc_list) {
             if (!khrc_vol && !khrc_mir) break;
             if (!kh_obj_vis(o)) continue;   // KH_SHOW_INFRONT.
-            float b[4], d = 0.0f;
-            const int k = kh_rp_obj_ndc(o, khrc_v, cam, b, d);
+            float b[4];
+            const int k = kh_rp_obj_ndc(o, khrc_v, b);
             if (k == 0) continue;
             const D3D11_RECT pr = k == 1 ? kh_rp_px_of(b[0], b[1], b[2], b[3]) : D3D11_RECT{ 0, 0, 1, 1 };
             if (khrc_vol && !g_rp_sc_all.full && (k == 2 || !inside(pr, g_rp_sc_all))) khrc_vol = false;
@@ -1508,6 +1483,54 @@ inline void kh_rp_covered(const std::vector<RenderObject>& khrc_list, bool& khrc
     }
     if (kh_rp_merged_now() && !khrc_vol) kh_stat(g_rp_c.uncovered);
 }
+// KH_EA_RP_REC: one record's pipeline state but its rasterizer state, viewports and scissor rects (each loop sets
+// those its own way), with its vertex buffers and VS / PS shader resources set up to the loop's KH_RP_BIND_HW counts.
+inline void kh_rp_bind_rec(ID3D11DeviceContext* ctx, const KhRpDraw& r, uint32_t khbr_vb_n, uint32_t khbr_vs_n,
+                           uint32_t khbr_ps_n) {
+    ctx->IASetInputLayout(r.il);
+    ctx->IASetPrimitiveTopology(r.topo);
+    if (khbr_vb_n) ctx->IASetVertexBuffers(0, khbr_vb_n, r.vb, r.vbs, r.vbo);
+    ctx->IASetIndexBuffer(r.ib, r.ifmt, r.ioff);
+    ctx->VSSetShader(r.vs, nullptr, 0);
+    ctx->PSSetShader(r.ps, nullptr, 0);
+    ID3D11DeviceContext1* const c1 = r.cb1 ? kh_ctx1(ctx) : nullptr;
+    if (c1) {
+        c1->VSSetConstantBuffers1(0, KH_RP_CB, r.vcb, r.vcf, r.vcn);
+        c1->PSSetConstantBuffers1(0, KH_RP_CB, r.pcb, r.pcf, r.pcn);
+    } else {
+        ctx->VSSetConstantBuffers(0, KH_RP_CB, r.vcb);
+        ctx->PSSetConstantBuffers(0, KH_RP_CB, r.pcb);
+    }
+    if (khbr_vs_n) ctx->VSSetShaderResources(0, khbr_vs_n, r.vsrv);   // KH_RP_BIND_ALL / KH_RP_BIND_HW.
+    ctx->VSSetSamplers(0, KH_RP_SMP, r.vsmp);
+    if (khbr_ps_n) ctx->PSSetShaderResources(0, khbr_ps_n, r.psrv);
+    kh_bc_forget();   // KH_BIND_FILTER: t0 - t127.
+    ctx->PSSetSamplers(0, KH_RP_SMP, r.psmp);
+    ctx->OMSetDepthStencilState(r.dss, r.sref);
+    ctx->OMSetBlendState(r.bs, r.bf, r.bmask);
+}
+// KH_EA_RP_REC: khcr_rc cut to the record's own scissor rect when its rasterizer state clipped the draw (both clip
+// it); false = nothing of it is left.
+inline bool kh_rp_clip_rec(const KhRpDraw& r, D3D11_RECT& khcr_rc) {
+    D3D11_RASTERIZER_DESC rd = {};
+    if (r.rs) r.rs->GetDesc(&rd);
+    if (!r.rs || !rd.ScissorEnable || !r.nsc) return true;
+    khcr_rc.left = khcr_rc.left > r.sc[0].left ? khcr_rc.left : r.sc[0].left;
+    khcr_rc.top = khcr_rc.top > r.sc[0].top ? khcr_rc.top : r.sc[0].top;
+    khcr_rc.right = khcr_rc.right < r.sc[0].right ? khcr_rc.right : r.sc[0].right;
+    khcr_rc.bottom = khcr_rc.bottom < r.sc[0].bottom ? khcr_rc.bottom : r.sc[0].bottom;
+    return khcr_rc.right > khcr_rc.left && khcr_rc.bottom > khcr_rc.top;
+}
+// KH_EA_RP_REC: the record's draw call, as the engine issued it.
+inline void kh_rp_draw_rec(ID3D11DeviceContext* ctx, const KhRpDraw& r) {
+    switch (r.kind) {
+        case 1: ctx->DrawIndexed(r.a, r.b, r.d); break;
+        case 2: ctx->Draw(r.a, r.b); break;
+        case 3: ctx->DrawIndexedInstanced(r.a, r.b, r.c, r.d, r.e); break;
+        case 4: ctx->DrawInstanced(r.a, r.b, r.c, r.e); break;
+        default: break;
+    }
+}
 // The recorded draws [khri_from, khri_to), re-issued into whatever depth target is bound; with khri_sc, each through
 // its rasterizer's scissor twin, clipped to *khri_sc (intersected with the draw's own scissor when it had one).
 inline void kh_rp_issue(ID3D11DeviceContext* ctx, uint32_t khri_from, uint32_t khri_to, const D3D11_RECT* khri_sc) {
@@ -1519,53 +1542,19 @@ inline void kh_rp_issue(ID3D11DeviceContext* ctx, uint32_t khri_from, uint32_t k
         const uint32_t khri_vs_n = r.vsrv_n > khri_vs_hw ? r.vsrv_n : khri_vs_hw;
         const uint32_t khri_ps_n = r.psrv_n > khri_ps_hw ? r.psrv_n : khri_ps_hw;
         khri_vb_hw = r.vb_n; khri_vs_hw = r.vsrv_n; khri_ps_hw = r.psrv_n;
-        ctx->IASetInputLayout(r.il);
-        ctx->IASetPrimitiveTopology(r.topo);
-        if (khri_vb_n) ctx->IASetVertexBuffers(0, khri_vb_n, r.vb, r.vbs, r.vbo);
-        ctx->IASetIndexBuffer(r.ib, r.ifmt, r.ioff);
-        ctx->VSSetShader(r.vs, nullptr, 0);
-        ctx->PSSetShader(r.ps, nullptr, 0);
-        ID3D11DeviceContext1* const c1 = r.cb1 ? kh_ctx1(ctx) : nullptr;
-        if (c1) {
-            c1->VSSetConstantBuffers1(0, KH_RP_CB, r.vcb, r.vcf, r.vcn);
-            c1->PSSetConstantBuffers1(0, KH_RP_CB, r.pcb, r.pcf, r.pcn);
-        } else {
-            ctx->VSSetConstantBuffers(0, KH_RP_CB, r.vcb);
-            ctx->PSSetConstantBuffers(0, KH_RP_CB, r.pcb);
-        }
-        if (khri_vs_n) ctx->VSSetShaderResources(0, khri_vs_n, r.vsrv);   // KH_RP_BIND_ALL / KH_RP_BIND_HW.
-        ctx->VSSetSamplers(0, KH_RP_SMP, r.vsmp);
-        if (khri_ps_n) ctx->PSSetShaderResources(0, khri_ps_n, r.psrv);
-        kh_bc_forget();   // KH_BIND_FILTER: t0 - t127.
-        ctx->PSSetSamplers(0, KH_RP_SMP, r.psmp);
-        ctx->OMSetDepthStencilState(r.dss, r.sref);
-        ctx->OMSetBlendState(r.bs, r.bf, r.bmask);
+        kh_rp_bind_rec(ctx, r, khri_vb_n, khri_vs_n, khri_ps_n);
         if (r.nvp) ctx->RSSetViewports(r.nvp, r.vp);
         ID3D11RasterizerState* const sc_rs = khri_sc ? kh_rp_rs_scissor(ctx, r.rs) : nullptr;
         if (sc_rs) {
             D3D11_RECT rc = *khri_sc;
-            D3D11_RASTERIZER_DESC rd = {};
-            if (r.rs) r.rs->GetDesc(&rd);
-            if (r.rs && rd.ScissorEnable && r.nsc) {   // The draw clipped itself too: both.
-                rc.left = rc.left > r.sc[0].left ? rc.left : r.sc[0].left;
-                rc.top = rc.top > r.sc[0].top ? rc.top : r.sc[0].top;
-                rc.right = rc.right < r.sc[0].right ? rc.right : r.sc[0].right;
-                rc.bottom = rc.bottom < r.sc[0].bottom ? rc.bottom : r.sc[0].bottom;
-                if (rc.right <= rc.left || rc.bottom <= rc.top) continue;   // Nothing of it inside.
-            }
+            if (!kh_rp_clip_rec(r, rc)) continue;   // Nothing of it inside.
             ctx->RSSetState(sc_rs);
             ctx->RSSetScissorRects(1, &rc);
         } else {
             ctx->RSSetState(r.rs);
             if (r.nsc) ctx->RSSetScissorRects(r.nsc, r.sc);
         }
-        switch (r.kind) {
-            case 1: ctx->DrawIndexed(r.a, r.b, r.d); break;
-            case 2: ctx->Draw(r.a, r.b); break;
-            case 3: ctx->DrawIndexedInstanced(r.a, r.b, r.c, r.d, r.e); break;
-            case 4: ctx->DrawInstanced(r.a, r.b, r.c, r.e); break;
-            default: break;
-        }
+        kh_rp_draw_rec(ctx, r);
     }
 }
 // KH_MIR_REPLAY: the recorded draws the real mirror re-issued, into khrm_dsv the way kh_vmir_begin re-issues them - no
@@ -1589,53 +1578,19 @@ inline bool kh_rp_issue_mir(ID3D11DeviceContext* ctx, ID3D11DepthStencilView* kh
         D3D11_RECT rc = {};
         if (khrm_sc) {
             rc = *khrm_sc;
-            D3D11_RASTERIZER_DESC rd = {};
-            if (r.rs) r.rs->GetDesc(&rd);
-            if (r.rs && rd.ScissorEnable && r.nsc) {   // The draw clipped itself too: both.
-                rc.left = rc.left > r.sc[0].left ? rc.left : r.sc[0].left;
-                rc.top = rc.top > r.sc[0].top ? rc.top : r.sc[0].top;
-                rc.right = rc.right < r.sc[0].right ? rc.right : r.sc[0].right;
-                rc.bottom = rc.bottom < r.sc[0].bottom ? rc.bottom : r.sc[0].bottom;
-                if (rc.right <= rc.left || rc.bottom <= rc.top) continue;   // Nothing of it inside.
-            }
+            if (!kh_rp_clip_rec(r, rc)) continue;   // Nothing of it inside.
         }
         const uint32_t khrm_vb_n = r.vb_n > khrm_vb_hw ? r.vb_n : khrm_vb_hw;   // KH_RP_BIND_HW (past the skips:
         const uint32_t khrm_vs_n = r.vsrv_n > khrm_vs_hw ? r.vsrv_n : khrm_vs_hw;   // a skipped record set nothing).
         const uint32_t khrm_ps_n = r.psrv_n > khrm_ps_hw ? r.psrv_n : khrm_ps_hw;
         khrm_vb_hw = r.vb_n; khrm_vs_hw = r.vsrv_n; khrm_ps_hw = r.psrv_n;
-        ctx->IASetInputLayout(r.il);
-        ctx->IASetPrimitiveTopology(r.topo);
-        if (khrm_vb_n) ctx->IASetVertexBuffers(0, khrm_vb_n, r.vb, r.vbs, r.vbo);
-        ctx->IASetIndexBuffer(r.ib, r.ifmt, r.ioff);
-        ctx->VSSetShader(r.vs, nullptr, 0);
-        ctx->PSSetShader(r.ps, nullptr, 0);
-        ID3D11DeviceContext1* const c1 = r.cb1 ? kh_ctx1(ctx) : nullptr;
-        if (c1) {
-            c1->VSSetConstantBuffers1(0, KH_RP_CB, r.vcb, r.vcf, r.vcn);
-            c1->PSSetConstantBuffers1(0, KH_RP_CB, r.pcb, r.pcf, r.pcn);
-        } else {
-            ctx->VSSetConstantBuffers(0, KH_RP_CB, r.vcb);
-            ctx->PSSetConstantBuffers(0, KH_RP_CB, r.pcb);
-        }
+        kh_rp_bind_rec(ctx, r, khrm_vb_n, khrm_vs_n, khrm_ps_n);
         ctx->VSSetConstantBuffers(2, 1, &g_vmir_b2_patch);   // Whole, as kh_vmir_begin binds it.
-        if (khrm_vs_n) ctx->VSSetShaderResources(0, khrm_vs_n, r.vsrv);   // KH_RP_BIND_ALL / KH_RP_BIND_HW.
-        ctx->VSSetSamplers(0, KH_RP_SMP, r.vsmp);
-        if (khrm_ps_n) ctx->PSSetShaderResources(0, khrm_ps_n, r.psrv);
-        kh_bc_forget();   // KH_BIND_FILTER: t0 - t127.
-        ctx->PSSetSamplers(0, KH_RP_SMP, r.psmp);
-        ctx->OMSetDepthStencilState(r.dss, r.sref);
-        ctx->OMSetBlendState(r.bs, r.bf, r.bmask);
         ctx->RSSetViewports(1, &vp);
         ctx->RSSetState(rs);
         if (khrm_sc) ctx->RSSetScissorRects(1, &rc);
         else if (r.nsc) ctx->RSSetScissorRects(r.nsc, r.sc);
-        switch (r.kind) {
-            case 1: ctx->DrawIndexed(r.a, r.b, r.d); break;
-            case 2: ctx->Draw(r.a, r.b); break;
-            case 3: ctx->DrawIndexedInstanced(r.a, r.b, r.c, r.d, r.e); break;
-            case 4: ctx->DrawInstanced(r.a, r.b, r.c, r.e); break;
-            default: break;
-        }
+        kh_rp_draw_rec(ctx, r);
     }
     return true;
 }

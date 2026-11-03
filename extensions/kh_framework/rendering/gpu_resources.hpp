@@ -1,7 +1,8 @@
 #pragma once
 
-// The shared head (rendering_integration.hpp): the device resources (struct Resources, g_res) and the declarations
-// Resources::release calls. Never include it on its own.
+// The shared head (rendering_integration.hpp): the device resources (struct Resources, g_res), the declarations
+// Resources::release calls, and two declarations for parts that call them before their definitions
+// (kh_session_teardown, reorder_on_render_thread). Never include it on its own.
 namespace RenderIntegration {
 
 // KH_SUN_LADDER: the sun ladder's validity flags, tier keys and input hash describe maps and pyramids Resources owns,
@@ -17,7 +18,6 @@ inline void kh_thm_device_lost();
 // Forward: KH_PSV - the reduced particle shaders' variants and our builtins' blobs, dropped by Resources::release
 // (defined with the capture in rendering/see_through_shaders.hpp).
 inline void kh_psv_device_lost();
-inline void reset_session_state();
 inline void kh_session_teardown(bool khst_clean);   // KH_SESSION_RESET: both mission-edge teardowns (defined with the reset).
 
 // Forward: the render-thread identity check lives with the reorder state in rendering/hook_table.hpp.
@@ -27,6 +27,8 @@ inline bool reorder_on_render_thread();
 // wherever depth_srv is released. Written by ensure_depth_srv from one thread at a time (a park's flush, the render
 // thread, or a chain-only flush inside a game-thread resolve).
 static void* g_eds_memo_res = nullptr;
+static UINT g_eds_memo_w = 0;   // The keyed texture's size (the fast path's answer).
+static UINT g_eds_memo_h = 0;
 
 struct Resources {
     ID3D11VertexShader*      vs = nullptr;
@@ -1064,8 +1066,6 @@ struct Resources {
         wsee_e_fail_w = wsee_e_fail_h = wsee_es_fail_w = wsee_es_fail_h = 0;   // KH_WSEE_EFAIL_KEY.
         KH_SAFE_RELEASE(dss_wsee_smark);
         KH_SAFE_RELEASE(dss_wsee_ssel);
-        wsee_c_fail_res = nullptr;
-        wsee_c_fail_fmt = DXGI_FORMAT_UNKNOWN;
         KH_SAFE_RELEASE(ps_wsee_one);
         // KH_PSV: every variant of the engine's (and our tail's) pixel shaders, the queries, and our six builtins'
         // registered blobs (their shaders die here too).

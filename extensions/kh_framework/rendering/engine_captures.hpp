@@ -5,6 +5,65 @@
 namespace RenderIntegration {
 inline void kh_msaa_toggle_wipe(unsigned int khtw_new);
 
+// Capture core, parameterized on the source RTV: ensure_scene_capture calls it with the bound target (its one caller).
+// The caller keeps ownership of the RTV reference. KH_CAP_DEFER: khcap_copy false runs every check and (re)creation -
+// the same verdict, the same target - and leaves the copy (a resolve, on an MSAA scene) to a later call.
+inline std::string ensure_scene_capture_from(ID3D11Device* dev, ID3D11DeviceContext* ctx,
+                                             ID3D11RenderTargetView* rtv, bool khcap_copy = true) {
+    if (!rtv) return "no RTV";
+    ID3D11Resource* res = nullptr;
+    rtv->GetResource(&res);
+    D3D11_RENDER_TARGET_VIEW_DESC rtv_desc = {};
+    rtv->GetDesc(&rtv_desc);
+    if (!res) return "RTV has no resource";
+    ID3D11Texture2D* src_tex = nullptr;
+    HRESULT hr = res->QueryInterface(__uuidof(ID3D11Texture2D), reinterpret_cast<void**>(&src_tex));
+    res->Release();
+    if (FAILED(hr) || !src_tex) return "RTV resource is not a Texture2D";
+    D3D11_TEXTURE2D_DESC src_desc = {};
+    src_tex->GetDesc(&src_desc);
+
+    // Resolve target format must be non-typeless; the RTV view format is.
+    DXGI_FORMAT capture_fmt = rtv_desc.Format;
+
+    if (!g_res.scene_tex || g_res.scene_w != src_desc.Width ||
+        g_res.scene_h != src_desc.Height || g_res.scene_fmt != capture_fmt) {
+        g_res.release_scene_capture();
+        D3D11_TEXTURE2D_DESC td = {};
+        td.Width = src_desc.Width;
+        td.Height = src_desc.Height;
+        // Single-mip.
+        td.MipLevels = 1;
+        td.ArraySize = 1;
+        td.Format = capture_fmt;
+        td.SampleDesc.Count = 1;
+        td.Usage = D3D11_USAGE_DEFAULT;
+        td.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+        hr = dev->CreateTexture2D(&td, nullptr, &g_res.scene_tex);
+        if (FAILED(hr)) { src_tex->Release(); return "create scene capture tex " + hr_str(hr); }
+        hr = dev->CreateShaderResourceView(g_res.scene_tex, nullptr, &g_res.scene_srv);
+        if (FAILED(hr)) {
+            g_res.release_scene_capture();
+            src_tex->Release();
+            return "create scene capture SRV " + hr_str(hr);
+        }
+        g_res.scene_w = src_desc.Width;
+        g_res.scene_h = src_desc.Height;
+        g_res.scene_fmt = capture_fmt;
+    }
+
+    if (khcap_copy) {   // KH_CAP_DEFER: false leaves the copy to a later call.
+        if (src_desc.SampleDesc.Count > 1) {
+            ctx->ResolveSubresource(g_res.scene_tex, 0, src_tex, 0, capture_fmt);
+        } else {
+            ctx->CopyResource(g_res.scene_tex, src_tex);
+        }
+    }
+
+    src_tex->Release();
+    return "";
+}
+
 inline std::string ensure_scene_capture(ID3D11Device* dev, ID3D11DeviceContext* ctx, bool khcap_copy = true) {
     ID3D11RenderTargetView* rtv = nullptr;
     ctx->OMGetRenderTargets(1, &rtv, nullptr);
@@ -14,7 +73,7 @@ inline std::string ensure_scene_capture(ID3D11Device* dev, ID3D11DeviceContext* 
     return err;
 }
 
-// flush_locked's call sites only.
+// flush_locked's call sites and kh_fx_chain_run's (only flush_locked calls it).
 inline std::string kh_scene_capture_timed(ID3D11Device* dev, ID3D11DeviceContext* ctx) {
     KH_PROF_SCOPE(KHP_SCENE_CAPTURE);
     KH_GPU_SCOPE(ctx, KHG_SCENE_CAPTURE);   // KH_PROF.
@@ -264,8 +323,8 @@ inline bool kh_vmsee_targets(ID3D11Device* dev) {
             g_res.release_vmsee_targets();
             g_res.vmsee_fail_w = khve_w;
             g_res.vmsee_fail_h = khve_h;
-            report_error_once_safe("KH view model: the see-through targets could not be made (the chain reads the "
-                                   "live depth there)");
+            report_error_once_safe("KH RenderIntegration: view model: the see-through targets could not be made (the "
+                                   "chain reads the live depth there)");
             return false;
         }
         g_res.vmsee_w = khve_w;
@@ -281,7 +340,8 @@ inline bool kh_vmsee_targets(ID3D11Device* dev) {
 // not armed and the chain reads the live depth. khve_wsee: KH_WSEE's call (kh_wsee_ensure) - the same shader and
 // blend, a refusal reported under its own name (the first caller to meet a refusal reports it).
 inline bool kh_vmsee_ensure(ID3D11Device* dev, bool khve_wsee = false) {
-    const char* const khve_who = khve_wsee ? "KH world see-through" : "KH view model";
+    const char* const khve_who = khve_wsee ? "KH RenderIntegration: world see-through"
+                                            : "KH RenderIntegration: view model";
     if (!dev || !g_res.depth_srv || !g_res.depth_res_identity) return false;
     const UINT khve_sc = g_res.depth_sample_count;
     if (khve_sc < 2) return false;
@@ -408,8 +468,8 @@ inline bool kh_wsee_ensure(ID3D11Device* dev) {
             KH_SAFE_RELEASE(g_res.bs_wsee_tpre);
             KH_SAFE_RELEASE(g_res.bs_wsee_tpost);
             g_res.wsee_v2_failed = true;
-            report_error_once_safe("KH world see-through: " + khwe_err + " (the chain reads the live depth through "
-                                   "blended surfaces)");
+            report_error_once_safe("KH RenderIntegration: world see-through: " + khwe_err +
+                                   " (the chain reads the live depth through blended surfaces)");
             return false;
         }
     }
@@ -441,8 +501,8 @@ inline bool kh_wsee_ensure(ID3D11Device* dev) {
         if (!khle_err.empty()) {
             KH_SAFE_RELEASE(g_res.ps_wsee_one_l);
             g_res.wsee_ld_failed = true;
-            report_error_once_safe("KH world see-through: the layer-depth split could not be made (" + khle_err +
-                                   "; particles keep one depth a phase)");
+            report_error_once_safe("KH RenderIntegration: world see-through: the layer-depth split could not be made "
+                                   "(" + khle_err + "; particles keep one depth a phase)");
         }
     }
     // KH_WSEE_OQ2: the post twins that write D3m and D3's resolve (depth_resolve.hlsl PSWseeOneZ / PSWseeOneZL /
@@ -475,9 +535,9 @@ inline bool kh_wsee_ensure(ID3D11Device* dev) {
             KH_SAFE_RELEASE(g_res.ps_wsee_one_zl);
             KH_SAFE_RELEASE(g_res.ps_wsee_d3_res);
             g_res.ps_wsee_oq2_failed = true;
-            report_error_once_safe("KH world see-through: the late opaques' depth target pass could not be made (" +
-                                   khoz_err + "; every late opaque after the first fence-type layer stores its depth "
-                                   "one by one, as before)");
+            report_error_once_safe("KH RenderIntegration: world see-through: the late opaques' depth target pass "
+                                   "could not be made (" + khoz_err + "; every late opaque after the first "
+                                   "fence-type layer stores its depth one by one, as before)");
         }
     }
     // KH_PSB_ZB: the one pass's block bound (depth_resolve.hlsl PSPsbZb at log2 s = KH_PSB_LS, KH_PSB_ZB_DEFS; the
@@ -502,8 +562,8 @@ inline bool kh_wsee_ensure(ID3D11Device* dev) {
         if (!khzb_err.empty()) {
             KH_SAFE_RELEASE(g_res.ps_psb_zb);
             g_res.psb_zb_failed = true;
-            report_error_once_safe("KH world see-through: the one-pass record's block bound PS could not be made (" +
-                                   khzb_err + "; its depth reads as before)");
+            report_error_once_safe("KH RenderIntegration: world see-through: the one-pass record's block bound PS "
+                                   "could not be made (" + khzb_err + "; its depth reads as before)");
         }
     }
     if (!g_res.ps_wsee_copy && !g_res.ps_wsee_copy_failed) {
@@ -518,9 +578,9 @@ inline bool kh_wsee_ensure(ID3D11Device* dev) {
         if (FAILED(khwe_chr) || !g_res.ps_wsee_copy) {
             KH_SAFE_RELEASE(g_res.ps_wsee_copy);
             g_res.ps_wsee_copy_failed = true;
-            report_error_once_safe("KH world see-through: the chain's copy PS (a last pass that reads the scene's "
-                                   "samples takes the approximation): " + (khwe_cerr.empty() ? hr_str(khwe_chr)
-                                                                                             : khwe_cerr));
+            report_error_once_safe("KH RenderIntegration: world see-through: the chain's copy PS (a last pass that "
+                                   "reads the scene's samples takes the approximation): " +
+                                   (khwe_cerr.empty() ? hr_str(khwe_chr) : khwe_cerr));
         }
     }
     // The sorted tail's layer-aware composite: out.rgb = o0.rgb + dest.rgb x o1.rgb, out.a = o0.a + dest.a x o1.a
@@ -543,8 +603,8 @@ inline bool kh_wsee_ensure(ID3D11Device* dev) {
         if (FAILED(dev->CreateBlendState(&khwe_bd, &g_res.bs_wsee_sort)) || !g_res.bs_wsee_sort) {
             KH_SAFE_RELEASE(g_res.bs_wsee_sort);
             g_res.bs_wsee_sort_failed = true;
-            report_error_once_safe("KH world see-through: the sorted tail's blend state could not be made (our "
-                                   "translucent parts take the plain blend under the game's layers)");
+            report_error_once_safe("KH RenderIntegration: world see-through: the sorted tail's blend state could not "
+                                   "be made (our translucent parts take the plain blend under the game's layers)");
         }
     }
     return true;
@@ -656,8 +716,8 @@ inline bool kh_wsee_targets(ID3D11Device* dev, DXGI_FORMAT khwg_fmt) {
         g_res.wsee_fail_q = khwg_q;
         g_res.wsee_fail_f = khwg_fmt;
         g_res.wsee_fail_cycle = g_topo_cycles;   // KH_WSEE_FAIL_RETRY.
-        report_error_once_safe("KH world see-through: the capture targets could not be made (the chain reads the "
-                               "live depth through blended surfaces)");
+        report_error_once_safe("KH RenderIntegration: world see-through: the capture targets could not be made (the "
+                               "chain reads the live depth through blended surfaces)");
         return false;
     }
     if (khwg_latched) {   // KH_WSEE_FAIL_RETRY: a retry at the refused key succeeded.
@@ -734,8 +794,8 @@ inline bool kh_wsee_ld_ensure(ID3D11Device* dev) {
         KH_SAFE_RELEASE(g_res.bs_wsee_ldpost2);
         KH_SAFE_RELEASE(g_res.dss_wsee_far);
         g_res.wsee_ld_failed = true;
-        report_error_once_safe("KH world see-through: the layer-depth split could not be made (" + khle_err +
-                               "; particles keep one depth a phase)");
+        report_error_once_safe("KH RenderIntegration: world see-through: the layer-depth split could not be made (" +
+                               khle_err + "; particles keep one depth a phase)");
         return false;
     }
     return true;
@@ -788,8 +848,8 @@ inline bool kh_wsee_ld_targets(ID3D11Device* dev) {
         g_res.wsee_ld_fail_s = g_res.wsee_samples;
         g_res.wsee_ld_fail_q = g_res.wsee_quality;
         g_res.wsee_ld_fail_cycle = g_topo_cycles;   // KH_WSEE_FAIL_RETRY.
-        report_error_once_safe("KH world see-through: the layer-depth targets could not be made (particles keep one "
-                               "depth a phase)");
+        report_error_once_safe("KH RenderIntegration: world see-through: the layer-depth targets could not be made "
+                               "(particles keep one depth a phase)");
         return false;
     }
     if (khlt_latched) {   // KH_WSEE_FAIL_RETRY: a retry at the refused key succeeded.
@@ -864,8 +924,8 @@ inline bool kh_psb_ensure(ID3D11Device* dev) {
             g_res.psb_cb_set[khpe_i] = false;
         }
         g_res.psb_failed = true;
-        report_error_once_safe("KH world see-through: the one-pass particle record could not be set up (the "
-                               "particle re-draws keep their passes)");
+        report_error_once_safe("KH RenderIntegration: world see-through: the one-pass particle record could not be "
+                               "set up (the particle re-draws keep their passes)");
     }
     return khpe_ok;
 }
@@ -910,8 +970,8 @@ inline bool kh_psb_targets(ID3D11Device* dev) {
         g_res.wsee_pb_fail_w = g_res.wsee_w;
         g_res.wsee_pb_fail_h = g_res.wsee_h;
         g_res.wsee_pb_fail_cycle = g_topo_cycles;   // KH_WSEE_FAIL_RETRY.
-        report_error_once_safe("KH world see-through: the one-pass particle record's targets could not be made (the "
-                               "particle re-draws keep their passes)");
+        report_error_once_safe("KH RenderIntegration: world see-through: the one-pass particle record's targets "
+                               "could not be made (the particle re-draws keep their passes)");
         return false;
     }
     if (khpt_latched) {   // KH_WSEE_FAIL_RETRY: a retry at the refused key succeeded.
@@ -930,8 +990,8 @@ inline bool kh_psb_targets(ID3D11Device* dev) {
             KH_SAFE_RELEASE(g_res.wsee_zb_rtv);
             KH_SAFE_RELEASE(g_res.wsee_zb_tex);
             g_res.wsee_zb_refused = true;   // KH_PSB_ZB.
-            report_error_once_safe("KH world see-through: the one-pass record's block bound could not be made (its "
-                                   "depth reads as before)");
+            report_error_once_safe("KH RenderIntegration: world see-through: the one-pass record's block bound could "
+                                   "not be made (its depth reads as before)");
         }
     }
     g_res.wsee_pb_w = g_res.wsee_w;
@@ -990,9 +1050,9 @@ inline bool kh_wsee_d3m_targets(ID3D11Device* dev) {
         g_res.wsee_d3m_fail_f = khdm_vd.Format;
         g_res.wsee_d3m_fail_cycle = g_topo_cycles;   // KH_WSEE_FAIL_RETRY.
         if (khdm_fmt) {
-            report_error_once_safe("KH world see-through: the late opaques' depth target could not be made (every "
-                                   "late opaque after the first fence-type layer stores its depth one by one, as "
-                                   "before)");
+            report_error_once_safe("KH RenderIntegration: world see-through: the late opaques' depth target could "
+                                   "not be made (every late opaque after the first fence-type layer stores its depth "
+                                   "one by one, as before)");
         }
         return false;
     }

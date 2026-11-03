@@ -369,8 +369,8 @@ inline void kh_inst_sk_bind(ID3D11DeviceContext* ctx, const KhSkinPoolChunk* khs
 }
 
 // KH_INST_PART_ORDER: the lanes of the bucket khipl_rep represents, farthest first by the pass's distance memo (a
-// stable sort of the ranges' level-major, near-to-far order) - kh_inst_draw's part-2 walk, and KH_INST_PART_LANE's
-// tail entries in the injection (one per lane, sorted there among every other translucent part).
+// stable sort of the ranges' level-major, near-to-far order) - KH_INST_PART_LANE's tail entries in the injection (one
+// per lane, sorted there among every other translucent part; kh_inst_draw draws each, part 2).
 inline void kh_inst_part_lanes(const KhInstPlan& p, uint32_t khipl_rep, std::vector<KhInstPartLane>& khipl_o) {
     khipl_o.clear();
     if (khipl_rep >= p.batch_of.size() || p.batch_of[khipl_rep] < 0) return;
@@ -396,8 +396,9 @@ inline void kh_inst_part_lanes(const KhInstPlan& p, uint32_t khipl_rep, std::vec
 // level-major, and the instances of one draw blend in instance order, so one draw lands a far member's translucent
 // texels over a near member's. One draw per lane on part 2 (a per-object translucent part's cost); part 1 is
 // unchanged. KH_INST_PART_LANE: khid_one (part 2 only) draws that one lane of the walk (kh_inst_part_lanes) - the
-// injection's tail interleaves a bucket's lanes with the other parts. Every part-2 caller passes it (the flush
-// draws its parts per object), so the whole walk without it is unused.
+// injection's tail interleaves a bucket's lanes with the other parts. Part 2 draws only that lane: the injection's
+// tail is the one part-2 caller (the flush's translucent part copies never bucket, kh_inst_eligible), and a part-2
+// call without it draws nothing.
 // Preconditions (kh_draw_textured's): the representative's CB uploaded (the untextured route; textured,
 // kh_draw_textured uploads it - KH_TX_ONE_UPLOAD), its PS bound, the instanced VS + layout bound, the lane ring on
 // IA slot 1, blend + dss set. Returns the draw count; khid_inst_out the lanes drawn.
@@ -446,13 +447,8 @@ inline uint32_t kh_inst_draw(ID3D11DeviceContext* ctx, ID3D11Device* dev, const 
         khid_inst_out += khid_n;
     };
 
-    if (khid_part == 2) {   // KH_INST_PART_ORDER: every lane of the bucket, farthest first.
-        if (khid_one) {   // KH_INST_PART_LANE: one lane of that walk.
-            khid_run(khid_one->lvl, khid_one->lane, 1u);
-            return khid_draws;
-        }
-        kh_inst_part_lanes(p, khid_rep, p.part_order);
-        for (const KhInstPartLane& khid_l : p.part_order) khid_run(khid_l.lvl, khid_l.lane, 1u);
+    if (khid_part == 2) {   // KH_INST_PART_LANE: one lane of the KH_INST_PART_ORDER walk.
+        if (khid_one) khid_run(khid_one->lvl, khid_one->lane, 1u);
         return khid_draws;
     }
 

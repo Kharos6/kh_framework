@@ -34,8 +34,37 @@ inline bool proj_near_zero(float v) { return fabsf(v) < 1e-6f; }
 // Persisted last captured m32: the continuity anchor for measurement-mode acceptance.
 static float g_proj_last_m32 = 0.0f;
 
-// Tests a 16-float window for the row-vector D3D perspective layout [ sx 0 0 0 / 0 sy 0 0 / jx jy m22 1 / 0 0 m32 0 ]
-// and its transpose. Structure, sx, sy and m22 must match the latch tightly.
+// The row-vector D3D perspective layout [ sx 0 0 0 / 0 sy 0 0 / jx jy m22 1 / 0 0 m32 0 ] (khpl_t false) or its
+// transpose (HLSL column_major, khpl_t true): the structure, and sx, sy and m22 within 2 % of the latch's. Returns the
+// window index of the m32 lane (14, or 11 transposed), or -1. The one structural test of the probe and the hunt below.
+inline int proj_layout(const float* w, bool khpl_t, float sx, float sy, float m22_l) {
+    auto close = [](float a, float b, float rel) {
+        return fabsf(a - b) <= rel * (fabsf(a) > fabsf(b) ? fabsf(a) : fabsf(b)) + 1e-5f;
+    };
+
+    if (!khpl_t) {
+        if (proj_near_zero(w[1]) && proj_near_zero(w[2]) && proj_near_zero(w[3]) &&
+            proj_near_zero(w[4]) && proj_near_zero(w[6]) && proj_near_zero(w[7]) &&
+            proj_near_zero(w[12]) && proj_near_zero(w[13]) && proj_near_zero(w[15]) &&
+            fabsf(w[11] - 1.0f) < 1e-4f &&
+            close(w[0], sx, 0.02f) && close(w[5], sy, 0.02f) && close(w[10], m22_l, 0.02f)) {
+            return 14;
+        }
+    } else {
+        if (proj_near_zero(w[1]) && proj_near_zero(w[3]) &&
+            proj_near_zero(w[4]) && proj_near_zero(w[6]) && proj_near_zero(w[7]) &&
+            proj_near_zero(w[8]) && proj_near_zero(w[9]) && proj_near_zero(w[12]) && proj_near_zero(w[13]) &&
+            fabsf(w[14] - 1.0f) < 1e-4f &&
+            close(w[0], sx, 0.02f) && close(w[5], sy, 0.02f) && close(w[10], m22_l, 0.02f)) {
+            return 11;
+        }
+    }
+
+    return -1;
+}
+
+// Tests a 16-float window in the locked slot's own orientation (proj_layout) against the latch, m32 of the latch's
+// sign. Returns the window's near (-m32 / m22) with the pair in out_m22 / out_m32, or -1.
 inline float proj_slot_probe(const float* w, float* out_m22, float* out_m32) {
     const float sx = g_ro.cycle_pv.projection[0][0];
     const float sy = g_ro.cycle_pv.projection[1][1];
@@ -43,37 +72,20 @@ inline float proj_slot_probe(const float* w, float* out_m22, float* out_m32) {
     const float m32_l = g_ro.cycle_pv.projection[3][2];
     if (fabsf(m32_l) < 1e-9f) return -1.0f;
 
-    auto close = [](float a, float b, float rel) {
-        return fabsf(a - b) <= rel * (fabsf(a) > fabsf(b) ? fabsf(a) : fabsf(b)) + 1e-5f;
-    };
-
-    if (!g_proj_locator.transposed) {
-        if (proj_near_zero(w[1]) && proj_near_zero(w[2]) && proj_near_zero(w[3]) &&
-            proj_near_zero(w[4]) && proj_near_zero(w[6]) && proj_near_zero(w[7]) &&
-            proj_near_zero(w[12]) && proj_near_zero(w[13]) && proj_near_zero(w[15]) &&
-            fabsf(w[11] - 1.0f) < 1e-4f &&
-            close(w[0], sx, 0.02f) && close(w[5], sy, 0.02f) && close(w[10], m22_l, 0.02f) &&
-            w[14] != 0.0f && w[14] * m32_l > 0.0f && fabsf(w[10]) > 1e-9f) {
-            *out_m22 = w[10];
-            *out_m32 = w[14];
-            return -w[14] / w[10];
-        }
-    } else {
-        if (proj_near_zero(w[1]) && proj_near_zero(w[3]) &&
-            proj_near_zero(w[4]) && proj_near_zero(w[6]) && proj_near_zero(w[7]) &&
-            proj_near_zero(w[8]) && proj_near_zero(w[9]) && proj_near_zero(w[12]) && proj_near_zero(w[13]) &&
-            fabsf(w[14] - 1.0f) < 1e-4f &&
-            close(w[0], sx, 0.02f) && close(w[5], sy, 0.02f) && close(w[10], m22_l, 0.02f) &&
-            w[11] != 0.0f && w[11] * m32_l > 0.0f && fabsf(w[10]) > 1e-9f) {
-            *out_m22 = w[10];
-            *out_m32 = w[11];
-            return -w[11] / w[10];
-        }
+    const int khps_i = proj_layout(w, g_proj_locator.transposed, sx, sy, m22_l);
+    if (khps_i >= 0 && w[khps_i] != 0.0f && w[khps_i] * m32_l > 0.0f && fabsf(w[10]) > 1e-9f) {
+        *out_m22 = w[10];
+        *out_m32 = w[khps_i];
+        return -w[khps_i] / w[10];
     }
 
     return -1.0f;
 }
 
+// The hunt's test (either orientation, the plain layout first): m32 within 10 % of the latch's, or off the known slot
+// (discovery false) within 25 % of the last latched m32. Latches the engine pair on a match. No mid-frame near-shift
+// re-arm here: every call sits behind proj_scan_upload's engine_proj_valid return, so the pair latches once per cycle;
+// the partition re-arm is inject_composited_meshes' (KH_PART_NEAR, the anomalous cycle).
 inline bool proj_try_window(const float* w, bool discovery) {
     const float sx = g_ro.cycle_pv.projection[0][0];
     const float sy = g_ro.cycle_pv.projection[1][1];
@@ -91,53 +103,14 @@ inline bool proj_try_window(const float* w, bool discovery) {
         return g_proj_last_m32 != 0.0f && close(v, g_proj_last_m32, 0.25f);
     };
 
-    if (proj_near_zero(w[1]) && proj_near_zero(w[2]) && proj_near_zero(w[3]) &&
-        proj_near_zero(w[4]) && proj_near_zero(w[6]) && proj_near_zero(w[7]) &&
-        proj_near_zero(w[12]) && proj_near_zero(w[13]) && proj_near_zero(w[15]) &&
-        fabsf(w[11] - 1.0f) < 1e-4f &&
-        close(w[0], sx, 0.02f) && close(w[5], sy, 0.02f) && close(w[10], m22_l, 0.02f) &&
-        m32_ok(w[14])) {
-        {
-            const float n_prev = fabsf(g_ro.engine_m22) > 1e-9f ? (-g_ro.engine_m32 / g_ro.engine_m22) : 0.0f;
-            const float n_new  = fabsf(w[10]) > 1e-9f ? (-w[14] / w[10]) : 0.0f;
-
-            // Near-plane shift mid-frame. Never runs: every call sits behind proj_scan_upload's engine_proj_valid
-            // return, so the pair latches once per cycle. The partition re-arm is done in inject_composited_meshes
-            // (KH_PART_NEAR, the anomalous cycle).
-            if (g_ro.engine_proj_valid && g_ro.injected &&
-                n_prev > 1e-4f && fabsf(n_new - n_prev) > 0.05f * n_prev) {
-                g_ro.injected = false;
-            }
-        }
+    for (int khtw_t = 0; khtw_t < 2; ++khtw_t) {   // The plain layout, then the transposed upload.
+        const int khtw_i = proj_layout(w, khtw_t != 0, sx, sy, m22_l);
+        if (khtw_i < 0 || !m32_ok(w[khtw_i])) continue;
         g_ro.engine_m22 = w[10];
-        g_ro.engine_m32 = w[14];
-        g_proj_last_m32 = w[14];
+        g_ro.engine_m32 = w[khtw_i];
+        g_proj_last_m32 = w[khtw_i];
         g_ro.engine_proj_valid = true;
-        g_proj_locator.transposed = false;
-        return true;
-    }
-
-    // Transposed (HLSL column_major) upload.
-    if (proj_near_zero(w[1]) && proj_near_zero(w[3]) &&
-        proj_near_zero(w[4]) && proj_near_zero(w[6]) && proj_near_zero(w[7]) &&
-        proj_near_zero(w[8]) && proj_near_zero(w[9]) && proj_near_zero(w[12]) && proj_near_zero(w[13]) &&
-        fabsf(w[14] - 1.0f) < 1e-4f &&
-        close(w[0], sx, 0.02f) && close(w[5], sy, 0.02f) && close(w[10], m22_l, 0.02f) &&
-        m32_ok(w[11])) {
-        {
-            const float n_prev = fabsf(g_ro.engine_m22) > 1e-9f ? (-g_ro.engine_m32 / g_ro.engine_m22) : 0.0f;
-            const float n_new  = fabsf(w[10]) > 1e-9f ? (-w[11] / w[10]) : 0.0f;
-
-            if (g_ro.engine_proj_valid && g_ro.injected &&
-                n_prev > 1e-4f && fabsf(n_new - n_prev) > 0.05f * n_prev) {
-                g_ro.injected = false;
-            }
-        }
-        g_ro.engine_m22 = w[10];
-        g_ro.engine_m32 = w[11];
-        g_proj_last_m32 = w[11];
-        g_ro.engine_proj_valid = true;
-        g_proj_locator.transposed = true;
+        g_proj_locator.transposed = khtw_t != 0;
         return true;
     }
 
@@ -159,15 +132,13 @@ inline void proj_scan_upload(ID3D11Resource* res, const void* data, uint32_t byt
                 khcb_f + g_proj_locator.float_offset, &khcb_m22, &khcb_m32);
         }
 
-
         if (khcb_near <= 0.0f && g_proj_locator.float_offset != 0 && khcb_n >= 16) {
             khcb_near = proj_slot_probe(khcb_f, &khcb_m22, &khcb_m32);
         }
 
-        // Foreign buffers never enter the table and resolve as misses.
-        if (khcb_near > 0.0f && !(khcb_near >= KH_CAM_NEAR_MIN && khcb_near <= KH_CAM_NEAR_MAX)) {
-        } else if (khcb_near > 0.0f) {
-            kh_cbc_note(res, khcb_m22, khcb_m32, nullptr);
+        // Foreign buffers (a near outside the camera band) never enter the table and resolve as misses.
+        if (khcb_near >= KH_CAM_NEAR_MIN && khcb_near <= KH_CAM_NEAR_MAX) {
+            kh_cbc_note(res, khcb_m22, khcb_m32);
         }
     }
 

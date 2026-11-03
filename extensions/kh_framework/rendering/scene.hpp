@@ -191,8 +191,8 @@ inline void kh_scene_sync() {
     if (g_scene.objs.size() < khss_n) g_scene.objs.resize(khss_n);
     if (g_objbuf_cpu.size() < khss_n) g_objbuf_cpu.resize(khss_n, KhObjRec());
     bool khss_cast = false;   // KH_SUN_GEN: a caster (before or after) taken.
-    // KH_SCENE_UNPUB: a staged object whose mesh is appended but not yet published (an import whose publish was
-    // deferred, a generated mesh - each until the next injection or flush lands it, KH_MESH_GEN_PUB) is not taken:
+    // KH_SCENE_UNPUB: a staged object whose mesh is appended but not yet published (an import or a
+    // generated mesh - each until the next injection or flush lands it, KH_MESH_GEN_PUB) is not taken:
     // every draw would clamp the id to mesh 0 (the box, at the new mesh's size) until then. Its slot stays marked and
     // listed, moved to the front in order, and the scene keeps what it had - nothing for a new object, the last synced
     // state for a changed one - until a sync after the publish. The in-place compaction keeps KH_SCENE_PAIR: an entry

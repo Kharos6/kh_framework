@@ -1,7 +1,7 @@
 #pragma once
 
-// The shared head (rendering_integration.hpp): the effect state both halves read (rain, the SSGI scale, SSAO's pass
-// record and strength). Never include it on its own.
+// The shared head (rendering_integration.hpp): the effect state both halves read (the SSGI scale, SSAO's strength,
+// radius and pass record). Never include it on its own.
 namespace RenderIntegration {
 
 // KH_XTHREAD_ATOMIC: written by setSsgiScale (game thread), read by ensure_fx_chain (the chain's thread: the render

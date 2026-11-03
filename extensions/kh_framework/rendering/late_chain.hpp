@@ -26,6 +26,8 @@ static std::atomic<uint64_t> g_fx_late_owed_cycle{ ~0ull };  // Chain the render
 static std::atomic<uint64_t> g_fx_late_ran_cycle{ ~0ull };   // A chain-only flush ran the chain in this cycle.
 static std::atomic<uint64_t> g_fx_late_dry_cycle{ ~0ull };   // The last cycle whose late scene resolve passed the entry test.
 static std::atomic<uint32_t> g_fx_late_streak{ 0 };
+// A cycle stamp: g_topo_cycles restarts with the session, so the session reset must clear it - a stale backoff would
+// hold the chain on the scene flush for the whole session.
 static std::atomic<uint64_t> g_fx_late_backoff{ 0 };
 static constexpr uint32_t KH_FX_LATE_STREAK = 1u;   // Consecutive passing cycles before the chain moves.
 static constexpr uint64_t KH_FX_LATE_BACKOFF = 600u;

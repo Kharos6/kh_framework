@@ -17,7 +17,7 @@ inline void flush_locked(ID3D11Device* dev, ID3D11DeviceContext* ctx, bool khfl_
     // released buffer or a half-written Map; with the flush on the render thread that reader is this thread, so the
     // block belongs to the frame's only flush.
     if (!khfl_chain_only) {   // KH_FX_LATE: the scene flush did the housekeeping.
-    // Land a publish kh_fbx_register could not park for, or a generated mesh's (KH_MESH_GEN_PUB: never parked; the
+    // Land a pending publish, an import's or a generated mesh's (KH_MESH_GEN_PUB, KH_EA_FBX_NO_PARK: never parked; the
     // objects naming either wait out of the live scene until then, KH_SCENE_UNPUB). This body runs either under a park
     // held end to end or on the render thread itself (which no park can then stall mid-body), so the publish and the VB
     // top-up share one serialized window. Ahead of every skip below on purpose: a frame the flush declines still lands
@@ -25,8 +25,8 @@ inline void flush_locked(ID3D11Device* dev, ID3D11DeviceContext* ctx, bool khfl_
     kh_mesh_publish_land(dev);
     // KH_LOD_BOUNDS (a backstop: KH_SCENE_UNPUB syncs no such object): an object synced while its mesh was
     // unpublished was gridded at mesh 0's bounds (the id clamps); its cell radius is taken again once its own
-    // every-level bounds read - whichever publish landed the id: the one above, the injection's (kh_mesh_publish_land),
-    // or a kh_fbx_register since, which publishes every id appended before its own.
+    // every-level bounds read - whichever publish landed the id: the one above or the injection's
+    // (kh_mesh_publish_land), each of which publishes every id appended before it.
     if (g_scene_unpub_min < mesh_count()) {
         const uint32_t khmp_from = g_scene_unpub_min, khmp_to = mesh_count();
         uint32_t khmp_left = 0xFFFFFFFFu;   // The lowest id still unpublished.
@@ -185,10 +185,9 @@ inline void flush_locked(ID3D11Device* dev, ID3D11DeviceContext* ctx, bool khfl_
                 g_ls.pub_rej_streak = 0;
                 g_ls.frame_view_valid = false;
                 g_ls.prev_view_valid = false;
-                g_ls.alt_view_valid = false;
                 g_ring_best_valid = false;
                 g_view_relock_wide_cycle = 0;
-                                g_ls.wipe_deferred = true;
+                g_ls.wipe_deferred = true;
 
                 for (int khf_b = 0; khf_b < 8; ++khf_b) {
                     g_ls.band[khf_b].valid = false;
@@ -237,7 +236,7 @@ inline void flush_locked(ID3D11Device* dev, ID3D11DeviceContext* ctx, bool khfl_
     // khf_cycle_landed is true, and when khf_cycle_landed is false comp_healthy is already false without it. A later
     // partition is covered instead by the injection's own re-arm, which clears g_ro.injected: KH_PART_NEAR before
     // drawing (it defers to the camera partition), the anomalous rescue after a draw (a later attempt lands)
-    // (proj_try_window's re-arm never runs: see there). Counting opaques past the landing would make this term live, at
+    // (proj_try_window has none: see there). Counting opaques past the landing would make this term live, at
     // the price of a late redraw of every composite mesh on any frame with 32 opaques after the landing - measure that
     // before changing it.
     const bool repainted_since_inject = g_ro.opaques_since_inject >= 32;
@@ -1098,7 +1097,7 @@ inline void flush_locked(ID3D11Device* dev, ID3D11DeviceContext* ctx, bool khfl_
 
                 kh_fill_depth_range_cb(cbd);
                 // Twin: both CB editions carry it.
-                                cbd.fx_meta[2] = static_cast<float>(g_res.comp_depth_w);
+                cbd.fx_meta[2] = static_cast<float>(g_res.comp_depth_w);
                 cbd.fx_meta[3] = static_cast<float>(g_res.comp_depth_h);
 
                 const bool exact_flush = measured ||
@@ -1745,7 +1744,7 @@ inline void flush_locked(ID3D11Device* dev, ID3D11DeviceContext* ctx, bool khfl_
                     const uint32_t khf_id = kh_inst_draw(ctx, dev, khf_inst_plan, meshes, khf_oi,   // KH_BUCKETS.
                         khf_obj_cbd, g_res.constant_buffer, khf_tx_on ? khf_txm : nullptr, khf_ts_ordered, khr_bound_rs,
                         khf_arb_this ? 2 : 0, khf_arb_this ? g_res.ps_comp_arb_tex : g_res.ps_tex,
-                        o.draw_part == 1 ? 2 : 1, khf_in);
+                        1, khf_in);   // Part 1: a bucketed object is never a part copy (kh_inst_eligible).
                     if (khf_tx_on && !khf_wrep) kh_stat_add(g_stats.textured_draws, khf_id);
                     if (khf_ipc && !khf_wrep) kh_stat_add(g_stats.skin_inst, khf_in);   // KH_SKIN_POOL.
                     khf_lod_iters = 0;   // The batch drew; no per-object level walk.

@@ -44,6 +44,14 @@ inline KhHlslStore kh_hlsl_load_all() {
 
         if (!khr_p) {
             khr_out.s[khr_i] = "// KH: shader resource missing from the DLL - add kh_shaders.rc to the build\n";
+            // KH_EA_HLSL_MISSING: named once (from any thread: the store loads on whichever asks first), so the fxc
+            // failures that follow (an entry point or an identifier it cannot find) carry their cause.
+            std::string khr_name;
+            for (const wchar_t* khr_w = KH_HLSL_RES_NAMES[khr_i]; *khr_w; ++khr_w) {
+                khr_name += static_cast<char>(*khr_w);   // The names are ASCII.
+            }
+            report_error_once_safe("KH RenderIntegration: shader sources: resource " + khr_name +
+                                   " missing from the DLL (hlslResMissing) - add kh_shaders.rc to the build");
             continue;
         }
 

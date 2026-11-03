@@ -1662,7 +1662,6 @@ struct KhClothFork {
     std::atomic<uint32_t> done{ 0 };        // Chunks finished (a chunk that threw counts: it is over).
     std::atomic<uint32_t> failed{ 0 };      // Chunks that threw; the initiator rethrows for them after the join.
     std::atomic<uint32_t> pids{ 1 };        // The next participant id (0 is the initiator's).
-    uint32_t n = 0;                         // Chunks (also in every handout word).
     // Participant ids with scratch. Atomic: a helper that read the previous
     // fork's generation may read it while the next fork's initiator writes it
     // (a stale value only admits or refuses a pid it never runs a chunk with).
@@ -1753,7 +1752,6 @@ inline void kh_cloth_fork_run(uint32_t khfr_n, uint32_t khfr_cap, void (*khfr_fn
     KhClothFork& khfr_f = g_cloth_fork;
     khfr_f.fn = khfr_fn;
     khfr_f.ctx = khfr_ctx;
-    khfr_f.n = khfr_n;
     khfr_f.cap.store(khfr_cap, std::memory_order_relaxed);   // Published by gen_posted's release.
     khfr_f.done.store(0u, std::memory_order_relaxed);
     khfr_f.failed.store(0u, std::memory_order_relaxed);
@@ -1800,7 +1798,10 @@ template <class KhFeF> inline void kh_fork_each(uint32_t khfe_n, KhFeF&& khfe_fn
     // which the game thread holds across a chain build) and a helper leaves for a
     // queued job of its own pool's queue (a cloth step, or a skin job for a skin
     // worker); either way the caller runs what is left.
-    kh_cloth_fork_run(khfe_chunks, khfe_w, &kh_cloth_fork_call<decltype(khfe_body)>, &khfe_body, true);
+    // KH_EA_FORK_EACH_CAP: the caller (the render thread, or the game thread in a parked flush) is no pool worker, so
+    // every worker may help: workers + 1 participants, as kh_attach_step's fork (the body has no per-participant
+    // scratch).
+    kh_cloth_fork_run(khfe_chunks, khfe_w + 1u, &kh_cloth_fork_call<decltype(khfe_body)>, &khfe_body, true);
 }
 // Elements (faces + edges) from which the gather forks; below it the chunking
 // costs more than it saves. Queries per chunk.
@@ -3262,8 +3263,9 @@ inline void kh_cloth_step(KhClothState& khcf_s, const KhClothParams& khcf_pr,
         khcf_s.guide_t1 = khcf_t1;
         // The affectors hold still across the frame; only turbulence's clock
         // runs, and it runs by the substep.
-        kh_cloth_substep(khcf_s, khcf_pr, khcf_cv, khcf_ncol, khcf_h, khcf_wind, khcf_f0,
-                         khcf_aff, khcf_naff, static_cast<float>(khcf_n - 1u - khcf_ran) * khcf_h, khcf_ground);
+        // KH_EA_TURB_CLOCK: this substep's end before the frame's end, leftover included (KH_SUB_CLOCK).
+        kh_cloth_substep(khcf_s, khcf_pr, khcf_cv, khcf_ncol, khcf_h, khcf_wind, khcf_f0, khcf_aff, khcf_naff,
+                         static_cast<float>(khcf_n - 1u - khcf_ran) * khcf_h + khcf_left, khcf_ground);
         khcf_s.accum -= khcf_h;
         khcf_f0 = khcf_f1;
         ++khcf_ran;

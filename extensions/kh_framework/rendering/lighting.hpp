@@ -397,7 +397,6 @@ inline uint64_t kh_dl_bucket_hash(const RenderObject& o) {
     static thread_local std::vector<float> khdh_rec;      // Scratch.
     memset(khdh_c.dl_ctl, 0, sizeof(khdh_c.dl_ctl));
     memset(khdh_c.dl_global, 0, sizeof(khdh_c.dl_global));
-    memset(khdh_c.dl_view, 0, sizeof(khdh_c.dl_view));
     // fill_dynlights_cb's lanes and records without the ring append (the ring position is not the block's identity).
     uint32_t khdh_pn = 0;
     const float khdh_scale = kh_dl_select(o, khdh_sel, khdh_pn);
@@ -409,7 +408,6 @@ inline uint64_t kh_dl_bucket_hash(const RenderObject& o) {
     uint64_t h = CryptoGenerator::FNV1A64_OFFSET;
     h = CryptoGenerator::fnv1a64_update(h, reinterpret_cast<const char*>(khdh_c.dl_ctl), sizeof(khdh_c.dl_ctl));
     h = CryptoGenerator::fnv1a64_update(h, reinterpret_cast<const char*>(khdh_c.dl_global), sizeof(khdh_c.dl_global));
-    h = CryptoGenerator::fnv1a64_update(h, reinterpret_cast<const char*>(khdh_c.dl_view), sizeof(khdh_c.dl_view));
     h = CryptoGenerator::fnv1a64_update(h, reinterpret_cast<const char*>(khdh_rec.data()),
                                         khdh_rec.size() * sizeof(float));
     return h | 1u;

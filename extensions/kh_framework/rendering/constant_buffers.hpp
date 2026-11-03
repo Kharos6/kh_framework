@@ -9,15 +9,14 @@ namespace RenderIntegration {
 
 static constexpr size_t KH_CBOBJ_BYTES      = offsetof(ConstantData, view_proj);
 static constexpr size_t KH_CBFRAME_BYTES    = sizeof(ConstantData) - KH_CBOBJ_BYTES;
-// The HLSL CBObj/CBFrame declarations and this struct are a hand-kept mirror; ensure_resources' full build (not its
-// initialized fast path) reflects the compiled PSMain's CBObj / CBFrame sizes - sizes only, not field offsets - and
-// reports a mismatch.
-static uint32_t g_cb_mirror_obj_b = 0;
-static uint32_t g_cb_mirror_frame_b = 0;
-static bool     g_cb_mirror_bad = false;
+// KH_EA_CB_ALIGN: both are constant buffers' ByteWidths (and the frame block's start is a float4 lane's).
+// The HLSL CBObj/CBFrame declarations and this struct are a hand-kept mirror; ensure_resources' full build
+// (rendering/device_resources.hpp; not its initialized fast path) reflects the compiled PSMain's CBObj / CBFrame
+// sizes - sizes only, not field offsets - and reports a mismatch.
+static_assert(KH_CBOBJ_BYTES % 16u == 0u && KH_CBFRAME_BYTES % 16u == 0u, "CBObj / CBFrame are whole float4 rows");
 
-// The one mesh-CB rotation fill (injection, flush, sun fallback). rot_m = engine-axes rows (RenderObject::rot_m or
-// SunCaster::rot).
+// The one object-CB rotation fill (every mesh pass's object fill and the vertex stage's). rot_m = engine-axes rows
+// (RenderObject::rot_m or a caster record's rot).
 inline void kh_fill_obj_rot(ConstantData& cbd, const float* rot_m) {
     for (int rr = 0; rr < 3; ++rr) {
         cbd.obj_rot[rr][0] = rot_m[rr * 3 + 0];
@@ -25,7 +24,7 @@ inline void kh_fill_obj_rot(ConstantData& cbd, const float* rot_m) {
         cbd.obj_rot[rr][2] = rot_m[rr * 3 + 2];
     }
 
-    cbd.obj_rot[0][3] = 1.0f;   // KhRotate engages identity matrix when the object is unrotated.
+    cbd.obj_rot[0][3] = 1.0f;   // Rows filled: KhRotate / KhObjRows apply them (a zeroed block reads as identity).
 }
 
 // A NO_OVERWRITE map into a region the GPU is not reading is a pointer return. Slice = the object block rounded to
@@ -121,14 +120,17 @@ inline bool kh_upload_frame_cb(ID3D11DeviceContext* ctx, ID3D11Buffer* buf, cons
 // depthParams.zw: the trigger draw's own viewport depth range when seen this cycle, else the scene's; a poisoned
 // range garbles the linearization for every pixel, so it is sanitised here, for every fill site (the mesh / chain
 // fills of the injection, the flush and the UI lane, KH_FX_PAIR_HOLD's two guard temporaries and KH_WSEE's decode
-// temporary in flush_locked).
-inline void kh_fill_depth_range_cb(ConstantData& cbd) {
-    cbd.depth_params[2] = g_ro.trig_vp_valid ? g_ro.trig_vp_min : g_scene_vp_min_d;
-    cbd.depth_params[3] = g_ro.trig_vp_valid ? g_ro.trig_vp_max : g_scene_vp_max_d;
-    if (!(cbd.depth_params[2] >= 0.0f && cbd.depth_params[3] <= 1.0f &&
-          cbd.depth_params[2] < cbd.depth_params[3])) {
-        cbd.depth_params[2] = g_scene_vp_min_d;
-        cbd.depth_params[3] = g_scene_vp_max_d;
+// temporary in flush_locked). KH_EA_WORLD_RANGE: the rule itself is kh_world_depth_range, which KH_WSEE's CPU decode
+// (see_through.hpp) reads too.
+inline void kh_world_depth_range(float& khwr_lo, float& khwr_hi) {
+    khwr_lo = g_ro.trig_vp_valid ? g_ro.trig_vp_min : g_scene_vp_min_d;
+    khwr_hi = g_ro.trig_vp_valid ? g_ro.trig_vp_max : g_scene_vp_max_d;
+    if (!(khwr_lo >= 0.0f && khwr_hi <= 1.0f && khwr_lo < khwr_hi)) {
+        khwr_lo = g_scene_vp_min_d;
+        khwr_hi = g_scene_vp_max_d;
     }
+}
+inline void kh_fill_depth_range_cb(ConstantData& cbd) {
+    kh_world_depth_range(cbd.depth_params[2], cbd.depth_params[3]);
 }
 }

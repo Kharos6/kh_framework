@@ -25,8 +25,7 @@ inline std::shared_ptr<const KhPhysicsBvh> kh_physics_bvh_for(int khcv_mesh, uin
     std::shared_ptr<KhPhysicsBvh> khcv_b = std::make_shared<KhPhysicsBvh>();
     if (kh_mesh_alive(khcv_mesh)) {
         const MeshDef& khcv_d = mesh_def(khcv_mesh);
-        const uint32_t khcv_ni = khcv_d.lod_n ? khcv_d.lod_istart[0]
-                                              : static_cast<uint32_t>(khcv_d.indices.size());
+        const uint32_t khcv_ni = mesh_base_icount(khcv_d);
         std::vector<float> khcv_p(khcv_d.verts.size() * 3u);
         for (size_t khcv_i = 0; khcv_i < khcv_d.verts.size(); ++khcv_i) {
             khcv_p[khcv_i * 3u]      = khcv_d.verts[khcv_i].pos[0] * khcv_bake[0];
@@ -58,8 +57,7 @@ inline bool kh_cloth_build(KhClothInst& khcb_in, const MeshDef& khcb_d, uint32_t
     khcb_in.vmap.clear();
     if (khcb_d.verts.empty() || khcb_d.indices.empty()) return false;
     if (khcb_d.cloth_w.size() != khcb_d.verts.size()) return false;   // Not a cloth mesh.
-    const uint32_t khcb_ni = khcb_d.lod_n ? khcb_d.lod_istart[0]
-                                          : static_cast<uint32_t>(khcb_d.indices.size());
+    const uint32_t khcb_ni = mesh_base_icount(khcb_d);
     if (khcb_ni < 3u) return false;
     const uint32_t khcb_nv = static_cast<uint32_t>(khcb_d.verts.size());
 
@@ -95,8 +93,6 @@ inline bool kh_cloth_build(KhClothInst& khcb_in, const MeshDef& khcb_d, uint32_t
     // Unique edges, and the bend pairs across every edge shared by two faces.
     std::unordered_map<uint64_t, uint32_t> khcb_edge;   // key -> opposite particle of the first face.
     khcb_edge.reserve(khcb_ni);
-    std::unordered_map<uint64_t, uint8_t> khcb_seen;
-    khcb_seen.reserve(khcb_ni);
     auto khcb_key = [](uint32_t x, uint32_t y) -> uint64_t {
         return x < y ? (static_cast<uint64_t>(x) << 32) | y : (static_cast<uint64_t>(y) << 32) | x;
     };
@@ -123,9 +119,9 @@ inline bool kh_cloth_build(KhClothInst& khcb_in, const MeshDef& khcb_d, uint32_t
             const uint32_t khcb_op = khcb_p[(khcb_e + 2) % 3];
             if (khcb_a == khcb_b) continue;
             const uint64_t khcb_kk = khcb_key(khcb_a, khcb_b);
-            if (khcb_seen.emplace(khcb_kk, 1u).second) khcb_add(khcb_in.st.stretch, khcb_a, khcb_b);
             const auto khcb_it = khcb_edge.find(khcb_kk);
-            if (khcb_it == khcb_edge.end()) {
+            if (khcb_it == khcb_edge.end()) {   // The edge's first face: its stretch constraint.
+                khcb_add(khcb_in.st.stretch, khcb_a, khcb_b);
                 khcb_edge.emplace(khcb_kk, khcb_op);
             } else if (khcb_it->second != khcb_op) {
                 // The two corners facing each other across a shared edge: a distance constraint between them resists
@@ -628,7 +624,8 @@ inline void kh_cloth_box_out(KhClothInst& khbo_in, uint32_t khbo_b) {
 }
 
 // One job. Runs on a cloth worker and touches nothing the game thread may be
-// writing: 'busy' was set before this instance was queued and is cleared last.
+// writing: 'busy' was set with the queue push, under the lock every pop takes
+// (KH_POOL_BUSY_AFTER_PUSH), and is cleared last.
 inline void kh_cloth_run(const std::shared_ptr<KhClothInst>& khcj_in) {
     KH_PROF_SCOPE(KHP_W_CLOTH_SIM);   // KH_PROF.
     KhClothInst& khcj = *khcj_in;
@@ -932,8 +929,8 @@ inline void kh_cloth_origin_shift(KhClothInst& khos_in, const double* khos_d) {
 
 // The terrain nodes within the cloth's reach about its carrier's centre, at last step's centre and this one's (a
 // fast carrier's whole path), into its frame. Game thread, non-busy instance, after its origin and reach are this
-// frame's.
-inline void kh_cloth_ground_patch(KhClothInst& khgc_in, const float* khgc_wc, float khgc_reach) {
+// frame's. khgc_tele: the teleport distance its step tests with (the cloth's or the chain's setting).
+inline void kh_cloth_ground_patch(KhClothInst& khgc_in, const float* khgc_wc, float khgc_reach, float khgc_tele) {
     KhClothGround& khgc_g = khgc_in.in_ground;
     khgc_g.on = false;
     if (!g_ground_ready) return;
@@ -942,10 +939,26 @@ inline void kh_cloth_ground_patch(KhClothInst& khgc_in, const float* khgc_wc, fl
     if (g_terrain_matrix.size() != khgc_n || g_terrain_grid_width != khgc_c) return;   // Rebuilt since: next frame.
     double khgc_lo[2] = { khgc_wc[0], khgc_wc[2] }, khgc_hi[2] = { khgc_wc[0], khgc_wc[2] };
     if (khgc_in.st.primed) {
-        const double khgc_px = static_cast<double>(khgc_in.st.centre[0]) + khgc_in.org[0];
-        const double khgc_pz = static_cast<double>(khgc_in.st.centre[2]) + khgc_in.org[2];
-        khgc_lo[0] = std::min(khgc_lo[0], khgc_px); khgc_hi[0] = std::max(khgc_hi[0], khgc_px);
-        khgc_lo[1] = std::min(khgc_lo[1], khgc_pz); khgc_hi[1] = std::max(khgc_hi[1], khgc_pz);
+        const KhClothState& khgc_s = khgc_in.st;
+        const double khgc_px = static_cast<double>(khgc_s.centre[0]) + khgc_in.org[0];
+        const double khgc_pz = static_cast<double>(khgc_s.centre[2]) + khgc_in.org[2];
+        // KH_EA_GROUND_JUMP: the last centre only while the step can sweep from it. A carrier landing more than the
+        // teleport distance (2 m unset) from where its velocity, over at most KH_CLOTH_DT_MAX, carried it from the
+        // last frame's end jumped (kh_cloth_frame_jumped): both steps rebase it and sweep nothing. fend stands
+        // |fend - centre| from the last centre; 1 m covers the world float; a non-finite bound keeps the path, as
+        // the step's test does. A patch spanning a teleport across the map copied, and kept, millions of nodes.
+        float khgc_fd[3];
+        kh_cloth_v3_sub(khgc_s.fend.centre, khgc_s.centre, khgc_fd);
+        const float khgc_v = khgc_s.carrier_vok ? kh_cloth_v3_len(khgc_s.carrier_v) : 0.0f;
+        const double khgc_sw = static_cast<double>(khgc_tele > 0.0f ? khgc_tele : 2.0f) +
+                               static_cast<double>(khgc_v) * KH_CLOTH_DT_MAX +
+                               static_cast<double>(kh_cloth_v3_len(khgc_fd)) + 1.0;
+        const double khgc_dx = khgc_px - static_cast<double>(khgc_wc[0]);
+        const double khgc_dz = khgc_pz - static_cast<double>(khgc_wc[2]);
+        if (!(khgc_dx * khgc_dx + khgc_dz * khgc_dz > khgc_sw * khgc_sw)) {
+            khgc_lo[0] = std::min(khgc_lo[0], khgc_px); khgc_hi[0] = std::max(khgc_hi[0], khgc_px);
+            khgc_lo[1] = std::min(khgc_lo[1], khgc_pz); khgc_hi[1] = std::max(khgc_hi[1], khgc_pz);
+        }
     }
     const double khgc_last = static_cast<double>(khgc_n - 1u);
     int64_t khgc_a[2], khgc_b[2];

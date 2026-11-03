@@ -392,6 +392,9 @@ inline bool kh_svs_inject_armed() {
 inline bool kh_svs_snap_wanted() {
     // Only our mesh draws read the snapshots (t21 / t22), so a frame with no visible
     // mesh copies nothing (the volume copy is gated the same way).
+    // KH_EA_SNAP_DEAD: and only through KhStenTerm, which the volume transport replaces (maskMeta.w and stenVol2.x are
+    // both its readiness then, so KhStenUnit never takes it): no snapshot, as no prime (kh_svs_prime_wanted).
+    if (kh_svs_vol_on()) return false;
     if (kh_shadows_off()) return false;   // KH_SHADOW_OFF: no reader.
     if (kh_svs_feature_on()) return g_svs_mesh_wanted.load(std::memory_order_relaxed);
     return false;
@@ -479,6 +482,26 @@ inline bool kh_svs_pre_ensure(ID3D11Device* khv_dev) {
     g_svs_pre_h = g_svs_mask_h;
     g_svs_pre_fmt = g_svs_mask_fmt;
     return true;
+}
+
+// KH_EA_VOL_COPY: src copied whole into dst ahead of the engine's draw - the engine's full OM set (KH_OM_SAVE_VOL:
+// KhOmSave, its UAVs with it) and its predicate (KH_PRED_ASIDE) set aside around the copy, so a depth target bound as
+// src is unbound while copied and the copy is never skipped; our hooks stand aside (in_injection, cleared after the
+// restore). The one bracket of the volume copy (kh_svs_vol_copy) and the replay's two engine snapshots
+// (kh_rp_pass_begin, kh_rp_snap_engine).
+inline void kh_svs_copy_aside(ID3D11DeviceContext* khca_ctx, ID3D11Resource* khca_dst, ID3D11Resource* khca_src) {
+    const bool khca_prev = g_ro.in_injection;
+    g_ro.in_injection = true;
+    KhOmSave khca_om;
+    khca_om.capture(khca_ctx);
+    KhPredAside khca_pa;
+    khca_pa.begin(khca_ctx);
+    khca_ctx->OMSetRenderTargets(0, nullptr, nullptr);
+    khca_ctx->CopyResource(khca_dst, khca_src);
+    khca_pa.end();
+    khca_om.restore(khca_ctx);
+    khca_om.release();
+    g_ro.in_injection = khca_prev;
 }
 
 // Source is whatever the adopted mask SRV views, so there is no second weak pointer to keep alive.

@@ -88,9 +88,7 @@ inline float kh_dls_reach_peak(const DlPoolLight& khp_l) {
                        ? (0.2126f * g_dl.main_gdiff[0] + 0.7152f * g_dl.main_gdiff[1] +
                           0.0722f * g_dl.main_gdiff[2])
                        : 1.0f;
-    const uint32_t khp_bits = g_dl_intensity_bits.load(std::memory_order_relaxed);
-    float khp_int = 1.0f;
-    memcpy(&khp_int, &khp_bits, sizeof(khp_int));
+    float khp_int = kh_dl_intensity();   // The lane the shader's dlGlobal.w takes (kh_dl_fill_ctl).
     if (!(khp_int > 0.0f) || khp_int != khp_int) khp_int = 1.0f;
     const float khp_p = kh_dls_lum(khp_l) * khp_gd * khp_int;
     // Never below 1: a dim light must not get a shorter reach than its far.

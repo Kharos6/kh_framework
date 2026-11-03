@@ -4,9 +4,10 @@
 // Never include it on its own.
 namespace RenderIntegration {
 
-// The device-death ladder shared by both reset branches: no shader worker may outlive the device (no wait: the caller
+// The device-death ladder shared by both reset branches: the shader batch ends with the device (no wait: the caller
 // holds the graphics lock, is the render thread itself, or - on_engine_reset's best effort after three failed lock
-// attempts - neither), then every device object and learned identity.
+// attempts - neither; a worker still inside D3DCompile, which holds no device object, is detached - KH_SHADER_ORPHANS),
+// then every device object and learned identity.
 inline void kh_engine_reset_release() {
     kh_shader_mt_shutdown(false);
     g_res.release();   // KH_THM_DEVRESET: also drops the heightfield's live flags.
@@ -18,7 +19,7 @@ inline void kh_engine_reset_release() {
     // KH_CLOTH: the buffers die with the device; the instances and their particle state do not, so a reset drops a
     // frame of cloth and not the drape. The workers keep running - they hold no device object.
     kh_cloth_release_all();
-    kh_skin_release_all();   // KH_SKEL: likewise; the next park re-uploads the pose.
+    kh_skin_release_all();   // KH_SKEL: likewise; the next upload (the flush) re-uploads the pose.
     kh_uvs_release_all();    // KH_USER_VS: likewise; the next flush makes them again.
 }
 

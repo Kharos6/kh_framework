@@ -3,28 +3,23 @@
 // The injection half (rendering_integration_injection.hpp): the latched engine lighting: the fog staging, the sky sun,
 // the world-lighting owner, the raw sun axis and the probes. Never include it on its own.
 namespace RenderIntegration {
-// Luminance-band agreement with an absolute epsilon so night-small values
-// cannot ratio-flap: |a - b| <= max(15% of the larger, 0.02).
-
-inline bool kh_probe_lum_band(float a, float b);   // Defined with the locator (the 15% band).
-// The main depth clear: close the frame, publish the brightest substantial cluster's representative.
-inline bool kh_probe_world_cycle();   // Defined with the locator.
-inline bool kh_probe_world_cycle();   // Defined with the locator.
-
+// Defined later in this file (declared here for the KH_LIGHT_BASE owner, which uses them first).
+inline bool kh_probe_lum_band(float a, float b);
+inline bool kh_probe_world_cycle();
+// Defined in rendering/shadow_locators.hpp (declared here for the uses below).
 inline void locator_capture(CbColorProbe& pr, const float* f, uint32_t nf, uint32_t win);
 
-// Sky-static predicate for the witness consumers: fresh mirror, an established
-// motion window, and sub-0.3 deg sky movement across it.
-inline bool kh_sky_static() {
-    return g_skysun_ref_valid &&
-           steady_now_ms() - g_skysun_ref_ms < 1000 &&
-           g_skysun_mot_deg >= 0.0f && g_skysun_mot_deg < 0.3f;
-}
 inline bool kh_sun_axis_lane_fresh(uint64_t khlf_now) {
     return g_skysun_ref_valid && (khlf_now - g_skysun_ref_ms) < KH_SUN_AXIS_SKY_FRESH_MS;
 }
 inline bool kh_sun_axis_lane_ok(uint64_t khlo_now) {
     return kh_sun_axis_lane_fresh(khlo_now) && g_skysun_ref[1] > KH_SUN_AXIS_LANE_MIN_Y;
+}
+// Sky-static predicate for the witness consumers: fresh mirror (the lane's own freshness), an established motion
+// window, and sub-0.3 deg sky movement across it.
+inline bool kh_sky_static() {
+    return kh_sun_axis_lane_fresh(steady_now_ms()) &&
+           g_skysun_mot_deg >= 0.0f && g_skysun_mot_deg < 0.3f;
 }
 
 inline void kh_blk_owner_close_span() {
@@ -57,7 +52,7 @@ inline void kh_blk_owner_note(const float* khon_b, uint8_t khon_flag) {
         khon_i = g_blko_n++;
         KhBlkOwn& khon_e = g_blko_cur[khon_i];
         memset(&khon_e, 0, sizeof(khon_e));
-        khon_e.at = static_cast<uint32_t>(g_blko_draws); khon_e.flag = khon_flag;
+        khon_e.flag = khon_flag;
         khon_e.al = khon_al; khon_e.sl = khon_sl;   // The cluster's band is anchored on its first member.
     }
     KhBlkOwn& khon_c = g_blko_cur[khon_i];
@@ -373,7 +368,7 @@ inline const float* kh_shadow_sun() {
 // them only through a publish (kh_sun_raw_frame's sky-lane sources). In the first two the witness only picks which of
 // the two returns is taken.
 inline bool kh_sun_axis_witnessed() {
-    return g_skysun_ref_valid && kh_sun_axis_lane_ok(steady_now_ms());
+    return kh_sun_axis_lane_ok(steady_now_ms());   // The lane's freshness test includes g_skysun_ref_valid.
 }
 
 // Caller supplies the axis already rotated into world space; fail-open wherever the comparison is not trustworthy

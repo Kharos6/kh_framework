@@ -74,12 +74,12 @@ struct alignas(16) ConstantData {
     // dynamicLightFog's pass writes xy = whether each fog record's pass draws before it (kh_dlf_fog_pack), and the
     // SSGI resolve writes an auto width into w.
     float fx2[4];
-    float dl_ctl[4];   // x = mode (0 off / 1 camera-relative world / 2 view space / 3 absolute pool), y = point
-                       // count, z = spot count, w = distance scale.
+    float dl_ctl[4];   // x = mode (3 absolute pool, armed; 0 off - the only two values written), y = point count,
+                       // z = spot count, w = distance scale.
     float dl_global[4];   // Xyz = global diffuse multiplier (cb10[3]); w = the global intensity (g_dl_intensity_bits,
                           // 1: no command sets it) - DynLights scales its whole sum by w, so a zero here is 'lights
                           // off', never a padding lane.
-    float dl_view[3][4];
+    float dl_view[3][4];   // Unused (HLSL dlView): the retired mode 2's lane, kept for the layout.
     // KH_DL_RING: x = where this draw's light records start in the light ring (t40, HLSL khDlRecs), in float4
     // elements, as uint BITS (asuint in the shader; exact past 2^24); yzw unused (zero). The records themselves - the
     // engine's 6-float4 cb11 record per light, points first then spots, dl_ctl.y + dl_ctl.z of them - live in the

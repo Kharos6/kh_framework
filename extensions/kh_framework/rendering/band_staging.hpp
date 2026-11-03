@@ -92,7 +92,7 @@ inline void kh_band_pool_ensure_n(int khbe_want) {
 
 // A candidate seal view whose camera sits farther than KH_LATCH_JUMP_M-class distance from the cycle latch camera is a
 // foreign render and must never be committed into a band seal. true = ok.
-inline bool kh_band_view_native(const float* khfv_v, bool khfv_count) {
+inline bool kh_band_view_native(const float* khfv_v) {
     if (!g_ro.cycle_pv_valid) return true;   // No reference: cannot judge, admit.
     float khfv_c[3], khfv_r[3];
     if (!kh_view_camera_exact(reinterpret_cast<const float(*)[4]>(khfv_v), khfv_c)) return true;
@@ -105,9 +105,10 @@ inline bool kh_band_view_native(const float* khfv_v, bool khfv_count) {
     return false;
 }
 // The capture-time view (vcol column layout) against the welding view (row layout): the distance between their
-// cameras, -1 when unjudgeable (either camera undecodable). No bar here: its one caller (shadow_view_scan's
-// native-view stage pass) sets a stage's stage_pair_ok when the gap passes 0.5 m (same source within the 25 ms window
-// is centimetres, cross-source is metres); the 50 m pair verdict is kh_band_pair_coherent (below).
+// cameras, -1 when unjudgeable (either camera undecodable, or a NaN distance). No bar here: two callers -
+// shadow_view_scan's native-view stage pass sets a stage's stage_pair_ok when the gap passes 0.5 m (same source within
+// the 25 ms window is centimetres, cross-source is metres), and kh_band_pair_coherent (below) is the 50 m pair verdict
+// (-1 admits).
 inline float kh_band_source_gap(const float* khss_vc, const float* khss_fv) {
     float khss_m[4][4] = {};   // KH_CAM_HONEST: the row layout, for the honest inverse.
     for (int khss_j = 0; khss_j < 3; ++khss_j) {
@@ -132,28 +133,10 @@ inline float kh_band_source_gap(const float* khss_vc, const float* khss_fv) {
 }
 
 static uint64_t g_band_fall_flush = ~0ull;   // Flush of the last allowed fall-through.
-// The verdict form: true = within 50 m or unjudgeable (admit), false = refuse.
+// The verdict form: true = within 50 m or unjudgeable (admit), false = refuse. The gap's -1 (unjudgeable: either
+// camera undecodable, or a NaN distance) admits.
 inline bool kh_band_pair_coherent(const float* khpc_vc, const float* khpc_fv) {
-    float khpc_m[4][4] = {};   // KH_CAM_HONEST: the row layout, for the honest inverse.
-    for (int khpc_j = 0; khpc_j < 3; ++khpc_j) {   // Decode the capture camera.
-        const float* khpc_v = &khpc_vc[khpc_j * 4];
-        const float khpc_n = sqrtf(khpc_v[0] * khpc_v[0] +
-                                   khpc_v[1] * khpc_v[1] +
-                                   khpc_v[2] * khpc_v[2]);
-        if (!(khpc_n > 0.9f && khpc_n < 1.1f)) return true;
-        for (int khpc_i = 0; khpc_i < 4; ++khpc_i) khpc_m[khpc_i][khpc_j] = khpc_v[khpc_i];
-    }
-    khpc_m[3][3] = 1.0f;
-    float khpc_a[3];
-    kh_cam_of(khpc_m, khpc_a);
-    float khpc_b[3];
-    if (!kh_view_camera_exact(reinterpret_cast<const float(*)[4]>(khpc_fv), khpc_b)) return true;
-    const float khpc_dx = khpc_a[0] - khpc_b[0];
-    const float khpc_dy = khpc_a[1] - khpc_b[1];
-    const float khpc_dz = khpc_a[2] - khpc_b[2];
-    const float khpc_d = sqrtf(khpc_dx * khpc_dx + khpc_dy * khpc_dy + khpc_dz * khpc_dz);
-    if (!(khpc_d == khpc_d) || khpc_d <= 50.0f) return true;
-    return false;
+    return !(kh_band_source_gap(khpc_vc, khpc_fv) > 50.0f);
 }
 // Gated on a plain bool, so the steady-state cost is one load.
 inline void kh_band_stage_commit(ID3D11DeviceContext* ctx) {
@@ -206,7 +189,7 @@ inline void kh_band_stage_commit(ID3D11DeviceContext* ctx) {
             continue;
         }
 
-        if (!kh_band_view_native(g_ls.frame_view, true)) {
+        if (!kh_band_view_native(g_ls.frame_view)) {
             khsc_any = true;
             continue;
         }

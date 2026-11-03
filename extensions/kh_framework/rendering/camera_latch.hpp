@@ -26,9 +26,6 @@ static bool     g_latch_cam_valid = false;
 static float    g_cam_step_m = -1.0f;   // Boundary-camera step this frame (m).
 static float    g_boundary_t = -1.0f;
 
-// The last fog colour actually written into a CB (fill-site writes; nothing reads it). -1 = never filled.
-static float    g_fog_uw_col[3] = { -1.0f, -1.0f, -1.0f };
-
 // The last proceeding injection attempt's view (after adoption) and its stamp: the flush and the DLS world pass take it
 // on a cycle that landed, within 100 ms.
 // Rotation only (kh_adopt_frame_view, below): the mesh passes adopt fv's rotation whenever it is frame-fresh; the latch
@@ -74,7 +71,7 @@ inline bool kh_adopt_frame_view(RVExtBridge::ProjectionViewTransform& pv) {
     // Latch camera first, extracted before any mutation, through the honest inverse (not the transpose: |t| is the
     // absolute map position, so the transpose is decimetres off).
     float khav_camf[3];
-    kh_cam_of_site(pv.view, khav_camf, 1);
+    kh_cam_of(pv.view, khav_camf);
     const double khav_cam[3] = { khav_camf[0], khav_camf[1], khav_camf[2] };
 
     for (int r = 0; r < 3; ++r) {

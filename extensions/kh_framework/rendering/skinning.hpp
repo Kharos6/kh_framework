@@ -25,7 +25,7 @@ inline bool kh_ensure_ok(const char* khe_what, const std::string& khe_err);
 
 // KH_SKIN_CASTER: whether a skeletal binding's pose is drawn - it is visible, or a casterOnly binding a shadow map
 // takes (kh_shadow_active: it casts and takes part - lit, no effect, depth on - so the sun / DLS maps draw it;
-// kh_uvs_step's gate keeps the same rule). The step's stash and skin gates and kh_skin_sync's ask this, so a hidden
+// kh_uvs_step's gate calls this). The step's stash and skin gates and kh_skin_sync's ask this, so a hidden
 // caster does not cast a frozen pose. KH_SKIN_CASTER_VM: an inFront one in any view (kh_shadow_active_any_view: the
 // slice term left out) - the slice verdict moves on the render thread at the main depth clear, after the game
 // thread's step, so a gate that took it would give the maps a pose one or more frames old at a third -> first
@@ -730,6 +730,14 @@ inline bool kh_skin_gpu_movable(const KhSkinGpu& khgq_g, const KhSkinRest& khgq_
            static_cast<uint64_t>(khgq_g.bytes) == static_cast<uint64_t>(khgq_r.verts.size()) * sizeof(MeshVertex) &&
            kh_skin_gpu_retry_open(khgq_g.so_refused);
 }
+// KH_EA_SKIN_SO_DECL: the stream-output declaration of both classes (kh_skin_so_ensure, kh_skin_so_big_ensure):
+// MeshVertex's four lanes in its order, 48 bytes (skin.hlsl's VSOutSkin); nothing is rasterised.
+static const D3D11_SO_DECLARATION_ENTRY KH_SKIN_SO_DECL[] = {
+    { 0, "POSITION", 0, 0, 3, 0 },
+    { 0, "NORMAL",   0, 0, 3, 0 },
+    { 0, "TEXCOORD", 0, 0, 2, 0 },
+    { 0, "TANGENT",  0, 0, 4, 0 },
+};
 // The device objects, once. False = not available: no device, or not now (reported once; KH_SKIN_SO_RETRY: a
 // memory refusal is asked again KH_SKIN_GPU_RETRY cycles on, any other failure stands until the device or the
 // session resets). From kh_skin_upload, holding no lock: VSSkinSo is taken here from the arming prewarm
@@ -756,13 +764,6 @@ inline bool kh_skin_so_ensure(ID3D11Device* khse_dev) {
         if (khse_vb) khse_vb->Release();
         return khse_fail(khse_err.empty() ? std::string("VSSkinSo: no bytecode") : khse_err, false);
     }
-    // MeshVertex's four lanes, in its order, 48 bytes; nothing is rasterised.
-    static const D3D11_SO_DECLARATION_ENTRY khse_so[] = {
-        { 0, "POSITION", 0, 0, 3, 0 },
-        { 0, "NORMAL",   0, 0, 3, 0 },
-        { 0, "TEXCOORD", 0, 0, 2, 0 },
-        { 0, "TANGENT",  0, 0, 4, 0 },
-    };
     static const D3D11_INPUT_ELEMENT_DESC khse_il[] = {
         { "POSITION",     0, DXGI_FORMAT_R32G32B32_FLOAT,    0,  0, D3D11_INPUT_PER_VERTEX_DATA, 0 },
         { "NORMAL",       0, DXGI_FORMAT_R32G32B32_FLOAT,    0, 12, D3D11_INPUT_PER_VERTEX_DATA, 0 },
@@ -775,8 +776,9 @@ inline bool kh_skin_so_ensure(ID3D11Device* khse_dev) {
     HRESULT khse_hr = khse_dev->CreateVertexShader(khse_vb->GetBufferPointer(), khse_vb->GetBufferSize(), nullptr, &g_res.skin_so_vs);
     if (SUCCEEDED(khse_hr)) {
         khse_hr = khse_dev->CreateGeometryShaderWithStreamOutput(khse_vb->GetBufferPointer(), khse_vb->GetBufferSize(),
-                                                                 khse_so, 4u, &khse_stride, 1u, D3D11_SO_NO_RASTERIZED_STREAM,
-                                                                 nullptr, &g_res.skin_so_gs);
+                                                                 KH_SKIN_SO_DECL, 4u, &khse_stride, 1u,
+                                                                 D3D11_SO_NO_RASTERIZED_STREAM, nullptr,
+                                                                 &g_res.skin_so_gs);
     }
     if (SUCCEEDED(khse_hr)) {
         khse_hr = khse_dev->CreateInputLayout(khse_il, 6u, khse_vb->GetBufferPointer(), khse_vb->GetBufferSize(), &g_res.skin_so_layout);
@@ -818,19 +820,12 @@ inline bool kh_skin_so_big_ensure(ID3D11Device* khsg_dev) {
         if (khsg_vb) khsg_vb->Release();
         return khsg_fail(khsg_err.empty() ? std::string("VSSkinSo (large): no bytecode") : khsg_err, false);
     }
-    // kh_skin_so_ensure's stream-output declaration: MeshVertex's four lanes, 48 bytes; nothing is rasterised.
-    static const D3D11_SO_DECLARATION_ENTRY khsg_so[] = {
-        { 0, "POSITION", 0, 0, 3, 0 },
-        { 0, "NORMAL",   0, 0, 3, 0 },
-        { 0, "TEXCOORD", 0, 0, 2, 0 },
-        { 0, "TANGENT",  0, 0, 4, 0 },
-    };
     const UINT khsg_stride = static_cast<UINT>(sizeof(MeshVertex));
     HRESULT khsg_hr = khsg_dev->CreateVertexShader(khsg_vb->GetBufferPointer(), khsg_vb->GetBufferSize(), nullptr,
                                                    &g_res.skin_so_vs_l);
     if (SUCCEEDED(khsg_hr)) {
         khsg_hr = khsg_dev->CreateGeometryShaderWithStreamOutput(
-            khsg_vb->GetBufferPointer(), khsg_vb->GetBufferSize(), khsg_so, 4u, &khsg_stride, 1u,
+            khsg_vb->GetBufferPointer(), khsg_vb->GetBufferSize(), KH_SKIN_SO_DECL, 4u, &khsg_stride, 1u,
             D3D11_SO_NO_RASTERIZED_STREAM, nullptr, &g_res.skin_so_gs_l);
     }
     khsg_vb->Release();
@@ -1178,9 +1173,10 @@ inline std::shared_ptr<const KhSkinRest> kh_skin_rest_of(int khro_mesh) {
 // flush's when no injection ran), under g_draw_list_mutex, with the stash just taken: the relative poses and the
 // per-bone maps through the instance's drive tables (render thread), the vertices from the rest snapshot (any pool
 // thread, KH_SKIN_FORK; KH_SKIN_GPU: or skinned on the GPU by kh_skin_so_batch), and the result written into the
-// buffer the park installed for this handle (g_skin_gpu; the park keeps creating and installing it, and writes the
-// worker's result into it only when no step wrote it within KH_SKIN_STEP_OWN cycles, KhSkinGpu::step_cycle). The
-// box the pose was stored in goes to the object as the park's put does, and the step's centre takes it from there.
+// buffer the upload installed for this handle (g_skin_gpu; kh_skin_upload, in the flush, keeps creating and
+// installing it, and writes the worker's result into it only when no step wrote it within KH_SKIN_STEP_OWN cycles,
+// KhSkinGpu::step_cycle). The box the pose was stored in goes to the object as the upload's put does, and the step's
+// centre takes it from there.
 // Nothing here touches the instance's job inputs or its published buffers: the worker path stays whole for the
 // collider and the cloth guide.
 inline bool kh_skin_pose_read(const KhSkinInst& khpr_in) {   // Declared with kh_skin_pose_drawn.
@@ -1297,7 +1293,7 @@ inline void kh_skin_draw_finish(const std::string& khsd_h, KhAttach& khsd_a, Ren
         if (khsd_bytes == 0u) return;
         bool khsd_default = false;   // KH_SKIN_GPU: a stream-output buffer takes no Map.
         bool khsd_pooled = false;    // KH_SKIN_POOL: a chunk's slice.
-        {   // g_draw_list_mutex -> g_skin_mu: the park takes g_skin_mu on its own, never inside the list mutex.
+        {   // g_draw_list_mutex -> g_skin_mu: the upload takes g_skin_mu on its own, never inside the list mutex.
             std::lock_guard<std::mutex> khsd_g(g_skin_mu);
             const auto khsd_it = g_skin_gpu.find(khsd_h);
             if (khsd_it != g_skin_gpu.end() && khsd_it->second.vb && khsd_it->second.bytes == khsd_bytes) {
@@ -1306,9 +1302,14 @@ inline void kh_skin_draw_finish(const std::string& khsd_h, KhAttach& khsd_a, Ren
                 khsd_pooled = khsd_it->second.chunk != nullptr;
             }
         }
-        if (!khsd_vb) return;   // Not installed yet (the first park after the binding creates it).
+        if (!khsd_vb) return;   // Not installed yet (the first upload after the binding creates it).
         if (khsd_default) {
+            // KH_EA_SKIN_PRED: UpdateSubresource is predicated and a step runs in the engine's hook with no StateBackup
+            // (KH_PRED_ASIDE): a predicate the engine left bound would skip the pose while the stamps below claim it.
+            KhPredAside khsd_pa;
+            khsd_pa.begin(khsd_ctx);
             kh_skin_so_write(khsd_ctx, khsd_vb, khsd_bytes, khsd_pooled, khsd_a.draw_out.data());   // Its slice alone.
+            khsd_pa.end();
         } else {   // A DYNAMIC buffer is the binding's own (never pooled).
             D3D11_MAPPED_SUBRESOURCE khsd_m = {};
             if (FAILED(khsd_ctx->Map(khsd_vb.vb, 0, D3D11_MAP_WRITE_DISCARD, 0, &khsd_m)) || !khsd_m.pData) return;
@@ -1903,7 +1904,7 @@ inline void kh_skin_upload(ID3D11DeviceContext* khsu_ctx, ID3D11Device* khsu_dev
     }
     {
         // The box of what the slot draws. The position moves with the centre so that it stays root + skel_ctr *
-        // rot_m for a late draw in this same park, before kh_attach_step next recomputes it.
+        // rot_m for a late draw in this same flush, before kh_attach_step next recomputes it.
         std::lock_guard<std::mutex> khsu_g(g_draw_list_mutex);
         for (const KhSkinPut& khsu_p : khsu_put) {
             const auto khsu_oit = g_draw_list.find(khsu_p.h);
@@ -1949,8 +1950,9 @@ inline void kh_skin_upload(ID3D11DeviceContext* khsu_ctx, ID3D11Device* khsu_dev
 }
 
 
-// Device teardown (kh_engine_reset_release: under the park, or on the render thread itself). The CPU instances keep
-// their pose and last result; the next park re-creates and re-uploads. The slot tables are emptied by
+// Device teardown (kh_engine_reset_release: under the graphics lock, on the render thread itself, or its best effort
+// holding neither). The CPU instances keep their pose and last result; the next upload (the flush) re-creates and
+// re-uploads. The slot tables are emptied by
 // kh_cloth_release_all beside it.
 inline void kh_skin_release_all() {
     std::lock_guard<std::mutex> khsr_g(g_skin_mu);

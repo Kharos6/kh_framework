@@ -40,7 +40,8 @@ struct KhFlushActiveScope {
 };
 // Recursion guard for our own UI draws (the alpha clear's own Draw re-enters the hooks): the UI-thread branch, the
 // mask machine and the OM hooks stand aside on it. Separate from g_ro.in_injection, which the other render-thread
-// hooks key on; the alpha clear, which also runs on the render thread, raises only this flag.
+// hooks key on; the alpha clear, which also runs on the render thread, raises only this flag. Also raised around the
+// Present subscriber's UI flush and, by KH_OVERLAY_BRACKET, around another module's present-time draws.
 static std::atomic<bool> g_ui_mask_injecting{false};
 static std::atomic<bool> g_kh_track_wanted{false};
 

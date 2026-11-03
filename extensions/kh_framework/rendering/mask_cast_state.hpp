@@ -4,11 +4,7 @@
 // cast readiness, the view drop, ShadowMaskState). Never include it on its own.
 namespace RenderIntegration {
 // Body in the seam suite; the wipe calls it with false (vmir is device-scoped).
-inline void kh_svs_mask_release(bool khm_scrub_vmir = true);
-
-inline void kh_view_lock_acquired();
-
-inline void kh_svs_mask_release(bool khm_scrub_vmir);   // Default on the earlier declaration.
+inline void kh_svs_mask_release(bool khm_scrub_vmir = true);   // rendering/volume_seam_state.hpp.
 
 static ID3D11ShaderResourceView* g_fire_lock = nullptr;
 static float g_fire_fov2[2] = {};
@@ -27,9 +23,7 @@ static uint32_t g_fire_count_frame = 0;
 static uint64_t g_lock_churn_ms_v = 0;   // Last lock-churn event (adoption / wipe / relock / forced
                                          // drop); 0 = never.
 // The era guard's escape: consecutive refusals mean the incumbent is the stale
-// one, so recovery is bounded. KH_FIRE_PV_STALE_S: the fire refuses to paint
-// through a cycle_pv copy older than this when a live transform can be fetched.
-static const float KH_FIRE_PV_STALE_S = 0.25f;
+// one, so recovery is bounded.
 static constexpr uint32_t KH_FIRE_ERA_RECOVER_N = 4;   // Consecutive refusals that earn adoption.
 static uint32_t g_fire_era_reject_run = 0;
 static constexpr uint64_t KH_CAST_READY_QUIET_MS = 1500;
@@ -42,10 +36,6 @@ static float g_cascbind_feed_t = -1.0f;   // Stamped at every harvest feed.
 // fire leaves it (starts at 1).
 static uint32_t g_fire_clamp_target = 1;   // Learned index of the frame's last fire.
 static uint32_t g_fire_clamp_painted = 0;   // Paints carried this frame.
-static float    g_cycle_pv_prev[4][4] = {};
-static bool     g_cycle_pv_prev_valid = false;
-static float    g_cycle_pv_t = -1.0f;
-static float    g_cycle_pv_age_s = -1.0f;
 static bool     g_fire_mask_srv_now = false;   // This fire: engine mask SRV-bound at the save.
 
 static uint32_t g_view_drop_path = 0;   // 0 none, 1 reject streak, 2 health miss.
@@ -66,12 +56,6 @@ inline void kh_view_lock_acquired() {
     g_view_drop_path = 0;
     g_view_relock_wide_cycle = 0;
 }
-
-// Per-fire re-freeze: nothing arms it - g_fire_refreeze_pending is only ever cleared (the clear hook, the device
-// release, the session resets) and g_fire_refreeze_view is never written, so mask_cast_engine's re-freeze branch
-// (the view swap after the era guard) never runs.
-static float    g_fire_refreeze_view[16] = {};   // Never written (see above).
-static bool     g_fire_refreeze_pending = false;   // Never set (see above).
 
 // A backstop paint lands at the end of frame N and is read early in frame N+1; if N+1 rebinds the mask as an RT before
 // those reads, that paint never existed. The engine consumes its matrix camera-relatively; the fire is the one

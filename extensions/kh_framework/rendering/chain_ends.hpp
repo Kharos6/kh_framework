@@ -3,10 +3,6 @@
 // The injection half (rendering_integration_injection.hpp): KH_CHAIN_END: the chain-end table and draw, the skeleton
 // bone names and kh_chain_prepare. Never include it on its own.
 namespace RenderIntegration {
-// khbn_h / khbn_seq name the handle whose chain settings (g_chain_cfg) add their bones to keep; "" for a mesh with no
-// handle yet (addRender3D), where no chain can have been configured. Defined further down this file
-// (KH_SKEL_PROXY_CULL), after g_chain_cfg, which is in rendering/physics_state.hpp.
-inline KhSkelBones kh_skel_bone_names(int khbn_mesh, const std::string& khbn_h = std::string(), uint64_t khbn_seq = 0);
 // KH_CHAIN_END_DRAW - a chain's end that follows an object or a memory point is a physics target: the job holds
 // the end where the Draw3D it was fed from put it, and on a terrain whose Draw3D lands after the frame's injection
 // that is one frame older than the pose the frame draws. So each render-thread step with a device context re-places
@@ -163,12 +159,14 @@ inline void kh_chain_end_rt_read(uint64_t khcr_cyc, uint64_t khcr_own, int64_t k
     }
 }
 
-// KH_SKEL_PROXY_CULL - the skeleton as the proxy filter (declared above). A bone has geometry when any
-// level's vertex takes weight from it (skin_inf, parallel to verts). The chain settings of the handle, when it has any
-// (a set that has been switched off keeps them), add their start bone (or the skeleton's first root, kh_chain_build's
-// default) and their end bone (or the chain's tip when the start's subtree does not branch) to the keep set. GAME
-// THREAD (staged lookup; g_chain_cfg is game thread only).
-inline KhSkelBones kh_skel_bone_names(int khbn_mesh, const std::string& khbn_h, uint64_t khbn_seq) {
+// KH_SKEL_PROXY_CULL - the skeleton as the proxy filter. A bone has geometry when any level's vertex takes weight from
+// it (skin_inf, parallel to verts). khbn_h / khbn_seq name the handle whose chain settings (g_chain_cfg) add their
+// bones to keep; "" for a mesh with no handle yet (addRender3D), where no chain can have been configured. Those
+// settings, when the handle has any (a set that has been switched off keeps them), add their start bone (or the
+// skeleton's first root, kh_chain_build's default) and their end bone (or the chain's tip when the start's subtree does
+// not branch) to the keep set. GAME THREAD (staged lookup; g_chain_cfg is game thread only).
+inline KhSkelBones kh_skel_bone_names(int khbn_mesh, const std::string& khbn_h = std::string(),
+                                      uint64_t khbn_seq = 0) {
     KhSkelBones khbn_out;
     const MeshDef* khbn_d = kh_mesh_def_staged(khbn_mesh);
     if (!khbn_d) return khbn_out;
@@ -636,64 +634,5 @@ inline void kh_chain_prepare(bool khcp_gts) {
         }
     }
     kh_chain_end_publish(khcp_seq);   // KH_CHAIN_END_DRAW: this Draw3D's targets, by its sample number.
-}
-
-// Capture core, parameterized on the source RTV: ensure_scene_capture calls it with the bound target (its one caller).
-// The caller keeps ownership of the RTV reference. KH_CAP_DEFER: khcap_copy false runs every check and (re)creation -
-// the same verdict, the same target - and leaves the copy (a resolve, on an MSAA scene) to a later call.
-inline std::string ensure_scene_capture_from(ID3D11Device* dev, ID3D11DeviceContext* ctx,
-                                             ID3D11RenderTargetView* rtv, bool khcap_copy = true) {
-    if (!rtv) return "no RTV";
-    ID3D11Resource* res = nullptr;
-    rtv->GetResource(&res);
-    D3D11_RENDER_TARGET_VIEW_DESC rtv_desc = {};
-    rtv->GetDesc(&rtv_desc);
-    if (!res) return "RTV has no resource";
-    ID3D11Texture2D* src_tex = nullptr;
-    HRESULT hr = res->QueryInterface(__uuidof(ID3D11Texture2D), reinterpret_cast<void**>(&src_tex));
-    res->Release();
-    if (FAILED(hr) || !src_tex) return "RTV resource is not a Texture2D";
-    D3D11_TEXTURE2D_DESC src_desc = {};
-    src_tex->GetDesc(&src_desc);
-
-    // Resolve target format must be non-typeless; the RTV view format is.
-    DXGI_FORMAT capture_fmt = rtv_desc.Format;
-
-    if (!g_res.scene_tex || g_res.scene_w != src_desc.Width ||
-        g_res.scene_h != src_desc.Height || g_res.scene_fmt != capture_fmt) {
-        g_res.release_scene_capture();
-        D3D11_TEXTURE2D_DESC td = {};
-        td.Width = src_desc.Width;
-        td.Height = src_desc.Height;
-        // Single-mip.
-        td.MipLevels = 1;
-        td.ArraySize = 1;
-        td.Format = capture_fmt;
-        td.SampleDesc.Count = 1;
-        td.Usage = D3D11_USAGE_DEFAULT;
-        td.BindFlags = D3D11_BIND_SHADER_RESOURCE;
-        hr = dev->CreateTexture2D(&td, nullptr, &g_res.scene_tex);
-        if (FAILED(hr)) { src_tex->Release(); return "create scene capture tex " + hr_str(hr); }
-        hr = dev->CreateShaderResourceView(g_res.scene_tex, nullptr, &g_res.scene_srv);
-        if (FAILED(hr)) {
-            g_res.release_scene_capture();
-            src_tex->Release();
-            return "create scene capture SRV " + hr_str(hr);
-        }
-        g_res.scene_w = src_desc.Width;
-        g_res.scene_h = src_desc.Height;
-        g_res.scene_fmt = capture_fmt;
-    }
-
-    if (khcap_copy) {   // KH_CAP_DEFER: false leaves the copy to a later call.
-        if (src_desc.SampleDesc.Count > 1) {
-            ctx->ResolveSubresource(g_res.scene_tex, 0, src_tex, 0, capture_fmt);
-        } else {
-            ctx->CopyResource(g_res.scene_tex, src_tex);
-        }
-    }
-
-    src_tex->Release();
-    return "";
 }
 }

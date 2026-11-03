@@ -1,7 +1,7 @@
 #pragma once
 
-// The shared head (rendering_integration.hpp): the dynamic lights' shared state (DynLightsState, the window / pool /
-// ring records, the DLS map flags and casters). Never include it on its own.
+// The shared head (rendering_integration.hpp): the dynamic lights' shared state (DynLightsState, the window / pool
+// records, the DLS map flags and casters). Never include it on its own.
 namespace RenderIntegration {
 
 // KH_DL_SHADOW slice budget: 8 lights x 6 cube faces is the ceiling; the array is grown to demand (dls_slices).
@@ -16,7 +16,6 @@ static constexpr uint32_t KH_DL_MAX_LIGHTS = 32;   // cb11 capacity (192 / 6).
 // That bound is the ENGINE's: one of its per-draw lists carries at most 32. The merged pool is uncapped, and so is
 // what one of our meshes receives from it (KH_DL_RING, kh_dl_select).
 static constexpr uint32_t KH_DL_LIGHT_BYTES = 6 * 16;
-static constexpr uint32_t KH_DL_RING = 16;
 static constexpr uint32_t KH_DL_WIN_MAX = 16;   // Distinct per-draw windows captured per frame
 static constexpr uint32_t KH_DL_VS_SLOTS = 13;   // VS cb slots captured (0..12).
 // Anchor table capacity (DynLightsState::anchor_pos; full: dynlights_anchor_upsert evicts the oldest).
@@ -81,28 +80,18 @@ struct DlPoolLight {
     uint64_t rec_wseq = 0;
 };
 
-struct DlRingEntry {
-    uint32_t point_n = 0, spot_n = 0;
-    float    cam[3] = {};   // Capture camera (engine axes).
-    float    l0[8] = {};   // First light: pos.xyz, diffuse.rgb, fadeStart, coneCos.
-};
-
 struct DynLightsState {
     // Published mirror (render thread writes at harvest; getRenderStats reads it on the game thread - dlValid and
-    // the light list - and the DL ring entry takes cam).
+    // the light list).
     bool     valid = false;
     uint32_t point_n = 0, spot_n = 0;
-    float    ctl[16] = {};
     float    lights[KH_DL_MAX_LIGHTS * 24] = {};
-    float    view_cols[12] = {};   // 3 float4 view columns.
     bool     view_valid = false;
     float    cam[3] = {};   // Capture camera (engine axes).
-    uint64_t hash = 0;
     // Staging machinery (render thread only).
     ID3D11Buffer* staging[2] = {};
     uint8_t  inflight[2] = {};
     uint32_t slot_bytes11[2] = {};   // Lights bytes actually copied.
-    float    pending_view[2][12] = {};
     float    pending_cam[2][3] = {};
     uint8_t  pending_view_ok[2] = {};
     ID3D11Buffer* arena[2] = {};
@@ -166,8 +155,6 @@ struct DynLightsState {
     uint32_t win_fail_run[KH_DL_WIN_SLOTS] = {};
     uint64_t win_use[KH_DL_WIN_SLOTS] = {};   // KH_DL_SLOT_LRU: the lookup that last named the entry.
     uint64_t win_use_n = 0;                   // Lookups so far (kh_dl_win_slot).
-    DlRingEntry ring[KH_DL_RING];
-    uint32_t ring_head = 0;
 };
 static DynLightsState g_dl;
 static uint32_t  g_dls_n = 0;

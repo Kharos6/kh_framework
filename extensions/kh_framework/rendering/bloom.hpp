@@ -52,7 +52,7 @@ inline bool kh_glow_pyr_ensure(ID3D11Device* dev, KhGlowPyr& khpe_p, UINT khpe_f
         const HRESULT khpe_shr = dev->CreateSamplerState(&khpe_sd, &g_res.glow_sampler);
         if (FAILED(khpe_shr)) {
             g_res.glow_sampler = nullptr;
-            report_error_once_safe("KH glow pyramid: CreateSamplerState " + hr_str(khpe_shr));
+            report_error_once_safe("KH RenderIntegration: glow pyramid: CreateSamplerState " + hr_str(khpe_shr));
             return false;
         }
     }
@@ -88,7 +88,8 @@ inline bool kh_glow_pyr_ensure(ID3D11Device* dev, KhGlowPyr& khpe_p, UINT khpe_f
     }
     if (FAILED(khpe_hr)) {
         khpe_p.release();
-        report_error_once_safe("KH glow pyramid: " + hr_str(khpe_hr) + " (glows take their direct taps)");
+        report_error_once_safe("KH RenderIntegration: glow pyramid: " + hr_str(khpe_hr) +
+                               " (glows take their direct taps)");
         return false;
     }
     khpe_p.w = khpe_w;
@@ -254,7 +255,8 @@ inline bool kh_ana_pyr_ensure(ID3D11Device* dev, KhAnaPyr& khpe_p, UINT khpe_fw,
     }
     if (FAILED(khpe_hr)) {
         khpe_p.release();
-        report_error_once_safe("KH anamorphic pyramid: " + hr_str(khpe_hr) + " (anamorphic takes its direct taps)");
+        report_error_once_safe("KH RenderIntegration: anamorphic pyramid: " + hr_str(khpe_hr) +
+                               " (anamorphic takes its direct taps)");
         return false;
     }
     khpe_p.fw = khpe_fw;

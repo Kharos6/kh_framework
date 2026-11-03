@@ -141,7 +141,8 @@ inline void kh_thm_autobuild_step() {
     } catch (...) {
         g_thm_auto_state = 3;
         g_thm_auto_retry = 0;
-        report_error_once_safe("KH terrain auto-acquisition: engine query failed (will retry)");
+        // KH_EA_ERR_CLASS: transient, retried (~5 s) - a warning, logged once a session (never thrown).
+        kh_log_once_safe("KH RenderIntegration: terrain auto-acquisition: engine query failed (will retry)");
     }
 }
 }

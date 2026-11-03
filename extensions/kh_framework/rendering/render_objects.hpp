@@ -3,10 +3,6 @@
 // The feature half (rendering_integration_features.hpp): the per-object helpers: visibility, placement and rotation,
 // bounds and distances, the shadow flags, the handle ids. Never include it on its own.
 namespace RenderIntegration {
-inline bool kh_obj_shown(const RenderObject& o);   // KH_SHOW_INFRONT: defined with the shadow rules.
-inline bool kh_cast_on(const RenderObject& o);   // Defined with the shadow rules.
-inline bool kh_shadow_active(const RenderObject& o);   // Likewise (KH_SKIN_CASTER).
-inline bool kh_shadow_active_any_view(const RenderObject& o);   // Likewise (KH_SKIN_CASTER_VM).
 
 // KH_INFRONT_EFFECT: whether the view-model slice draws the object - the flag on a solid mesh. An effect mesh ignores
 // inFront (RenderObject::in_front): the world routes draw it and it counts as no slice demand; a pass carries no
@@ -240,8 +236,8 @@ inline float kh_mesh_dist_sq(const RenderObject& o, const float cam[3]) {
     return kh_mesh_dist_sq_of(o.pos, o.size, o.rot_m, o.rotated, cam);
 }
 // KH_NEARZ_BOUNDS: the same distance to the box around everything the object may draw (kh_bounds_size_of's size).
-// The near-z route (KhDistMemo::get_drawn) and the mirror's band (kh_rp_box_dist) take it; the LOD pick keeps
-// kh_mesh_dist_sq (the script's size: KH_CAST_REFIT's rule).
+// The near-z route (KhDistMemo::get_drawn, the injection's nearest clear) and the mirror (kh_rp_box_dist's band,
+// kh_rp_mir_reads) take it; the LOD pick keeps kh_mesh_dist_sq (the script's size: KH_CAST_REFIT's rule).
 inline float kh_bounds_dist_sq(const RenderObject& o, const float cam[3]) {
     float khbq_s[3];
     kh_bounds_size_of(o, khbq_s);
@@ -298,9 +294,9 @@ inline bool kh_obj_has_blend(const RenderObject& o) {
 // Material draw support (both loops share these).
 
 inline void kh_apply_native_size(RenderObject& o) {
-    // Staged lookup: a just-imported .fbx whose publish was deferred, and every generated mesh until the next injection
-    // or flush (KH_MESH_GEN_PUB), is appended but not published; mesh_id_clamp would hand back the box. Game thread
-    // only.
+    // Staged lookup: a just-imported .fbx and a generated mesh, until the next injection or flush lands its publish
+    // (KH_MESH_GEN_PUB, KH_EA_FBX_NO_PARK), are appended but not published; mesh_id_clamp would hand back the box. Game
+    // thread only.
     const MeshDef* khn_sd = kh_mesh_def_staged(o.mesh);
     const MeshDef& md = khn_sd ? *khn_sd : mesh_def(0);
 

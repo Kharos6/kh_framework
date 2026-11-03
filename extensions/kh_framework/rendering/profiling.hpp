@@ -3,7 +3,6 @@
 // The shared head (rendering_integration.hpp): KH_PROF, the stats gate and the profiler (CPU zones, funnels, the
 // see-through and GPU pass timers). Never include it on its own.
 namespace RenderIntegration {
-inline bool kh_stats_on();   // Defined with KH_PROF at the top of the namespace.
 
 // KH_STATS_ARMED (declared ahead of the stats block for KH_PROF's scopes): collection is off until the first
 // getRenderStats.

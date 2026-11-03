@@ -431,7 +431,7 @@ inline bool kh_tex_blob_load(const std::string& path, bool srgb,
                              std::string& err, bool khtb_force) {
     khtb_from_cache = false;
     std::vector<uint8_t> khtc_bytes;
-    if (!kh_asset_read(path, khtc_bytes, 512ull * 1024u * 1024u)) { err = "read failed"; return false; }   // PBO_PATH.
+    if (!kh_asset_read(path, khtc_bytes, 512ull * 1024u * 1024u, &err)) return false;   // PBO_PATH; KH_EA_TEX_READ_WHY.
     const uint64_t khtc_hash = kh_tex_hash(khtc_bytes, srgb);
     if (!khtb_force) {
         // KH_TEXLDR_GUARD: a failed allocation is a failed load, not a throw into the caller.

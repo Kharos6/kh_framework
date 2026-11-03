@@ -17,9 +17,12 @@
 // RANGE RULE, every parser alike: a number outside its key's range is clamped to it silently (the solvers and passes
 // are stable over those ranges). Refused with a report instead: a blend mode, a depth mode (mode), an effect, a mask
 // shape or a mesh index given as a number, a material's fresnel pair, every texture-animation key, vertexBound, a
-// simulationLod pair out of order, and a physics affector's lifetime, position, vectorDir or scale number that is not
-// finite or is 1e30 or more in size (kh_aff_finite), or an [x, y, z] scale half-extent of 0 or below. A number for one
-// of the first five is truncated toward zero first (kh_gv_int: blend 5.9 is 5, -0.5 is 0).
+// simulationLod pair out of order, a physics affector's lifetime, position, vectorDir or scale number that is not
+// finite or is 1e30 or more in size (kh_aff_finite), and an [x, y, z] scale half-extent of 0 or below. A number for
+// one of the first five is truncated toward zero first (kh_gv_int: blend 5.9 is 5, -0.5 is 0). A NaN is refused with
+// a report by every parser, and so is an infinity in a material key (KH_MAT_FINITE) or where the key has no range to
+// clamp it to (a position, size, radius, falloff, band, rotation, lit pair or effect params: KH_RV_FINITE,
+// KH_FX_FINITE); elsewhere an infinity is a number past its range (a duration part's is accepted: KH_DURATION_NAN).
 //
 // KH_PLAYER_ONLY: graphics only where there is an interface (hasInterface, framework.hpp's g_is_player). On a
 // dedicated server or a headless client every command returns its empty value at once ('' / false / []): no parse, no

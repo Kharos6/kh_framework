@@ -237,8 +237,9 @@ static std::mutex g_draw_list_mutex;
 // members are interned pointers.
 static_assert(std::is_trivially_copyable<RenderObject>::value, "RenderObject must stay a POD snapshot (KH_SCENE)");
 // ws_dcopy and ws_hold live in draw_part's padding, so RenderObject keeps its size and layout - draw_part, ws_dcopy,
-// ws_hold, then mode at draw_part's next 4-byte boundary. RenderObject is not standard-layout: offsetof on it is
-// conditionally supported (C++17); MSVC's and clang's both evaluate it at compile time (clang warns, silenced here).
+// ws_hold, then mode at draw_part's next 4-byte boundary. RenderObject is standard-layout today (offsetof is defined);
+// the warning stays silenced so a later member that ends that (offsetof then conditionally supported, which MSVC and
+// clang both evaluate at compile time) cannot turn these checks into a warning.
 #if defined(__clang__)
 #pragma clang diagnostic push
 #pragma clang diagnostic ignored "-Winvalid-offsetof"

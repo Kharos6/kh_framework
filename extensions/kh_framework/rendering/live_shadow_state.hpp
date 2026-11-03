@@ -92,15 +92,10 @@ struct LiveShadowState {
     // starves - at most one window late.
     uint64_t pub_exact_ms = 0;   // 0 = no exact publication yet.
     uint64_t pub_fresh_ms = 0;
-    float band_last_reject[4] = {};   // Last border quad rejected by sanity.
     uint32_t resolve_window = 0;   // Qualifying draws remaining after an atlas-pass exit.
     float frame_view[16] = {};
     bool  frame_view_valid = false;
     float frame_view_time = -1.0f;
-    // Latched at the accept whenever the incoming publish crosses sources.
-    float alt_view[16] = {};
-    bool  alt_view_valid = false;
-    float alt_view_time = -1.0f;
     struct ViewCand { ID3D11Resource* res; uint32_t off; float m[16]; };
     ViewCand vc_ring[16];
     uint32_t vc_n = 0;

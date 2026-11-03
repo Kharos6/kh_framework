@@ -119,7 +119,8 @@ inline bool kh_vmir_ensure_gpu(ID3D11Device* khvg_dev) {
             KH_SAFE_RELEASE(khvg_vblob);
             KH_SAFE_RELEASE(khvg_pblob);
             g_vmir_b2_failed = true;   // Rule: a compile failure names itself.
-            report_error_once_safe("KH mirror: patch shader compile failed (the pass stands down): " + khvg_err);
+            report_error_once_safe("KH RenderIntegration: mirror: patch shader compile failed (the pass stands "
+                                   "down): " + khvg_err);
             return false;
         }
         HRESULT khvg_hr = khvg_dev->CreateVertexShader(khvg_vblob->GetBufferPointer(),
@@ -136,7 +137,8 @@ inline bool kh_vmir_ensure_gpu(ID3D11Device* khvg_dev) {
             KH_SAFE_RELEASE(g_vmir_b2_vs);
             KH_SAFE_RELEASE(g_vmir_b2_ps);
             g_vmir_b2_failed = true;
-            report_error_once_safe("KH mirror: patch shader could not be created (the pass stands down)");
+            report_error_once_safe("KH RenderIntegration: mirror: patch shader could not be created (the pass stands "
+                                   "down)");
             return false;
         }
     }
@@ -255,7 +257,8 @@ inline void kh_mir_patch_cpu(const float khm_in[16], float khm_out[16]) {
     }
 }
 
-// The GPU path draws under a StateBackup and a KhOmSave - the engine's state mid-frame is handed back whole.
+// The GPU path draws under a StateBackup and a KhOmSave - the engine's state mid-frame is handed back whole. Both
+// paths run with the engine's predicate set aside (it comes back at the return); the re-issued draw keeps it.
 inline bool kh_vmir_patch_b2(ID3D11DeviceContext* khvp_ctx) {
     ID3D11Buffer* khvp_b2 = nullptr;
     khvp_ctx->VSGetConstantBuffers(2, 1, &khvp_b2);
@@ -266,6 +269,9 @@ inline bool kh_vmir_patch_b2(ID3D11DeviceContext* khvp_ctx) {
     // Learn which resource is bound at b2 so the upload funnel starts
     // snapshotting it; makes the fast path reachable from the second frame on.
     g_b2_learn = static_cast<void*>(khvp_b2);
+    // KH_EA_VMIR_PRED: the patch's upload and copies are GPU writes of ours outside a StateBackup (KH_PRED_ASIDE).
+    KhPredAside khvp_pa;
+    khvp_pa.begin(khvp_ctx);
 
     // KH_MIR_CPU: the fast path, only for a snapshot of THIS resource and THIS frame.
     if (g_b2_snap.valid && g_b2_snap.res == static_cast<void*>(khvp_b2) &&

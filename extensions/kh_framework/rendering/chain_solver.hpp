@@ -759,11 +759,15 @@ inline void kh_chain_substep(KhClothState& s, KhChainState& c, const KhChainPara
             kh_q_rot(b.q, wb, b.w);
         }
         // The cloth's guard, against the carrier's own motion at the body (cd,
-        // taken above).
-        float rel[3];
-        for (int k = 0; k < 3; ++k) rel[k] = b.v[k] - cd[k];
-        const float rl = kh_cloth_v3_len(rel);
-        if (rl > vmax) for (int k = 0; k < 3; ++k) b.v[k] = cd[k] + rel[k] * (vmax / rl);
+        // taken above). KH_EA_CHAIN_GUARD: as the cloth's, only a body fast in
+        // the world is tested, so one the carrier leaves standing is never
+        // pulled along by the clamp (a still carrier: identical).
+        if (kh_cloth_v3_len(b.v) > vmax) {
+            float rel[3];
+            for (int k = 0; k < 3; ++k) rel[k] = b.v[k] - cd[k];
+            const float rl = kh_cloth_v3_len(rel);
+            if (rl > vmax) for (int k = 0; k < 3; ++k) b.v[k] = cd[k] + rel[k] * (vmax / rl);
+        }
         const float wl = kh_cloth_v3_len(b.w);
         const float wmax = vmax / (b.radius > 0.05f ? b.radius : 0.05f);
         if (wl > wmax) for (int k = 0; k < 3; ++k) b.w[k] *= wmax / wl;
@@ -1138,7 +1142,9 @@ inline void kh_chain_step(KhClothState& s, KhChainState& c, const KhChainParams&
         }
         u.t0 = t0;
         u.t1 = t1;
-        kh_chain_substep(s, c, pr, cv, ncol, h, wind, f0, u, aff, naff, static_cast<float>(n - 1u - ran) * h, ground);
+        // KH_EA_TURB_CLOCK: this substep's end before the frame's end, leftover included (KH_SUB_CLOCK; the cloth's).
+        kh_chain_substep(s, c, pr, cv, ncol, h, wind, f0, u, aff, naff, static_cast<float>(n - 1u - ran) * h + left,
+                         ground);
         s.accum -= h;
         f0 = fs;
         ++ran;

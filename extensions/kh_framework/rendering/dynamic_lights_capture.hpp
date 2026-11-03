@@ -1041,23 +1041,6 @@ inline void dynlights_sample_draw(ID3D11DeviceContext* ctx) {
         return;
     }
 
-    {   // Census: the session's first distinct (buffer, offset) pairs (g_dl_cd_*).
-        bool khd_seen = false;
-
-        for (uint32_t i = 0; i < g_dl_cd_n; ++i) {
-            if (g_dl_cd_bufs[i] == static_cast<void*>(khd_b11) && g_dl_cd_first[i] == khd_f11) {
-                khd_seen = true;
-                break;
-            }
-        }
-
-        if (!khd_seen && g_dl_cd_n < 8) {
-            g_dl_cd_bufs[g_dl_cd_n] = static_cast<void*>(khd_b11);
-            g_dl_cd_first[g_dl_cd_n] = khd_f11;
-            g_dl_cd_n++;
-        }
-    }
-
     if (kh_dl_cpu_wanted()) {   // KH_DL_CPU: the shadows, the span's arena.
         dynlights_sample_draw_cpu(khd_c1, khd_b11, khd_f11, khd_n11);
         khd_b11->Release();

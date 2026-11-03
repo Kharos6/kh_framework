@@ -21,7 +21,9 @@ struct KhCullSet {
     float p[4][4] = {};   // Left, right, bottom, top - normalised.
     float bias[3] = {};   // Add to a world centre to reach the matrix's space.
     bool  valid = false;
-    // The four side planes pass through the apex, so they bound a double cone - the frustum and its mirror behind.
+    // The four side planes pass through the apex: their half-spaces meet in one cone, the frustum without near / far.
+    // A sphere straight behind the apex fails a side plane only once it lies its padded radius / (normal . fwd)
+    // behind - far behind at a narrow field of view - so KH_CULL_BACK adds the plane through the apex normal to fwd.
     // "Is this object behind the camera" must not be asked with a near plane from the matrix's column 2 (depth
     // encoding is unrelated).
     float fwd[3] = {};

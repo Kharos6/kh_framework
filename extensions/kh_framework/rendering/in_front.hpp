@@ -6,10 +6,11 @@ namespace RenderIntegration {
 inline void kh_rp_mir_finish(ID3D11DeviceContext* ctx);   // Defined with the replay.
 
 // KH_VM_SEE (defined with it in rendering/view_model_see_through.hpp): the deferred tail's transmittance arm and the
-// re-issue brackets.
+// re-issue brackets; and its scene-RT0 test (KH_EA_SCENE_RTV), the tail arm's.
 inline bool kh_infront_vmsee_take(ID3D11DeviceContext* khvt_ctx);
 inline bool kh_vmsee_t_begin(ID3D11DeviceContext* ctx);
 inline void kh_vmsee_t_end(ID3D11DeviceContext* ctx);
+inline bool kh_rtv_is_scene(ID3D11RenderTargetView* khrs_rtv);
 
 // KH_INFRONT - the engine's view-model slice. MEASURED (RenderDoc, 3840x2160, one frame): after the main depth clear
 // the engine draws the world's depth prepass in the viewport range [0.011, 0.999], then the first-person weapon and
@@ -104,13 +105,7 @@ inline bool kh_infront_tail_arm(ID3D11DeviceContext* khta_ctx, const D3D11_VIEWP
     ID3D11RenderTargetView* khta_rtv = nullptr;
     ID3D11DepthStencilView* khta_dsv = nullptr;
     khta_ctx->OMGetRenderTargets(1, &khta_rtv, &khta_dsv);
-    bool khta_scene = false;
-    if (khta_rtv) {
-        ID3D11Resource* khta_res = nullptr;
-        khta_rtv->GetResource(&khta_res);
-        khta_scene = khta_res != nullptr && static_cast<void*>(khta_res) == g_topo_scene_tex_id;
-        if (khta_res) khta_res->Release();
-    }
+    const bool khta_scene = khta_rtv && kh_rtv_is_scene(khta_rtv);   // KH_EA_SCENE_RTV.
     if (!khta_scene || !khta_dsv) {
         KH_SAFE_RELEASE(khta_rtv);
         KH_SAFE_RELEASE(khta_dsv);
@@ -195,7 +190,7 @@ inline bool kh_infront_frame_prepare(ID3D11DeviceContext* khvf_ctx) {
     khvf_pv.projection[2][2] = khvf_m22;
     khvf_pv.projection[3][2] = khvf_m32;
     float khvf_cam[3];
-    if (!kh_view_camera_exact(khvf_pv.view, khvf_cam)) extract_camera_pos(khvf_pv.view, khvf_cam);
+    kh_cam_of(khvf_pv.view, khvf_cam);
     const bool khvf_engcam = kh_engcam_consume(khvf_pv.view, khvf_cam);
     ConstantData khvf_tmp;
     mul_4x4(khvf_pv.view, khvf_pv.projection, khvf_tmp.view_proj);
@@ -246,12 +241,14 @@ inline void kh_infront_inject(ID3D11DeviceContext* ctx, const D3D11_VIEWPORT& kh
         !g_res.rasterizer || !g_res.rasterizer_cull || g_res.mesh_vb.empty()) return;
     ID3D11Device* dev = RVExtBridge::get_d3d_device();
     if (!dev) return;
-    const bool khvi_pinj = g_ro.in_injection;
-    g_ro.in_injection = true;   // Our own draws: the hooks stand aside.
+    // Our own draws: the hooks stand aside. KH_EA_VM_FLAG: restored by the scope on every exit, a throw included -
+    // the tail can run on the game thread (kh_infront_tail_take at its resolve), whose kh_hook_except leaves the flag
+    // alone, so a hand restore skipped by a throw there would leave the render thread's hooks standing aside.
+    KhInjectionFlagScope khvi_fl;
+    g_ro.in_injection = true;
     // KH_INFRONT: the tail draws the pass's own snapshot and matrices or nothing (never a re-prepare).
     if ((khvi_late && (!g_vm_frame_valid || g_vm_frame_cycle != g_topo_cycles || !g_vm_tail_rtv || !g_vm_tail_dsv)) ||
         !kh_infront_frame_prepare(ctx) || g_vm_meshes.empty()) {
-        g_ro.in_injection = khvi_pinj;
         return;
     }
     const float* cam = g_vm_cam;
@@ -315,7 +312,6 @@ inline void kh_infront_inject(ID3D11DeviceContext* ctx, const D3D11_VIEWPORT& kh
         khvi_s0.close(ctx);   // KH_MESH_O1: under the hooks' exclusion.
         if (khvi_late) { khvi_om.restore(ctx); khvi_om.release(); }   // KH_INFRONT: the engine's targets back.
         khvi_bk.restore(ctx);
-        g_ro.in_injection = khvi_pinj;
         return;
     }
 
@@ -580,7 +576,6 @@ inline void kh_infront_inject(ID3D11DeviceContext* ctx, const D3D11_VIEWPORT& kh
     khvi_s0.close(ctx);   // KH_MESH_O1: under the hooks' exclusion.
     if (khvi_late) { khvi_om.restore(ctx); khvi_om.release(); }   // KH_INFRONT: the engine's targets back.
     khvi_bk.restore(ctx);
-    g_ro.in_injection = khvi_pinj;
 }
 
 // KH_INFRONT: the deferred tail's draw at the pass's end (g_vm_tail_*: the sites, above), once - disarmed ahead of

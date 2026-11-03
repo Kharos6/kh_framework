@@ -57,11 +57,13 @@ inline bool kh_probe_readable(const void* khpr_p, size_t khpr_n) {
 // The attachment lives beside the draw list, not inside RenderObject: RenderObject is copied wholesale on every scene
 // sync, staging copy and flush pass, several of them on the render thread, and a game_value member would put a
 // refcount touch on all of them. Here the objects are held once, by handle, under g_draw_list_mutex.
-// THREADS: the table is WRITTEN only by the game thread (the SQF commands via kh_attach_set / kh_attach_drop, and the
-// draw-list erase sites). It is READ by both: kh_attach_step runs on the render thread from the injection, the cast
-// fire and the other drawers, and on the game thread from kh_park_run. The step therefore only ever COPIES a sampled
-// transform and SKIPS orphans - it must never erase, because releasing a game_value on the render thread touches the
-// SQF allocator off its own thread. If that function ever gains an erase, that is the bug.
+// THREADS: the table's entries and lanes are WRITTEN only by the game thread (the SQF commands via kh_attach_set and
+// its bone / skeletal / toggle siblings, the draw-list erase sites via kh_attach_drop). It is READ by both:
+// kh_attach_step runs on the render thread from the injection, the cast fire and the other drawers (writing only an
+// entry's own render-thread fields: its picks, reads, stamps and skin scratch), and on the game thread from
+// kh_park_run. The step therefore only ever COPIES a sampled transform and SKIPS orphans - it must never erase,
+// because releasing a game_value on the render thread touches the SQF allocator off its own thread. If that function
+// ever gains an erase, that is the bug.
 #if defined(_WIN64) || defined(_M_X64) || defined(__x86_64__)
 #define KH_ATTACH_VS_RENDER 0x1A0u
 #define KH_ATTACH_VS_SIM    0xD0u
@@ -277,8 +279,7 @@ struct KhVsMemoEnt {
     uintptr_t    v = 0;
     float        f[14] = {};
     bool         ok = false;
-    bool         reached = false;
-    KhAttachDiag diag;
+    KhAttachDiag diag;   // kh_attach_vs_eval sets it on every path, so every filled entry (v != 0) holds one.
     float        pos[3] = {}, rot[9] = {}, len[3] = {};
 };
 static constexpr uint32_t KH_VS_MEMO_SETS = 4096u;   // Power of two.
@@ -402,7 +403,7 @@ inline bool kh_attach_vs_read(uintptr_t khvs_base, uint32_t khvs_off, uintptr_t&
             KhVsMemoEnt& khvs_c = khvs_m->e[khvs_s][khvs_w];
             if (khvs_c.v == khvs_v && memcmp(khvs_c.f, khvs_f, sizeof(khvs_f)) == 0) {
                 khvs_m->old[khvs_s] = static_cast<uint8_t>(khvs_w ^ 1u);   // The other way ages.
-                if (khvs_c.reached && khvs_diag) *khvs_diag = khvs_c.diag;
+                if (khvs_diag) *khvs_diag = khvs_c.diag;   // A hit is a filled entry (khvs_v != 0).
                 if (!khvs_c.ok) { khvs_vb = 0; return false; }   // Not a state: confirmed no longer.
                 memcpy(khvs_rot, khvs_c.rot, sizeof(khvs_c.rot));
                 memcpy(khvs_pos, khvs_c.pos, sizeof(khvs_c.pos));
@@ -424,7 +425,6 @@ inline bool kh_attach_vs_read(uintptr_t khvs_base, uint32_t khvs_off, uintptr_t&
         khvs_e->v = khvs_v;
         memcpy(khvs_e->f, khvs_f, sizeof(khvs_f));
         khvs_e->ok = khvs_ok;
-        khvs_e->reached = true;   // kh_attach_vs_eval sets its diag on every path.
         khvs_e->diag = khvs_dg;
         memcpy(khvs_e->pos, khvs_ep, sizeof(khvs_ep));
         memcpy(khvs_e->rot, khvs_er, sizeof(khvs_er));

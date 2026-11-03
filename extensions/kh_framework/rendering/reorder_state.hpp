@@ -55,7 +55,8 @@ static ReorderState g_ro;
 // kh_vmsee_t_end), KH_STEP_OWN_FLAG's steps: the cast fire's and its two repicks (mask_cast_engine) and the
 // skin-cull catch-up (kh_skin_cull_catchup), and KH_WSEE's capture, B2 moment and D3 resolve (kh_wsee_snapshot,
 // kh_wsee_b2_take, kh_wsee_d3m_resolve, ahead of their saves), its re-issues' binds (kh_wsee_re_set,
-// kh_wsee_re_restore) and the one pass (kh_psb_post).
+// kh_wsee_re_restore) and the one pass (kh_psb_post), and the in-front slice's injection (kh_infront_inject,
+// KH_EA_VM_FLAG: its deferred tail runs on either thread).
 struct KhInjectionFlagScope {
     bool khif_prev;
     KhInjectionFlagScope() : khif_prev(g_ro.in_injection) {}

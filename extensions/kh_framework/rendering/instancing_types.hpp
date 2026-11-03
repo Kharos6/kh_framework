@@ -46,7 +46,7 @@ struct KhInstKey {
 // (ring-absolute), 'n' lanes. src = the range's first lane in the plan's own stream (p.lanes / p.lane_d2), before
 // the ring offset.
 struct KhInstRange { int lvl; uint32_t first; uint32_t n; uint32_t src = 0; };
-// KH_INST_PART_ORDER: one lane of a translucent part's far-to-near walk (kh_inst_draw, part 2).
+// KH_INST_PART_ORDER: one lane of a translucent part's far-to-near walk (kh_inst_part_lanes; kh_inst_draw, part 2).
 struct KhInstPartLane { float d2; uint32_t lane; int lvl; };
 
 struct KhInstPlan {
@@ -72,7 +72,6 @@ struct KhInstPlan {
     std::vector<KhInstLane> lanes;       // Scratch: the pass's whole stream, one write.
     std::vector<float>    lane_d2;       // Scratch, per lane of 'lanes': its member's distance (the pass's
                                          // memo) - KH_INST_PART_ORDER's sort key.
-    mutable std::vector<KhInstPartLane> part_order;   // Scratch of kh_inst_draw's part-2 walk.
     std::vector<float>    lod_t;         // Scratch, per mesh index: the member's own crossfade fraction from its
                                          // one pick (0 = none).
     std::vector<int>      lod_l;         // Likewise, the level that pick drew (clamped; its crossfade partner is

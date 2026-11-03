@@ -44,7 +44,7 @@
 // takes that mesh: copies cost no memory and draw in one instanced bucket. g_mesh_gen_cache, under g_fbx_cache_mutex as
 // the import cache; kh_mesh_release forgets a released id's entry.
 // KH_MESH_GEN_PUB: never under the graphics lock. The mesh is appended and its publish left to the render thread
-// (g_mesh_publish_pending, the importer's own fallback): the next injection lands it ahead of its scene sync, else the
+// (g_mesh_publish_pending, as the importer's): the next injection lands it ahead of its scene sync, else the
 // flush (kh_mesh_publish_land). Until then kh_scene_sync holds every object naming it out of the live scene
 // (KH_SCENE_UNPUB): a pass drawn earlier in that cycle keeps the object's last synced state (a new one: nothing)
 // instead of drawing mesh 0. KH_MESH_GEN_GC: an unreferenced generated mesh is released after KH_MESH_GEN_GC_IDLE_MS
@@ -620,7 +620,9 @@ inline void kh_mesh_publish_land(ID3D11Device* dev) {
     kh_mesh_publish();
     kh_mesh_cache_later_land();   // KH_MESH_CACHE_LATER: the imports that waited for this publish.
     const std::string khmp_err = ensure_mesh_vbs(dev);
-    kh_ensure_ok("mesh publish", khmp_err);   // KH_ENSURE_ONCE: the next ensure_resources sees the same error.
+    // KH_ENSURE_ONCE. The ids stay published: until a top-up succeeds (or the mesh is released) every ensure_resources
+    // returns this error and the flush and the injection stand down whole - every object, not only this mesh's.
+    kh_ensure_ok("mesh publish", khmp_err);
 }
 
 // The mesh slot's [shading, faces] form: the registry id of the mesh the spec describes (shared or built and

@@ -121,10 +121,10 @@ inline void kh_pip_note_upload(ID3D11Resource* res, const void* data, uint32_t b
 }
 
 // KH_PIP_FX: PSEffect against a single-sample depth; a multisampled PIP depth stands the pass down rather than reading
-// it through the wrong declaration. The prewarm table carries this exact define set.
+// it through the wrong declaration. The prewarm table carries this exact define set. One attempt per device: a failed
+// one is reported once by its caller's kh_ensure_ok, after which "" with no shader stands the passes down quietly.
 inline std::string kh_pip_fx_shader(ID3D11Device* dev) {
-    if (g_res.ps_effect_pip) return "";
-    if (g_res.ps_effect_pip_tried) return "PIP effect shader unavailable";
+    if (g_res.ps_effect_pip || g_res.ps_effect_pip_tried) return "";   // KH_EA_PIP_ONCE.
     g_res.ps_effect_pip_tried = true;
     const D3D_SHADER_MACRO khpx_def[] = { { "MSAA_DEPTH", "0" }, { "KH_FX_UNIT", "1" }, { nullptr, nullptr } };
     const std::string khpx_src = kh_hlsl_src(KH_HLSL_CB) + kh_hlsl_src(KH_HLSL_EFFECT).c_str();
@@ -171,9 +171,10 @@ inline bool kh_pip_fx_depth(ID3D11Device* khpd_dev, ID3D11DeviceContext* khpd_ct
             khpd_sf = DXGI_FORMAT_R16_UNORM; khpd_cf = DXGI_FORMAT_R16_TYPELESS; break;
         default:
             khpd_ok = false;
-            report_error_once_safe("KH pip fx: the PIP depth's format (" +
-                                   std::to_string(static_cast<int>(khpd_td.Format)) +
-                                   ") has no read; no PIP post passes");
+            // KH_EA_ERR_CLASS: an engine PIP configuration we do not serve - a warning (logged, never thrown).
+            kh_log_once_safe("KH RenderIntegration: pip fx: the PIP depth's format (" +
+                             std::to_string(static_cast<int>(khpd_td.Format)) +
+                             ") has no read; no PIP post passes");
             break;
     }
     if (khpd_ok && (!g_res.pip_depth_tex || !g_res.pip_depth_srv ||
@@ -200,7 +201,7 @@ inline bool kh_pip_fx_depth(ID3D11Device* khpd_dev, ID3D11DeviceContext* khpd_ct
             FAILED(khpd_dev->CreateShaderResourceView(g_res.pip_depth_tex, &khpd_sd, &g_res.pip_depth_srv)) || !g_res.pip_depth_srv) {
             KH_SAFE_RELEASE(g_res.pip_depth_srv);
             KH_SAFE_RELEASE(g_res.pip_depth_tex);
-            report_error_once_safe("KH pip fx: copy of the PIP depth could not be created (format " +
+            report_error_once_safe("KH RenderIntegration: pip fx: copy of the PIP depth could not be created (format " +
                                    std::to_string(static_cast<int>(khpd_td.Format)) + "); no PIP post passes");
             khpd_ok = false;
         } else {
@@ -289,13 +290,15 @@ inline void kh_pip_fx(ID3D11DeviceContext* ctx) {
     // passes read them) and of any state change, and reported once. Carrying the origin in a lane and subtracting it in
     // the shader would serve it.
     if (g_pip.vp.TopLeftX != 0.0f || g_pip.vp.TopLeftY != 0.0f) {
-        report_error_once_safe("KH pip fx: a picture-in-picture viewport with an offset origin; no PIP post passes");
+        // KH_EA_ERR_CLASS: an engine PIP configuration we do not serve - a warning (logged, never thrown).
+        kh_log_once_safe("KH RenderIntegration: pip fx: a picture-in-picture viewport with an offset origin; no PIP "
+                         "post passes");
         return;
     }
 
     ID3D11Device* dev = RVExtBridge::get_d3d_device();
     if (!dev) return;
-    if (!kh_ensure_ok("pip effect shader", kh_pip_fx_shader(dev))) return;
+    if (!kh_ensure_ok("pip effect shader", kh_pip_fx_shader(dev)) || !g_res.ps_effect_pip) return;   // KH_EA_PIP_ONCE.
 
     // Declared before the OM save so the unwind restores the OM before the SRVs (destructors run in reverse declaration
     // order); captured later, ahead of our draws.
@@ -354,7 +357,8 @@ inline void kh_pip_fx(ID3D11DeviceContext* ctx) {
                     KH_SAFE_RELEASE(g_res.pip_scene_tex2);
                     KH_SAFE_RELEASE(g_res.pip_scene_rtv[0]);
                     KH_SAFE_RELEASE(g_res.pip_scene_rtv[1]);
-                    report_error_once_safe("KH pip fx: copy of the PIP colour target could not be created; no PIP post passes");
+                    report_error_once_safe("KH RenderIntegration: pip fx: copy of the PIP colour target could not be "
+                                           "created; no PIP post passes");
                     khpf_ok = false;
                 } else {
                     g_res.pip_scene_w = khpf_td.Width;
@@ -642,12 +646,18 @@ inline void kh_pip_inject(ID3D11DeviceContext* ctx) {
     float khpi_p[4][4];
     memcpy(khpi_p, g_pip.proj, sizeof(khpi_p));
     const float* cam = g_pip.cam;
-    // KH_PIP_LOD: the pass's own pixels-per-tangent for the level pick - the PIP's projection and target height, the
-    // main passes' formula (not g_lod_proj_px: the main view's, which a zoomed or smaller PIP does not share - its
-    // meshes would draw at the main view's levels for the PIP camera's distance). An unknown height reads as level 0,
-    // as an unpublished g_lod_proj_px does.
-    const float khpi_lod_px = (g_pip.h > 0u && khpi_p[1][1] > 0.0f)
-                            ? khpi_p[1][1] * static_cast<float>(g_pip.h) * 0.5f : 0.0f;
+    // KH_PIP_LOD: the pass's own pixels-per-tangent for the level pick - the PIP's projection and the height of the
+    // viewport this pass draws our meshes with (KH_LOD_ONE_SCALE's definition, KH_EA_PIP_LOD_VP; the target's height
+    // where none is bound), the main passes' formula (not g_lod_proj_px: the main view's, which a zoomed or smaller
+    // PIP does not share - its meshes would draw at the main view's levels for the PIP camera's distance). An unknown
+    // height reads as level 0, as an unpublished g_lod_proj_px does.
+    UINT khpi_nvp = 1;
+    D3D11_VIEWPORT khpi_dvp = {};
+    ctx->RSGetViewports(&khpi_nvp, &khpi_dvp);
+    const float khpi_lod_h = (khpi_nvp >= 1 && khpi_dvp.Height >= 1.0f) ? khpi_dvp.Height
+                                                                          : static_cast<float>(g_pip.h);
+    const float khpi_lod_px = (khpi_lod_h > 0.0f && khpi_p[1][1] > 0.0f)
+                            ? khpi_p[1][1] * khpi_lod_h * 0.5f : 0.0f;
     const float khpi_lod_zoom = kh_lod_zoom_of(khpi_p[1][1]);   // KH_LOD_ZOOM: the PIP camera's own.
 
     ConstantData khpi_cbf = g_pip.tpl;

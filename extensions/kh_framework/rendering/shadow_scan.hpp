@@ -95,11 +95,6 @@ inline float shadow_axis_abs_cos(float ax, float ay, float az) {
     return fabsf(d) / sqrtf(len2);
 }
 
-// Cleared at every frame boundary and on atlas adoption, so a destroyed view whose address is reused can never inherit
-// a stale classification beyond the frame it died in.
-static void* g_atlas_srv_cache[8] = {};
-static uint32_t g_atlas_srv_count = 0;
-
 // Every band slot's device objects and its seal, then the staging pool.
 inline void kh_band_slots_release() {
     for (int b = 0; b < 8; ++b) {
@@ -151,11 +146,9 @@ inline void shadow_live_consider_atlas(ID3D11Texture2D* tex, const D3D11_TEXTURE
     g_ls.atlas_identity = id;
     g_ls.atlas_size = td.Width;
     g_ls.atlas_fmt = static_cast<uint32_t>(td.Format);
-    g_atlas_srv_count = 0;
     g_ls.atlas_last_seen = now_at;   // Adoption grace: displaceable only after 3 s unseen.
     g_ls.srv_failed = false;
     g_ls.cache_valid = false;   // New atlas: relearn the upload locator.
-    g_atlas_srv_count = 0;
 
     // Drop the textures; band_capture's batch-create rebuilds all eight at the adopted desc on the first reseal.
     kh_band_slots_release();
@@ -444,22 +437,6 @@ inline void shadow_view_scan(ID3D11Resource* res, const void* data, uint32_t byt
             if (g_ls.frame_view_valid) {
                 memcpy(g_ls.prev_view, g_ls.frame_view, sizeof(g_ls.prev_view));
                 g_ls.prev_view_valid = true;
-                // When the incoming publish crosses sources, the outgoing frame_view is the other source's freshest
-                // statement - latch it.
-                float khav_a[3], khav_b[3];
-                if (kh_view_camera_exact(reinterpret_cast<const float(*)[4]>(g_ls.frame_view), khav_a) &&
-                    kh_view_camera_exact(reinterpret_cast<const float(*)[4]>(fv), khav_b)) {
-                    const float khav_dx = khav_a[0] - khav_b[0];
-                    const float khav_dy = khav_a[1] - khav_b[1];
-                    const float khav_dz = khav_a[2] - khav_b[2];
-                    const float khav_d = sqrtf(khav_dx * khav_dx + khav_dy * khav_dy +
-                                               khav_dz * khav_dz);
-                    if (khav_d == khav_d && khav_d > 0.5f) {
-                        memcpy(g_ls.alt_view, g_ls.frame_view, sizeof(g_ls.alt_view));
-                        g_ls.alt_view_valid = true;
-                        g_ls.alt_view_time = g_ls.frame_view_time;
-                    }
-                }
             }
 
             memcpy(g_ls.frame_view, fv, sizeof(g_ls.frame_view));
@@ -490,7 +467,7 @@ inline void shadow_view_scan(ID3D11Resource* res, const void* data, uint32_t byt
                     continue;
                 }
 
-                if (!kh_band_view_native(fv, true)) {   // Foreign publish never completes a seal.
+                if (!kh_band_view_native(fv)) {   // Foreign publish never completes a seal.
                     continue;
                 }
                 // Absent beats offset: invalidate and the next resolve reseals coherent. A completing publish > 50 m
@@ -513,7 +490,7 @@ inline void shadow_view_scan(ID3D11Resource* res, const void* data, uint32_t byt
                 bs.vcol_bridge = false;
             }
 
-            if (g_ls.last_publish_rot_err <= 1e-3f && kh_band_view_native(fv, false)) {
+            if (g_ls.last_publish_rot_err <= 1e-3f && kh_band_view_native(fv)) {
                 for (int khsf_i = 0; khsf_i < 8; ++khsf_i) {
                     auto& khsf_b = g_ls.band[khsf_i];
                     if (!khsf_b.stage_valid || khsf_b.stage_first_ok) continue;
@@ -525,7 +502,7 @@ inline void shadow_view_scan(ID3D11Resource* res, const void* data, uint32_t byt
                     khsf_b.stage_first_ok = true;
                 }
             }
-            if (g_ls.last_publish_rot_err <= 1e-3f && kh_band_view_native(fv, false)) {
+            if (g_ls.last_publish_rot_err <= 1e-3f && kh_band_view_native(fv)) {
                 for (int khfl_i = 0; khfl_i < 8; ++khfl_i) {
                     auto& khfl_b = g_ls.band[khfl_i];
                     if (!khfl_b.stage_valid || khfl_b.stage_pair_ok ||
@@ -844,6 +821,19 @@ inline void shadow_live_finalize_cycle() {
         }
     }
 
+    // The tile (one texel in from each edge), ahead of any table write. KH_EA_LIVE_TILE: a degenerate tile refuses the
+    // commit whole, before the deferred wipe and the slot pick touch the table; positive form, so a NaN tile is refused
+    // too.
+    const float inv = 1.0f / static_cast<float>(g_ls.atlas_size);
+    const float texel = inv;
+    const float khlt_tile[4] = {
+        vp.TopLeftX * inv + texel,
+        vp.TopLeftY * inv + texel,
+        (vp.TopLeftX + vp.Width) * inv - texel,
+        (vp.TopLeftY + vp.Height) * inv - texel,
+    };
+    if (!(khlt_tile[2] > khlt_tile[0]) || !(khlt_tile[3] > khlt_tile[1])) return;
+
     // Slot selection: same cascade = same scale (each cascade's extent is distinct); a re-render replaces its entry in
     // place. New scales append; a full table evicts the stalest.
     const float* pm = g_ls.pending_m;
@@ -873,15 +863,9 @@ inline void shadow_live_finalize_cycle() {
         }
     }
 
-    const float inv = 1.0f / static_cast<float>(g_ls.atlas_size);
-    const float texel = inv;
     LiveShadowEntry& e = g_ls.entries[slot];
     memcpy(e.m, g_ls.pending_m, sizeof(e.m));
-    e.tile[0] = vp.TopLeftX * inv + texel;
-    e.tile[1] = vp.TopLeftY * inv + texel;
-    e.tile[2] = (vp.TopLeftX + vp.Width) * inv - texel;
-    e.tile[3] = (vp.TopLeftY + vp.Height) * inv - texel;
-    if (e.tile[2] <= e.tile[0] || e.tile[3] <= e.tile[1]) return;
+    memcpy(e.tile, khlt_tile, sizeof(khlt_tile));
     float khlp_cam[3] = { g_ls.cam[0], g_ls.cam[1], g_ls.cam[2] };
     const float khlp_now = effect_time_seconds();
     float khlp_c[3];
@@ -911,31 +895,6 @@ struct CascBindProbe {
     uint8_t       pending = 0;
 };
 static CascBindProbe g_cascbind;
-
-// Chooses the four buffers the staging copy reads from: VS slots 0-3 as bound (both callers pass khcs_wide = false).
-// The wide scan (the first four bound windows of 64 B or more across VS 0-7 then PS 0-7) is unused.
-inline void kh_cascbind_select(ID3D11Buffer* (&khcs_vs)[8], UINT (&khcs_vf)[8], UINT (&khcs_vn)[8],
-                               ID3D11Buffer* (&khcs_ps)[8], UINT (&khcs_pf)[8], UINT (&khcs_pn)[8],
-                               bool khcs_wide,
-                               ID3D11Buffer* (&khcs_out)[4], UINT (&khcs_of)[4], UINT (&khcs_on)[4]) {
-    int khcs_n = 0;
-    if (!khcs_wide) {
-        for (int khcs_i = 0; khcs_i < 4; ++khcs_i) { khcs_out[khcs_i] = khcs_vs[khcs_i]; khcs_of[khcs_i] = khcs_vf[khcs_i]; khcs_on[khcs_i] = khcs_vn[khcs_i]; khcs_vs[khcs_i] = nullptr; }
-        khcs_n = 4;
-    } else {
-        for (int khcs_p = 0; khcs_p < 16 && khcs_n < 4; ++khcs_p) {
-            ID3D11Buffer*& khcs_b = khcs_p < 8 ? khcs_vs[khcs_p] : khcs_ps[khcs_p - 8];
-            const UINT khcs_f = khcs_p < 8 ? khcs_vf[khcs_p] : khcs_pf[khcs_p - 8];
-            const UINT khcs_c = khcs_p < 8 ? khcs_vn[khcs_p] : khcs_pn[khcs_p - 8];
-            if (!khcs_b) continue;
-            if (khcs_c != 0 && khcs_c * 16u < 64u) continue;
-            khcs_out[khcs_n] = khcs_b; khcs_of[khcs_n] = khcs_f; khcs_on[khcs_n] = khcs_c;
-            khcs_b = nullptr;
-            ++khcs_n;
-        }
-    }
-    for (int khcs_i = 0; khcs_i < 8; ++khcs_i) { KH_SAFE_RELEASE(khcs_vs[khcs_i]); KH_SAFE_RELEASE(khcs_ps[khcs_i]); }
-}
 static uint32_t g_cascharv_ctr = 0;
 
 inline void cascbind_release() {
@@ -970,25 +929,17 @@ inline void cascbind_step(ID3D11DeviceContext* ctx) {
             g_cascbind_feed_t > 0.0f && now_c - g_cascbind_feed_t < 3.0f) {  return; }
     }
 
+    // The four buffers the staging copy reads from: VS slots 0-3 as bound, with their windows where the context
+    // reports them (0 / 0 = the whole buffer, below).
     ID3D11Buffer* bufs[4] = {};
     UINT first16[4] = {};
     UINT num16[4] = {};
     ID3D11DeviceContext1* ctx1 = kh_ctx1(ctx);
 
     if (ctx1) {
-        ID3D11Buffer* khcw_vs[8] = {}; UINT khcw_vf[8] = {}; UINT khcw_vn[8] = {};
-        ID3D11Buffer* khcw_ps[8] = {}; UINT khcw_pf[8] = {}; UINT khcw_pn[8] = {};
-        const bool khcw_wide = false;
-        ctx1->VSGetConstantBuffers1(0, 8, khcw_vs, khcw_vf, khcw_vn);
-        if (khcw_wide) ctx1->PSGetConstantBuffers1(0, 8, khcw_ps, khcw_pf, khcw_pn);
-        kh_cascbind_select(khcw_vs, khcw_vf, khcw_vn, khcw_ps, khcw_pf, khcw_pn, khcw_wide, bufs, first16, num16);
+        ctx1->VSGetConstantBuffers1(0, 4, bufs, first16, num16);
     } else {
-        ID3D11Buffer* khcw_vs[8] = {}; UINT khcw_vf[8] = {}; UINT khcw_vn[8] = {};
-        ID3D11Buffer* khcw_ps[8] = {}; UINT khcw_pf[8] = {}; UINT khcw_pn[8] = {};
-        const bool khcw_wide = false;
-        ctx->VSGetConstantBuffers(0, 8, khcw_vs);
-        if (khcw_wide) ctx->PSGetConstantBuffers(0, 8, khcw_ps);
-        kh_cascbind_select(khcw_vs, khcw_vf, khcw_vn, khcw_ps, khcw_pf, khcw_pn, khcw_wide, bufs, first16, num16);
+        ctx->VSGetConstantBuffers(0, 4, bufs);
     }
 
     ID3D11Device* dev = nullptr;
@@ -1069,7 +1020,7 @@ inline bool shadow_probe_target(ID3D11DepthStencilView* dsv) {
 }
 
 // Frame boundary (main depth clear): prune the table's stale entries, expire stale band seals, drop the cycle's upload
-// and viewport latches and the SRV cache.
+// and viewport latches.
 inline void shadow_live_frame_reset() {
     // The table persists - entries stay valid until their cascade re-renders and replaces them - with one exception: a
     // cascade-layout change (sun elevation swings alter the count; 8 -> 5 observed) orphans slots that will never
@@ -1116,7 +1067,6 @@ inline void shadow_live_frame_reset() {
     // KH_LS_VP_LATCH: a draw's viewport latched this cycle is this cycle's; left set, shadow_live_on_draw would never
     // take the next cascade's (it keeps the first) and the finalize would pair that cascade with this tile.
     g_ls.pending_vp_valid = false;
-    g_atlas_srv_count = 0;   // per-frame SRV relearn (see the cache note).
 }
 inline void release_shadow_device_state() {
     kh_rp_release_all();   // KH_VOL_REPLAY: every engine object the records hold, our targets and copies.
@@ -1218,22 +1168,18 @@ inline void release_shadow_device_state() {
     g_ls.frame_view_valid = false;
     g_ls.frame_view_time = -1.0f;
     g_ls.prev_view_valid = false;
-    g_ls.alt_view_valid = false;   // The alt latch the session.
     g_ls.receive_warmed = false;   // Next session warms up again.
     g_band_fall_flush = ~0ull;   // Cap latch the session.
-    g_ls.alt_view_time = -1.0f;
     g_ls.view_published_this_frame = false;
 
     // Frozen fire + private sun map.
     if (g_fire_lock) { g_fire_lock->Release(); g_fire_lock = nullptr; }
     g_fire_lock_valid = false;
-    g_fire_refreeze_pending = false;
 
     g_mask_cast_arm = false;
     g_mask_cast_fired = false;
     kh_sun_ladder_forget();   // The ladder's flags, tier keys and input hash.
     g_sun_map_rendered_frame = false;
-    g_sun_map_no_local = false;
     g_sun_map_render_time = -1.0f;
     g_sun_mat_chash = 0;
     g_sun_mat_sun[0] = g_sun_mat_sun[1] = g_sun_mat_sun[2] = 0.0f;
@@ -1245,7 +1191,6 @@ inline void release_shadow_device_state() {
 
     // Weak identities the render hooks compare against.
     g_main_depth_identity = nullptr;
-    g_atlas_srv_count = 0;
     // KH_RING_BEST_DEVRESET: the ring best and the prewarm / cold-adoption candidates are keys into the dead
     // device's buffers (a recycled address would match); cleared as the session reset clears them.
     g_ring_best_valid = false;

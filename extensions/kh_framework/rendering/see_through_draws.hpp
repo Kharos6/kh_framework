@@ -94,8 +94,8 @@ inline bool kh_wsee_agree_draw(ID3D11Device* dev, ID3D11DeviceContext* ctx, cons
             g_res.wsee_e_failed = true;
             g_res.wsee_e_fail_w = khwe_w;   // KH_WSEE_EFAIL_KEY.
             g_res.wsee_e_fail_h = khwe_h;
-            report_error_once_safe("KH world see-through: the agreement mask could not be made (the passes test the "
-                                   "samples inline)");
+            report_error_once_safe("KH RenderIntegration: world see-through: the agreement mask could not be made "
+                                   "(the passes test the samples inline)");
             return false;
         }
         g_res.wsee_e_w = khwe_w;
@@ -149,8 +149,8 @@ inline bool kh_wsee_agree_draw(ID3D11Device* dev, ID3D11DeviceContext* ctx, cons
             g_res.wsee_es_failed = true;
             g_res.wsee_es_fail_w = khwe_w;   // KH_WSEE_EFAIL_KEY.
             g_res.wsee_es_fail_h = khwe_h;
-            report_error_once_safe("KH world see-through: the edge stencil could not be made (the per-sample draws are "
-                                   "not split)");
+            report_error_once_safe("KH RenderIntegration: world see-through: the edge stencil could not be made (the "
+                                   "per-sample draws are not split)");
         }
     }
     const bool khwe_sm = g_res.wsee_es_dsv && g_res.dss_wsee_smark && g_res.dss_wsee_ssel;
@@ -239,8 +239,8 @@ inline ID3D11ShaderResourceView* kh_wsee_scene_ms(ID3D11Device* dev, ID3D11Rende
         KH_SAFE_RELEASE(g_res.wsee_c_srv);
         g_res.wsee_c_fail_res = khsm_id;
         g_res.wsee_c_fail_fmt = khsm_vd.Format;
-        report_error_once_safe("KH world see-through: the scene's sample-colour view could not be made (the fog takes "
-                               "the per-sample approximation) " + hr_str(khsm_hr));
+        report_error_once_safe("KH RenderIntegration: world see-through: the scene's sample-colour view could not be "
+                               "made (the fog takes the per-sample approximation) " + hr_str(khsm_hr));
         return nullptr;
     }
     g_res.wsee_c_res = khsm_id;

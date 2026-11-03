@@ -43,7 +43,8 @@ inline bool kh_fx_side_draw(ID3D11Device* dev, ID3D11DeviceContext* ctx, int khs
             KH_SAFE_RELEASE(g_res.fxs_srv[khsd_k]);
             KH_SAFE_RELEASE(g_res.fxs_rtv[khsd_k]);
             KH_SAFE_RELEASE(g_res.fxs_tex[khsd_k]);
-            report_error_once_safe("KH effects: side target could not be made (the pass computes it in place)");
+            report_error_once_safe("KH RenderIntegration: effects: side target could not be made (the pass computes "
+                                   "it in place)");
             return false;
         }
         g_res.fxs_w[khsd_k] = khsd_w;
@@ -124,7 +125,8 @@ inline bool kh_fx_linz_draw(ID3D11Device* dev, ID3D11DeviceContext* ctx, int khl
             KH_SAFE_RELEASE(g_res.linz_srv[khlz_k]);
             KH_SAFE_RELEASE(g_res.linz_rtv[khlz_k]);
             KH_SAFE_RELEASE(g_res.linz_tex[khlz_k]);
-            report_error_once_safe("KH effects: linear-depth target could not be made (the depth is read in place)");
+            report_error_once_safe("KH RenderIntegration: effects: linear-depth target could not be made (the depth "
+                                   "is read in place)");
             return false;
         }
         g_res.linz_w[khlz_k] = khlz_w;
@@ -214,8 +216,8 @@ inline ID3D11DepthStencilView* kh_dlf_split_ensure(ID3D11Device* dev, ID3D11Text
         KH_SAFE_RELEASE(g_res.dlf_st_tex);
         g_res.dlf_st_fail_w = khds_td.Width;
         g_res.dlf_st_fail_h = khds_td.Height;
-        report_error_once_safe("KH dynamicLightFog: the gather's stencil could not be made (the full gather draws "
-                               "alone)");
+        report_error_once_safe("KH RenderIntegration: dynamicLightFog: the gather's stencil could not be made (the "
+                               "full gather draws alone)");
         return nullptr;
     }
     g_res.dlf_st_w = khds_td.Width;
@@ -248,8 +250,11 @@ inline void kh_fx_chain_run(ID3D11Device* dev, ID3D11DeviceContext* ctx,
     // depth-reading pass reading 0 there reconstructs the camera position everywhere. Null when the depth is not ready,
     // as ps_srvs already says.
     ctx->PSSetShaderResources(1, 1, &khfc_depth_srv);
-    {   // KH_NEARZ_MARK: this cycle's marker at t37 (inside StateBackup's range), or none.
-        ID3D11ShaderResourceView* khfc_nzm = kh_nzm_valid() ? g_res.nzm_srv : nullptr;
+    // KH_NEARZ_MARK: this cycle's marker at t37 (inside StateBackup's range), or none; read once, so the bind and
+    // every pass's arm (shadowMeta2.x, below) take one verdict (KH_EA_NZM_XT).
+    const bool khfc_nzv = kh_nzm_valid();
+    {
+        ID3D11ShaderResourceView* khfc_nzm = khfc_nzv ? g_res.nzm_srv : nullptr;
         ctx->PSSetShaderResources(37, 1, &khfc_nzm);
     }
     // KH_VM_SEE: this cycle's snapshot (t34) and transmittance (t41), or none - inside the flush's StateBackup range,
@@ -265,7 +270,7 @@ inline void kh_fx_chain_run(ID3D11Device* dev, ID3D11DeviceContext* ctx,
     if (chain_err.empty()) chain_err = ensure_fx_chain(dev);
 
     if (!chain_err.empty()) {
-        // The mesh-side twin of this pair reports as "KH effect setup"; this is the chain's own report.
+        // The mesh-side twin of this pair reports as "effect setup"; this is the chain's own report.
         kh_ensure_ok("fullscreen chain", chain_err);
     } else {
         KhOmSave khfp_om;
@@ -992,7 +997,7 @@ inline void kh_fx_chain_run(ID3D11Device* dev, ID3D11DeviceContext* ctx,
                 khfp_cbd.depth_params[2] = khfp_rz;
                 khfp_cbd.depth_params[3] = khfp_rw;
             }
-            khfp_cbd.shadow_meta2[0] = kh_nzm_valid() ? 1.0f : 0.0f;   // KH_NEARZ_MARK: LoadDepthPS reads t37.
+            khfp_cbd.shadow_meta2[0] = khfc_nzv ? 1.0f : 0.0f;   // KH_NEARZ_MARK: LoadDepthPS reads t37.
             // KH_VM_SEE: 1 = the depth readers take the scene's depth behind the view model's translucent planes
             // (LoadDepthPS, t34); 2 = the builtin passes that put the world's medium or light into the picture also
             // fade by their transmittance (KhFxFinish, t41). A user effect is 1: it may be a screen filter, which the

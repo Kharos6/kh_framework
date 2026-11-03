@@ -123,7 +123,7 @@ inline void kh_user_shader_pump(ID3D11Device* dev) {
             khup_ce->second.failed = true;
         }
 
-        report_error_once_safe("KH user shader: the compiled unit for '" + g_user_req[khup_i].key +
+        report_error_once_safe("KH RenderIntegration: user shader: the compiled unit for '" + g_user_req[khup_i].key +
                         "' was lost from the memo four times - the request is abandoned");
         g_user_req.erase(g_user_req.begin() + static_cast<ptrdiff_t>(khup_i));
     }
@@ -220,10 +220,10 @@ inline std::string kh_user_err_report(const std::string& path, const char* khue_
     if (khue_p != std::string::npos) {
         const size_t khue_t = khue_p + (sizeof(khue_k) - 1u) + 8u;   // Past the eight hex digits.
         if (khue_t + 2u < khue_err.size() && khue_err.compare(khue_t, 2u, ": ") == 0) {
-            return "KH user shader '" + path + "': " + khue_err.substr(khue_t + 2u);
+            return "KH RenderIntegration: user shader '" + path + "': " + khue_err.substr(khue_t + 2u);
         }
     }
-    return std::string("KH user ") + khue_what + " '" + path + "': " +
+    return std::string("KH RenderIntegration: user ") + khue_what + " '" + path + "': " +
            (khue_err.empty() ? std::string("no blob") : khue_err);
 }
 
@@ -465,7 +465,7 @@ inline ID3D11PixelShader* kh_user_fx_ps(ID3D11Device* dev, const std::string& pa
     if (!kh_user_shader_source(path, khua_src, khua_err)) {
         KhUserShaderEntry khua_e;
         khua_e.failed = true;
-        report_error_once_safe("KH user effect '" + path + "': " + khua_err);
+        report_error_once_safe("KH RenderIntegration: user effect '" + path + "': " + khua_err);
         g_user_ps_cache.emplace(std::move(khus_key), khua_e);
         return nullptr;
     }
@@ -649,7 +649,7 @@ inline ID3D11PixelShader* kh_user_mat_ps(ID3D11Device* dev, const std::string& p
 
     // Unreadable source: the failure is cached so the path is not retried.
     khum_e.failed = true;
-    report_error_once_safe("KH user material shader '" + path + "': " + khum_err);
+    report_error_once_safe("KH RenderIntegration: user material shader '" + path + "': " + khum_err);
     g_user_ps_cache.emplace(std::move(khum_key), khum_e);
     return nullptr;
 }
@@ -675,7 +675,7 @@ inline int kh_user_mat_vs(ID3D11Device* dev, const std::string& path, ID3D11Vert
         if (!kh_user_shader_source(path, khuv_src, khuv_err)) {
             KhUserShaderEntry khuv_f;
             khuv_f.failed = true;
-            report_error_once_safe("KH user vertex stage '" + path + "': " + khuv_err);
+            report_error_once_safe("KH RenderIntegration: user vertex stage '" + path + "': " + khuv_err);
             g_user_ps_cache.emplace(khuv_key, khuv_f);
             return 2;
         }

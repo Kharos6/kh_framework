@@ -120,6 +120,15 @@ inline void kh_park_run(ID3D11Device* khpr_dev, ID3D11DeviceContext* khpr_ctx) {
             g_ao_strength_bits.store(khpr_aos, std::memory_order_relaxed);
             g_ao_dist_bits.store(khpr_aod, std::memory_order_relaxed);
             g_stats_armed.store(khpr_st, std::memory_order_relaxed);
+            // KH_MESH_CACHE_LATER: the teardown stopped the mesh-cache writer but kept the imports this mission made
+            // before it (not clean); their landing hands writes only to a running writer (KH_EA_MW_INLINE), so it
+            // starts again here, on the game thread.
+            bool khpr_mcl = false;
+            {
+                std::lock_guard<std::mutex> khpr_g(g_mesh_cache_later_mu);
+                khpr_mcl = !g_mesh_cache_later_q.empty();
+            }
+            if (khpr_mcl) kh_mesh_cache_writer_start();
             return;
         }
         // KH_PARK_STEP: a park's flush draws late and needs this cycle's poses; the render-thread step inside
@@ -286,7 +295,15 @@ inline void flush_frame() {
 
     g_kh_track_wanted.store(has_work, std::memory_order_relaxed);
 
-    if (!has_work) return;
+    if (!has_work) {
+        // KH_EA_EMPTY_RETIRE: the last object's removal still retires its skin / cloth / chain instances (the cloth
+        // and chain buffers to their grave, every instance's CPU state freed; a skin instance's GPU buffer stays until
+        // the next skin upload, a device reset or the session teardown); only the syncs retire, and nothing else would
+        // run them.
+        if (!g_skin.empty()) kh_skin_sync();
+        if (!g_cloth.empty()) kh_cloth_sync(kh_cloth_frame_dt(), false);
+        return;
+    }
 
 
     if (g_ui_mask_wanted.load(std::memory_order_relaxed)) {
@@ -351,8 +368,8 @@ inline void flush_frame() {
     // KH_CLOTH: queue this frame's simulation before the park. Off the park deliberately - the workers must be running
     // WHILE the render thread draws, not inside the window that stops it. The wind is sampled immediately ahead of it
     // because this is the game thread and sqf::wind is an engine call, which is the same reason the fog sample sits
-    // where it does.
-    kh_cloth_wind_sample();
+    // where it does. KH_EA_WIND_GATE: only with something simulating - the sync's instances are its one reader.
+    if (khff_cloth) kh_cloth_wind_sample();
     // KH_CLOTH_GROUND: the terrain's split, measured once per matrix and mission - engine calls, so here, holding
     // nothing, before the sync copies each cloth's ground.
     if (khff_cloth) kh_cloth_ground_prepare();
@@ -408,11 +425,9 @@ inline void flush_frame() {
     const bool khnp_ready = g_main_depth_identity != nullptr &&
                             g_reorder_render_tid.load(std::memory_order_relaxed) != 0 &&
                             khnp_last != ~0ull && g_topo_cycles_pub.load(std::memory_order_relaxed) - khnp_last <= 2ull;   // The published cycle counter, not the render thread's.
-    // The deferred mission destroy releases device state and still needs the engine stopped: once per mission end
-    // (kh_park_run consumes it before any flush).
-    if (!khnp_ready || g_mission_destroy_pending.load(std::memory_order_relaxed)) {
-        kh_park_run(dev, ctx);
-    }
+    // A pending deferred mission destroy never reaches here: KH_DESTROY_FIRST above parks for it and returns, every
+    // frame it is pending (rendering_integration_reset, its one setter, does not run inside flush_frame).
+    if (!khnp_ready) kh_park_run(dev, ctx);
 }
 
 inline std::string ensure_backbuffer_capture(ID3D11Device* dev, ID3D11DeviceContext* ctx,

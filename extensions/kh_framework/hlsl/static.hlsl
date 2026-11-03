@@ -341,10 +341,11 @@ float4 PSDlsMaskA(VSOut i) : SV_Target
 }
 #endif
 
-// Analytic mask cast: per-pixel ray-vs-AABB toward the sun, drawn into the engine's screen-space shadow mask with
-// multiply blending. castMat[0..2].xyz = the view's inverse rotation for KhCastWorld's row dots (cb.hlsl's lane note);
-// castView[0] = view row 3 (translation); castView[1] = (fov.x, fov.y, maskW, maskH); castView[2] = sunDir.xyz +
-// strength in w. Scene linear depth at t0.
+// Analytic mask cast: per pixel, the world point the engine's depth reconstructs, tested toward the sun against our
+// private sun-depth maps (SunShadowOcclusion), drawn into the engine's screen-space shadow mask under a MIN blend
+// (cast_scissor.hpp's note). castMat[0..2].xyz = the view's inverse rotation for KhCastWorld's row dots (cb.hlsl's
+// lane note); castView[0] = view row 3 (translation); castView[1] = (fov.x, fov.y, maskW, maskH); castView[2] =
+// sunDir.xyz + strength in w. Scene linear depth at t0.
 Texture2D<float4> sceneDepthTex : register(t0);
 float KhSceneLoad(int2 p) { return sceneDepthTex.Load(int3(p, 0)).x; }
 
@@ -361,10 +362,8 @@ Texture2D<float2> khrCastOcc : register(t35);
 // The reach is a shadow, not a sphere: sweep the caster down-sun onto the receiver's own height plane and test the
 // segment (t0/t1 are where the caster's base and top land at pw.y). lr is pure lateral slack. SunShadowOcclusion
 // answers 0 where no occluder stands, so this gate can only cost ALU, never a wrong verdict.
- 
 bool KhCastReach(float3 khcr_p, float3 khcr_c, float3 khcr_h, float khcr_lr)
 {
-
     float3 khcr_sd = castView[2].xyz;   // Frozen sun, toward the light.
     float  khcr_hl = length(khcr_sd.xz);
     float  khcr_sy = max(abs(khcr_sd.y), 0.02f);
@@ -386,13 +385,12 @@ bool KhCastReach(float3 khcr_p, float3 khcr_c, float3 khcr_h, float khcr_lr)
 }
 
 // The cast depth at t0 (g_mask.cast_depth; the fire's frozen g_fire_lock) is single-channel - the adoption admits
-// one-channel formats alone ("a screen-sized single-channel float") - so .y loads 0 and the pick returns .x; the .y arm
-// matters only for a two-plane source. One selector for every cast-depth read site (KhCastZl, PSMaskCast); KhSceneLoad
-// is PSMain's guard read of the composite snapshot's .x, not a cast-depth read.
+// one-channel formats alone (shadow_capture's R32 / R24 / R16_FLOAT list; "a screen-sized single-channel float") - so
+// the depth is .x (KH_EA_ZPICK; .y loads 0 for every admitted source). One selector for every cast-depth read site
+// (KhCastZl, PSMaskCast); KhSceneLoad is PSMain's guard read of the composite snapshot's .x, not a cast-depth read.
 float KhCastZPick(float4 khzp_t)
 {
-
-    return khzp_t.y > 0.0f ? khzp_t.y : khzp_t.x;
+    return khzp_t.x;
 }
 float KhCastZl(float2 khcz_s, float2 khcz_dims)
 {
@@ -422,7 +420,7 @@ float4 PSMaskPrime(VSOut i) : SV_Target
     const float khpm_v = KH_PRIME_V;
     return float4(khpm_v, khpm_v, khpm_v, 1.0f);
 }
- 
+
 // VSMirror overwrites z with its own conditional near plane, so its depth cannot be read back. The mask is a single
 // R32_FLOAT target holding the linear view distance, in metres, of the nearest of our meshes at every pixel - the same
 // quantity KhCastZl returns for the world, so the comparison is metres against metres.
@@ -553,7 +551,7 @@ bool KhDlswPlane(float2 khp_px, float2 khp_dims, float khp_r, float khp_zc,
            - KhCastWorld(khp_px - float2(0.0f, khp_r), khp_dims, khp_zny);
     return true;
 }
- 
+
 // KH_DLS_WORLD - the world-receive pass for dynamic-light shadows. Fullscreen, fired from the scene-resolve hook,
 // emitting a MULTIPLY FACTOR under a dest*src blend; the lighting arithmetic lives in KhDlsWorldFactor, this shader
 // turns a screen pixel into a world position and a normal. The depth is the engine's own resolved linear depth
@@ -588,7 +586,7 @@ float4 KhDlsWorldMain(VSOut i, out float3 khw_wo, out float khw_zo)
     // the quad and the reconstructed surface is the plane z = const in view space. Sampling the plane over
     // KH_DLSW_NRM_R pixels instead of one improves the signal-to-quantisation ratio by that factor with no assumption
     // about the step's size. On a resolved surface the two baselines agree; on a staircase they do not.
- 
+
     // The fullscreen pass stops paying for pixels no light can reach: KhDlsFaceUV refuses every receiver whose
     // face-axis depth is at or past that light's far plane. A cube face's axis depth is at least |p| / sqrt(3); a
     // spot's is its depth along the spot axis, and its frustum's corners (|x|, |y| <= t z, t = 1 / the length of
@@ -857,7 +855,7 @@ static const float KH_CAST_SNAP_UP = 0.5f;
 // KH_CAST_SNAP_ABOVE: the depth ulps along the ray a receiver ABOVE the heightfield may sit and still be snapped
 // down onto it - the quantisation the snap exists for, not the whole band.
 static const float KH_CAST_SNAP_ABOVE = 4.0f;
- float4 PSMaskCast(VSOut i) : SV_Target
+float4 PSMaskCast(VSOut i) : SV_Target
 {
     float2 dimsM = float2(castView[1].z, castView[1].w);
     uint dw, dh;
@@ -902,20 +900,21 @@ static const float KH_CAST_SNAP_ABOVE = 4.0f;
     // its own height, snapped only within one such ulp (noise it could be); an up-facing plane, or none fitted, keeps
     // the full band below the heightfield and KH_CAST_SNAP_ABOVE's tolerance above it. fogBelow.z = the ulp, relative
     // (the fire's fill; 0 reads as R16_FLOAT's).
-    // KH_CAST_PRE: on the sun-map path the reach test runs first, here, at the unsnapped point with every y extent
+    // KH_CAST_PRE: the reach test runs first, here, at the unsnapped point with every y extent
     // widened by the band the snap can move it (thmMeta.z, the snap's own guard). The exact test's grid and sphere
     // tests are subsets of this one for every point within the band; its swept test is not strictly (the wider sweep
     // moves the clamped t, and the box distance is not monotone in it for a diagonal sun), so a pixel can be refused
     // here yet pass there - only where its box distance plus its overshoot past the sweep's end reaches lr (>= 5x the
     // length of the caster's half extents): well outside the caster's swept box, which holds its shadow, so hit is
     // unchanged in practice. Every later term only lowers hit, so the snap and the exact test run for the survivors
-    // alone. The slab path keeps its snap (it reads pw whole).
+    // alone.
+    // KH_EA_SLAB_DEAD: every fire fills sunMeta.x (kh_fill_sun_tiers_cb: 1 or 2); with it 0 nothing casts.
     const bool khcOnMap = sunMeta.x >= 0.5f;
     const float khcPreTol = (thmParams.w >= 0.5f) ? thmMeta.z : 0.0f;
     // KH_CAST_PRE_BRANCH: branches, not || / && / ?: - fxc evaluates every operand (no short circuit), so both caster
     // walks would run on every pixel of the pass. Same verdicts; KhCastNearOk takes no gradient.
-    bool khcPre = !khcOnMap;
-    [branch] if (!khcPre && khcNearOk) khcPre = KhCastNearOk(pw, khcPreTol);
+    bool khcPre = false;
+    [branch] if (khcOnMap && khcNearOk) khcPre = KhCastNearOk(pw, khcPreTol);
     if (thmParams.w >= 0.5f && khcPre) {
         float khtsH = KhThmHeight(pw.xz);
         if (khtsH > -1.0e5f && abs(pw.y - khtsH) < thmMeta.z) {
@@ -956,32 +955,6 @@ static const float KH_CAST_SNAP_ABOVE = 4.0f;
             float3 khfc = castCam.xyz;   // KH_CB_DERIVED.
             hit *= KhSunRangeFadeAt(pw, khfc);
         }
-
-    } else {
-        // AABB-shaped by construction.
-        float3 sd = castView[2].xyz;
-        float3 sds = float3(
-            abs(sd.x) > 1e-6f ? sd.x : 1e-6f,
-            abs(sd.y) > 1e-6f ? sd.y : 1e-6f,
-             abs(sd.z) > 1e-6f ? sd.z : 1e-6f);
-        float3 inv = 1.0f / sds;
-        float3 bmin = centerSize.xyz - sizeAxes.xyz * 0.5f;
-        float3 bmax = centerSize.xyz + sizeAxes.xyz * 0.5f;
-        float3 ta = (bmin - pw) * inv;
-        float3 tb = (bmax - pw) * inv;
-        float3 tmn = min(ta, tb);
-        float3 tmx = max(ta, tb);
-        float tn = max(max(tmn.x, tmn.y), tmn.z);
-        float tf = min(min(tmx.x, tmx.y), tmx.z);
-
-        // Locality clamp: a ground point can only be shadowed by a mesh within plausible shadow reach of it (a few
-        // diagonals stretched by sun elevation).
-        float castR = length(sizeAxes.xyz) * 0.5f;
-        float reach = castR * (2.0f + 3.0f / max(abs(castView[2].y), 0.15f));
-        float3 toCast = centerSize.xyz - pw;
-        float near_enough = (dot(toCast, toCast) < reach * reach) ? 1.0f : 0.0f;
-        hit = (tf >= max(tn, 0.05f) && khcNearOk && near_enough > 0.5f) ? 1.0f : 0.0f;   // Near floor: whole-texture
-                                                                                         // verdict above.
     }
 
     // Full occlusion here; the apply colours the shadow by the ambient floor (amb/(amb+sun)).

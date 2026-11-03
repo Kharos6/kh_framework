@@ -539,8 +539,9 @@ inline void kh_mesh_weld(MeshDef& khmw_d) {
 // the drawn extent the burial check reads, and - KH_OCC_TARGET - the extent
 // every bounds test gives an object (kh_bounds_size_of, KH_LOD_BOUNDS); made
 // before the proof, for every mesh whose level tables are sound, whatever it
-// decides. Game thread: the builtins in mesh_store, and every import before
-// its cache write (a cache load takes the sealed box instead).
+// decides. Game thread: the builtins in mesh_store, every import before its
+// cache write (a cache load takes the sealed box instead) and every generated
+// mesh (kh_gen_build).
 static constexpr double KH_OCC_EPS = 1.0e-6;
 static constexpr int    KH_OCC_ITERS = 30;   // Bisection steps per face: 2^-30 of its reach.
 static constexpr int    KH_OCC_ROUNDS = 2;   // Passes over the six faces.

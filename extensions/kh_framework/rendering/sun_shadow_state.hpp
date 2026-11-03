@@ -17,9 +17,8 @@ static bool  g_sun_map_valid = false;   // Pass produced a usable map.
 static float g_sun_map_render_time = -1.0f;   // Not reset by sub-settle sun wobble.
 static uint64_t g_sun_mat_chash = 0;   // Caster hash at the last maturity reset.
 static float    g_sun_mat_sun[3] = {};   // Derived sun at the last maturity reset.
-// When it was produced (the fire consumes last frame's map; 0.25 s staleness bounds fallback frames).
+// When it was produced (effect clock); the cast fire refuses a map 0.25 s old or more (khcr_map_fresh).
 static float g_sun_map_time = -1.0f;
-static bool  g_sun_map_no_local = false;   // Casters exist, none within the fit.
 static float g_sun_anchor_now[3] = {};
 static float g_sun_map_cast_bias = 0.0f;   // KH_CAST_BIAS_CAP: the union's cast bias (0 = falls back to sun_meta[2]).
 static float    g_sun2_cast_bias = 0.0f;   // KH_CAST_BIAS_CAP: the cast chain's own (0 = falls back to sun_meta*[2]).

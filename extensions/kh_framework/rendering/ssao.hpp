@@ -69,8 +69,13 @@ inline float kh_ao_dist() {
 // this marker (PSSsaoNearMark, KhSaMetersAt's test and decode); the chain arms it (shadowMeta2.x, t37) and
 // cb.hlsl's LoadDepthPS takes the true distance wherever the marker's raw is still the live raw - a pixel
 // drawn over since (the hands) keeps its own. Valid for the cycle that wrote it (g_nzm_cycle).
-static uint64_t g_nzm_cycle = ~0ull;   // The cycle the marker was cleared and written in (~0 = none).
-inline bool kh_nzm_valid() { return g_nzm_cycle == g_topo_cycles && g_res.nzm_srv != nullptr; }
+// KH_EA_NZM_XT: written by the drawers (render thread, or a park), read by the chain - also the game thread's late
+// chain (KH_FX_LATE) - against the published cycle, as kh_vmsee_valid / the KH_WSEE stamps are (KH_XTHREAD_ATOMIC).
+static std::atomic<uint64_t> g_nzm_cycle{ ~0ull };   // The cycle the marker was cleared and written in (~0 = none).
+inline bool kh_nzm_valid() {
+    return g_nzm_cycle.load(std::memory_order_relaxed) == g_topo_cycles_pub.load(std::memory_order_relaxed) &&
+           g_res.nzm_srv != nullptr;
+}
 // The marker may have a reader this cycle: a visible fullscreen or local pass the scene chain runs, which arms it
 // (the flush's rule: every fullscreen pass but a UI-mode one - ui_only - which the UI chain runs with no marker
 // armed), and that reads the depth (KH_NEARZ_READER: a pass that never calls LoadDepthPS never reads the marker). An
@@ -91,11 +96,14 @@ inline std::string ensure_ssao_shaders(ID3D11Device* dev) {
     const UINT khss_sc = g_res.depth_sample_count > 0 ? g_res.depth_sample_count : 1;
     if (g_res.ps_ssao_depth && g_res.ps_ssao_main && g_res.ps_ssao_blur && g_res.ps_ssao_apply &&
         g_res.ps_ssao_nzmark && g_res.ps_ssao_samples == khss_sc) return "";   // KH_NEARZ_MARK: five.
-    KH_SAFE_RELEASE(g_res.ps_ssao_depth);
-    KH_SAFE_RELEASE(g_res.ps_ssao_main);
-    KH_SAFE_RELEASE(g_res.ps_ssao_blur);
-    KH_SAFE_RELEASE(g_res.ps_ssao_apply);
-    KH_SAFE_RELEASE(g_res.ps_ssao_nzmark);   // KH_NEARZ_MARK.
+    auto khss_drop = []() {   // All five or none (a failed compile or create below drops the ones made).
+        KH_SAFE_RELEASE(g_res.ps_ssao_depth);
+        KH_SAFE_RELEASE(g_res.ps_ssao_main);
+        KH_SAFE_RELEASE(g_res.ps_ssao_blur);
+        KH_SAFE_RELEASE(g_res.ps_ssao_apply);
+        KH_SAFE_RELEASE(g_res.ps_ssao_nzmark);   // KH_NEARZ_MARK.
+    };
+    khss_drop();
     const std::string khss_scs = std::to_string(khss_sc);
     const D3D_SHADER_MACRO khss_defs[] = {
         { "MSAA_DEPTH", khss_sc > 1 ? "1" : "0" },
@@ -115,21 +123,13 @@ inline std::string ensure_ssao_shaders(ID3D11Device* dev) {
         ID3DBlob* khss_b = nullptr;
         const std::string khss_err = compile_shader(khss_src, khss_x.entry, "ps_5_0", khss_defs, &khss_b);
         if (!khss_err.empty() || !khss_b) {
-            KH_SAFE_RELEASE(g_res.ps_ssao_depth);
-            KH_SAFE_RELEASE(g_res.ps_ssao_main);
-            KH_SAFE_RELEASE(g_res.ps_ssao_blur);
-            KH_SAFE_RELEASE(g_res.ps_ssao_apply);
-            KH_SAFE_RELEASE(g_res.ps_ssao_nzmark);
+            khss_drop();
             return std::string(khss_x.entry) + ": " + khss_err;
         }
         const HRESULT khss_hr = dev->CreatePixelShader(khss_b->GetBufferPointer(), khss_b->GetBufferSize(), nullptr, khss_x.out);
         khss_b->Release();
         if (FAILED(khss_hr)) {
-            KH_SAFE_RELEASE(g_res.ps_ssao_depth);
-            KH_SAFE_RELEASE(g_res.ps_ssao_main);
-            KH_SAFE_RELEASE(g_res.ps_ssao_blur);
-            KH_SAFE_RELEASE(g_res.ps_ssao_apply);
-            KH_SAFE_RELEASE(g_res.ps_ssao_nzmark);
+            khss_drop();
             return std::string("create ") + khss_x.entry + " " + hr_str(khss_hr);
         }
     }
@@ -156,20 +156,22 @@ inline void kh_ssao_targets_release() {
     g_res.ssao_hh = 0;
 }
 // The half grid (the main depth's size rounded up to even, halved): its sample-0 depth in metres (R32_FLOAT), the
-// term and its ping-pong twin (R8_UNORM); and the 80-byte b0.
-inline bool ensure_ssao_targets(ID3D11Device* dev, UINT khst_w, UINT khst_h) {
+// term and its ping-pong twin (R8_UNORM); and the 80-byte b0. "" = all stand; else what was refused (the caller
+// reports it once - KH_EA_SSAO_REPORT: the other effect targets' rule).
+inline std::string ensure_ssao_targets(ID3D11Device* dev, UINT khst_w, UINT khst_h) {
     if (!g_res.ssao_cb) {
         D3D11_BUFFER_DESC khst_cd = {};
         khst_cd.ByteWidth = sizeof(KhSsaoCb);
         khst_cd.Usage = D3D11_USAGE_DYNAMIC;
         khst_cd.BindFlags = D3D11_BIND_CONSTANT_BUFFER;
         khst_cd.CPUAccessFlags = D3D11_CPU_ACCESS_WRITE;
-        if (FAILED(dev->CreateBuffer(&khst_cd, nullptr, &g_res.ssao_cb))) { g_res.ssao_cb = nullptr; return false; }
+        const HRESULT khst_chr = dev->CreateBuffer(&khst_cd, nullptr, &g_res.ssao_cb);
+        if (FAILED(khst_chr)) { g_res.ssao_cb = nullptr; return "create ssao CB " + hr_str(khst_chr); }
     }
     if (g_res.ssao_dh_tex && g_res.ssao_dh_rtv && g_res.ssao_dh_srv &&
         g_res.ssao_ao_tex && g_res.ssao_ao_rtv && g_res.ssao_ao_srv &&
         g_res.ssao_ao2_tex && g_res.ssao_ao2_rtv && g_res.ssao_ao2_srv &&
-        g_res.ssao_w == khst_w && g_res.ssao_h == khst_h) return true;
+        g_res.ssao_w == khst_w && g_res.ssao_h == khst_h) return "";
     kh_ssao_targets_release();
     const UINT khst_hw = (khst_w + 1u) / 2u, khst_hh = (khst_h + 1u) / 2u;
     D3D11_TEXTURE2D_DESC khst_td = {};
@@ -180,31 +182,28 @@ inline bool ensure_ssao_targets(ID3D11Device* dev, UINT khst_w, UINT khst_h) {
     khst_td.SampleDesc.Count = 1;
     khst_td.Usage = D3D11_USAGE_DEFAULT;
     khst_td.BindFlags = D3D11_BIND_RENDER_TARGET | D3D11_BIND_SHADER_RESOURCE;
+    // One target: its texture, RTV and SRV at khst_td, or the first refusal's HRESULT.
+    auto khst_make = [&](ID3D11Texture2D** khsm_t, ID3D11RenderTargetView** khsm_r,
+                         ID3D11ShaderResourceView** khsm_s) -> HRESULT {
+        HRESULT khsm_hr = dev->CreateTexture2D(&khst_td, nullptr, khsm_t);
+        if (SUCCEEDED(khsm_hr)) khsm_hr = dev->CreateRenderTargetView(*khsm_t, nullptr, khsm_r);
+        if (SUCCEEDED(khsm_hr)) khsm_hr = dev->CreateShaderResourceView(*khsm_t, nullptr, khsm_s);
+        return khsm_hr;
+    };
     khst_td.Format = DXGI_FORMAT_R32_FLOAT;
-    if (FAILED(dev->CreateTexture2D(&khst_td, nullptr, &g_res.ssao_dh_tex)) ||
-        FAILED(dev->CreateRenderTargetView(g_res.ssao_dh_tex, nullptr, &g_res.ssao_dh_rtv)) ||
-        FAILED(dev->CreateShaderResourceView(g_res.ssao_dh_tex, nullptr, &g_res.ssao_dh_srv))) {
-        kh_ssao_targets_release();
-        return false;
-    }
+    HRESULT khst_hr = khst_make(&g_res.ssao_dh_tex, &g_res.ssao_dh_rtv, &g_res.ssao_dh_srv);
     khst_td.Format = DXGI_FORMAT_R8_UNORM;
-    if (FAILED(dev->CreateTexture2D(&khst_td, nullptr, &g_res.ssao_ao_tex)) ||
-        FAILED(dev->CreateRenderTargetView(g_res.ssao_ao_tex, nullptr, &g_res.ssao_ao_rtv)) ||
-        FAILED(dev->CreateShaderResourceView(g_res.ssao_ao_tex, nullptr, &g_res.ssao_ao_srv))) {
+    if (SUCCEEDED(khst_hr)) khst_hr = khst_make(&g_res.ssao_ao_tex, &g_res.ssao_ao_rtv, &g_res.ssao_ao_srv);
+    if (SUCCEEDED(khst_hr)) khst_hr = khst_make(&g_res.ssao_ao2_tex, &g_res.ssao_ao2_rtv, &g_res.ssao_ao2_srv);
+    if (FAILED(khst_hr)) {
         kh_ssao_targets_release();
-        return false;
-    }
-    if (FAILED(dev->CreateTexture2D(&khst_td, nullptr, &g_res.ssao_ao2_tex)) ||
-        FAILED(dev->CreateRenderTargetView(g_res.ssao_ao2_tex, nullptr, &g_res.ssao_ao2_rtv)) ||
-        FAILED(dev->CreateShaderResourceView(g_res.ssao_ao2_tex, nullptr, &g_res.ssao_ao2_srv))) {
-        kh_ssao_targets_release();
-        return false;
+        return "create targets " + hr_str(khst_hr);
     }
     g_res.ssao_w = khst_w;
     g_res.ssao_h = khst_h;
     g_res.ssao_hw = khst_hw;
     g_res.ssao_hh = khst_hh;
-    return true;
+    return "";
 }
 // The rectangle's half-grid viewport: edges rounded outward (the shader's KhSaInRectHalf takes the same edges), so a
 // non-empty rectangle gives at least one texel each way.
@@ -266,7 +265,7 @@ inline void kh_ssao_pre(ID3D11Device* dev, ID3D11DeviceContext* ctx, KhSsaoPass&
     if (!kh_ensure_ok("ssao depth", ensure_depth_srv(dev, ctx, &khsp_dw, &khsp_dh))) return;
     if (!g_res.depth_srv || !g_res.depth_sten_srv || khsp_dw < 2 || khsp_dh < 2) return;   // No stencil plane: no mark, no term.
     if (!kh_ensure_ok("ssao shader", ensure_ssao_shaders(dev))) return;
-    if (!ensure_ssao_targets(dev, khsp_dw, khsp_dh)) return;
+    if (!kh_ensure_ok("ssao targets", ensure_ssao_targets(dev, khsp_dw, khsp_dh))) return;
     if (!g_res.vs_fullscreen || !g_res.dss_off || !g_res.dss_mark_clear || !g_res.dss_test_write_mark ||
         !g_res.rasterizer || !g_res.dls_world_blend) return;
     khsp.w = khsp_dw;
@@ -419,14 +418,14 @@ inline void kh_ssao_post(ID3D11DeviceContext* ctx, const KhSsaoPass& khsp) {
                       SUCCEEDED(khnm_dev->CreateShaderResourceView(g_res.nzm_tex, nullptr, &g_res.nzm_srv));
             if (khnm_ok) { g_res.nzm_w = khsp.w; g_res.nzm_h = khsp.h; }
             else { KH_SAFE_RELEASE(g_res.nzm_srv); KH_SAFE_RELEASE(g_res.nzm_rtv); KH_SAFE_RELEASE(g_res.nzm_tex); }
-            g_nzm_cycle = ~0ull;   // A new target holds nothing yet.
+            g_nzm_cycle.store(~0ull, std::memory_order_relaxed);   // A new target holds nothing yet.
         }
         if (khnm_dev) khnm_dev->Release();
         if (khnm_ok && khsp_upload(1.0f)) {
-            if (g_nzm_cycle != g_topo_cycles) {
+            if (g_nzm_cycle.load(std::memory_order_relaxed) != g_topo_cycles) {
                 const FLOAT khnm_z[4] = { 0.0f, 0.0f, 0.0f, 0.0f };
                 ctx->ClearRenderTargetView(g_res.nzm_rtv, khnm_z);
-                g_nzm_cycle = g_topo_cycles;
+                g_nzm_cycle.store(g_topo_cycles, std::memory_order_relaxed);
             }
             ctx->OMSetRenderTargets(1, &g_res.nzm_rtv, nullptr);   // The DSV off: its planes are read.
             ctx->RSSetViewports(1, &khsp_vp);

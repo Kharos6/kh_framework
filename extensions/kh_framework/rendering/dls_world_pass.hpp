@@ -271,9 +271,9 @@ inline bool kh_dlsw_mask_render(ID3D11DeviceContext* khm_ctx,
 // publishes the template, but it can bail after the dynamic-light select (the near-gap partition, an anomalous cycle);
 // the flush then carries the cycle and publishes the template - after the world pass, which runs ahead of it at the
 // same resolve. This is the flush's fog-lane fill (kh_fx_frame_template) verbatim, on the same live sources at the same
-// instant, so the lanes are the ones the flush's meshes fog with this cycle. Deliberate differences: fogBelow.z is not
-// written (the cast fire's lane; the template copy never writes it) and g_fog_uw_col is not touched (its writers are
-// the two mesh fills). TWIN: the injection's and the flush's fog fills - an edit there is an edit here.
+// instant, so the lanes are the ones the flush's meshes fog with this cycle. Deliberate difference: fogBelow.z is not
+// written (the cast fire's lane; the template copy never writes it). TWIN: the injection's and the flush's fog fills -
+// an edit there is an edit here.
 inline void kh_dlsw_fog_lanes(ConstantData& khdf_cbf, const float* cam) {
     const float khdf_cam_y =
         (g_ls.cam[0] * g_ls.cam[0] + g_ls.cam[1] * g_ls.cam[1] +

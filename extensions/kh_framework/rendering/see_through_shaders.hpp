@@ -4,8 +4,6 @@
 // state, the DXBC patching, capture and creation. Never include it on its own.
 namespace RenderIntegration {
 
-typedef HRESULT (WINAPI* FnD3DDisassemble)(const void*, SIZE_T, UINT, const char*, void**);
-
 // KH_WSEE - the see-through record: the effect chain and our sorted translucents see through the world's blended draws
 // (fences, foliage, glass, particles) to the surface behind. Built in (KH_WSEE_ON; rendering/see_through_state.hpp's
 // KH_WSEE_BUILD 0 builds it out: no capture, no hook work beyond early-out tests); no script switch, every part of it
@@ -1629,9 +1627,10 @@ inline void kh_psv_capture(const void* khpc_bc, SIZE_T khpc_n, ID3D11ClassLinkag
             }
         }
         if (khpc_full) {   // KH_PSV_TOMB: the creating thread, outside g_psv_mx (any thread; deduped).
-            report_error_once_safe("KH world see-through: the particle shader store is full (64 MB of live pixel "
-                                   "shaders); particle shaders created while it stays full keep the earlier "
-                                   "see-through passes");
+            // KH_EA_ERR_CLASS: a cap by design, not a fault - a warning (logged, never thrown).
+            kh_log_once_safe("KH RenderIntegration: world see-through: the particle shader store is full (64 MB of "
+                             "live pixel shaders); particle shaders created while it stays full keep the earlier "
+                             "see-through passes");
         }
     } catch (...) {
         // An allocation refused: the shader is not held (its draws keep today's passes).
@@ -1745,8 +1744,9 @@ inline void kh_psv_hook_ensure() {
             for (int khph_i = 0; khph_i < khph_ok; ++khph_i) MH_DisableHook(khph_at[khph_i]);
             g_psv_cap_on.store(false, std::memory_order_relaxed);
             g_psv_hook_state.store(-1, std::memory_order_relaxed);
-            report_error_once_safe("KH world see-through: the pixel-shader creation hook could not be installed "
-                                   "(particles keep the engine's own shaders in the see-through record)");
+            report_error_once_safe("KH RenderIntegration: world see-through: the pixel-shader creation hook could "
+                                   "not be installed (particles keep the engine's own shaders in the see-through "
+                                   "record)");
             return;
         }
         g_psv_hook_state.store(1, std::memory_order_relaxed);
@@ -1912,11 +1912,14 @@ inline void kh_psb_make_one(ID3D11Device* dev, KhPsvEnt& khmo_e, const std::vect
         khmo_e.one_tz = khmo_tz;   // KH_PSB_ZB.
         return;
     }
-    // KH_PSV_REFUSE_REPORT: the refusal is named once (the code is KH_PSV_R_* / KH_PSB_R_*'s value, above); the
-    // string is built at the make alone, never per frame.
-    report_error_once_safe("KH see-through: an engine pixel shader (" + std::to_string(khmo_b.size()) +
-                           " bytes) has no one-pass variant (refusal " + std::to_string(khmo_ro) +
-                           "); its re-draws take the alpha and coverage passes");
+    // KH_PSV_REFUSE_REPORT: the refusal is named once per code (the code is KH_PSV_R_* / KH_PSB_R_*'s value, above);
+    // the string is built at the make alone, never per frame. KH_EA_ERR_CLASS: the patcher's refusal of an engine
+    // shader is expected (a warning, logged); the device's (KH_PSV_R_DEVICE) is an error.
+    const std::string khmo_msg = "KH RenderIntegration: world see-through: an engine pixel shader has no one-pass "
+                                 "variant (refusal " + std::to_string(khmo_ro) +
+                                 "); its re-draws take the alpha and coverage passes";
+    if (khmo_ro == KH_PSV_R_DEVICE) report_error_once_safe(khmo_msg);
+    else kh_log_once_safe(khmo_msg);
 }
 inline void kh_psv_make(ID3D11Device* dev, KhPsvEnt& khpm_e, const std::vector<uint8_t>& khpm_b) {
     std::vector<uint8_t> khpm_v;
@@ -1942,11 +1945,16 @@ inline void kh_psv_make(ID3D11Device* dev, KhPsvEnt& khpm_e, const std::vector<u
     KH_SAFE_RELEASE(khpm_e.nw);
     khpm_e.nw_none = false;
     khpm_e.st = KH_PSV_ST_REFUSED;
-    // KH_PSV_REFUSE_REPORT: likewise, once per distinct message (the bytes and the code).
-    report_error_once_safe(std::string(khpm_e.own ? "KH see-through: a tail pixel shader of ours, "
-                                                  : "KH see-through: an engine pixel shader, ") +
-                           std::to_string(khpm_b.size()) + " bytes, is not reduced (refusal " +
-                           std::to_string(khpm_r) + "); its re-issues keep the whole shader");
+    // KH_PSV_REFUSE_REPORT: likewise, once per distinct message (an engine shader's: the code; ours: the bytes and
+    // the code). KH_EA_ERR_CLASS: an engine shader the patcher refuses is a warning (logged); a device refusal
+    // (KH_PSV_R_DEVICE) or a refused shader of ours (our builtins must reduce) is an error.
+    const std::string khpm_msg = std::string("KH RenderIntegration: world see-through: ") +
+                                 (khpm_e.own ? "a tail pixel shader of ours, " + std::to_string(khpm_b.size()) +
+                                                   " bytes, is not reduced"
+                                             : std::string("an engine pixel shader is not reduced")) +
+                                 " (refusal " + std::to_string(khpm_r) + "); its re-issues keep the whole shader";
+    if (khpm_e.own || khpm_r == KH_PSV_R_DEVICE) report_error_once_safe(khpm_msg);
+    else kh_log_once_safe(khpm_msg);
 }
 
 // The main depth's clear (render thread, after kh_wsee_cycle_note): the queued variants (KH_PSV_TOMB: no device

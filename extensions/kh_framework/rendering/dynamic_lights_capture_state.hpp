@@ -131,12 +131,6 @@ static uint64_t g_dl_harvest_cycle = ~0ull;
 // post-trigger draws, so that one injected harvest also keeps the lights the flush's span saw. Render thread.
 static bool g_dl_harvest_flush_last = false;
 
-// Slot-11 window census (render thread): the first eight distinct (buffer, first constant) pairs the sampler saw this
-// session. Nothing reads it (a diagnostic's residue); the session reset clears it.
-static void*    g_dl_cd_bufs[8] = {};
-static uint32_t g_dl_cd_first[8] = {};
-static uint32_t g_dl_cd_n = 0;
-
 // KH_DL_CHASH - the twin check's content hash (dynlights_sample_draw_cpu): XXH64 (seed 0) of ctl || records, read 8
 // bytes at a time in four independent lanes. ctl is exactly two of XXH64's 32-byte stripes, so streaming it and then
 // the records is XXH64 of the two laid end to end. Only ever compared for equality within one span. Not a

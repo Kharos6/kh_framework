@@ -47,7 +47,7 @@ inline void kh_infront_seam_inject(ID3D11DeviceContext* ctx, const D3D11_VIEWPOR
     } else {
         RVExtBridge::ProjectionViewTransform khvs_pv = {};
         if (!kh_svs_take_pv(ctx, khvs_pv)) { g_ro.in_injection = khvs_pinj; return; }
-        if (!kh_view_camera_exact(khvs_pv.view, khvs_cam)) extract_camera_pos(khvs_pv.view, khvs_cam);
+        kh_cam_of(khvs_pv.view, khvs_cam);
         const bool khvs_engcam = kh_engcam_consume(khvs_pv.view, khvs_cam);
         ConstantData khvs_tmp = {};
         mul_4x4(khvs_pv.view, khvs_pv.projection, khvs_tmp.view_proj);

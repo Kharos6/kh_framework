@@ -5,10 +5,10 @@
 namespace RenderIntegration {
 
 
-// State hooks (OMSetBlendState / OMSetDepthStencilState / OMSetRenderTargets) maintain five booleans (g_ro's
-// blend_translucent, dss_nowrite, dss_write, dss_stencil, dsv_main); a state object is classified by GetDesc on a
-// cache miss and the verdict cached by object, AddRef'd while cached so a recycled address cannot inherit it
-// (KH_HOOK_DESC_CACHE).
+// State hooks (OMSetBlendState / OMSetDepthStencilState / OMSetRenderTargets[AndUnorderedAccessViews]) maintain five
+// booleans (g_ro's blend_translucent, dss_nowrite, dss_write, dss_stencil, dsv_main); a state object is classified by
+// GetDesc on a cache miss and the verdict cached by object, AddRef'd while cached so a recycled address cannot
+// inherit it (KH_HOOK_DESC_CACHE).
 
 static std::atomic<bool>     g_reorder_hook_active{false};
 static bool                  g_reorder_hook_failed = false;
@@ -118,12 +118,13 @@ inline bool reorder_on_render_thread() {
 // lands here, on whichever thread ran the hook: the event is reported once and, on the render thread, the injection
 // latch is dropped so the next draw is tracked again. The frame it hit draws without us.
 // KH_HOOK_EXCEPT_RT - the latch is dropped on the render thread only. The hooks also run on the game thread (its UI
-// draws, Present, the parked flush's own draws), where no path of ours raises the flag outside a park: a plain write
-// from there raced the render thread's injection in flight and handed the rest of its draws to the hooks as engine
-// draws. Under a park the raise is the parked flush's own, restored by KhInjectionFlagScope when the flush unwinds. At
-// FSAA 1x the game thread is the render thread (reorder_on_render_thread), so an exception a hook catches during the
-// parked flush's own draws drops the flag there while that flush still runs: its later draws reach the hooks as the
-// engine's.
+// draws, Present, the parked flush's own draws), where no path of ours raises the flag outside a park but the in-front
+// slice's deferred tail (kh_infront_tail_take at the game thread's resolve: kh_infront_inject and KH_VM_SEE's
+// brackets, each under a KhInjectionFlagScope, inside the engine's own call): a plain write from there raced the
+// render thread's injection in flight and handed the rest of its draws to the hooks as engine draws. Under a park the
+// raise is the parked flush's own, restored by KhInjectionFlagScope when the flush unwinds. At FSAA 1x the game
+// thread is the render thread (reorder_on_render_thread), so an exception a hook catches during the parked flush's own
+// draws drops the flag there while that flush still runs: its later draws reach the hooks as the engine's.
 static std::atomic<uint64_t> g_hook_exceptions{0};   // Session count; getRenderStats' hookExceptions.
 // Called inside a hook's catch handler. KH_HOOK_EXCEPT_TEXT: the exception's own text, and a count -
 // reported at the first, the hundredth and the ten-thousandth, since a throw that recurs every frame
@@ -139,7 +140,7 @@ static inline void kh_hook_except() {
         } catch (const std::exception& khhe_e) {
             khhe_what = khhe_e.what();
         } catch (...) {}
-        report_error_once_safe("KH RenderIntegration: exception inside a context hook (" +
+        report_error_once_safe("KH RenderIntegration: context hooks: exception inside a context hook (" +
                                std::to_string(khhe_n) +
                                (khhe_n == 1u ? " so far; that frame drew without the injection): "
                                              : " so far; the injection keeps being dropped): ") +

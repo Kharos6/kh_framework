@@ -5747,7 +5747,8 @@ static void update_unit_states() {
 //
 // 1. Every in-array argument fault is REPORTED through report_error (the convention of every sqf_integration command
 //    family) and the command then returns its failure value: "" from a creator, false from an updater. A
-//    plain-sentence return is invisible unless the caller reads it; report_error is not.
+//    plain-sentence return is invisible unless the caller reads it; report_error is not. One exception: an object to
+//    follow that is null or cannot be read fails the call unreported (KH_NULL_SILENT, rendering/attachments.hpp).
 // 2. Creators take EXACTLY their documented shape (an extra element is an error, not ignored), so a script written
 //    against an older shape fails loudly on its first call instead of silently rendering the wrong thing.
 // 3. addRender3D is [pos, rotation, mesh] and nothing else; every other mesh property has an updateRender3D twin and
@@ -5845,12 +5846,11 @@ static bool kh_ui_phase_from_gv(const game_value& gv, bool& affect_ui, bool& ui_
     if (gv.type_enum() != game_data_type::STRING) return false;
     std::string khup_s = static_cast<std::string>(gv);
     if (khup_s.empty()) return true;   // Positional placeholder: skip.
-    std::transform(khup_s.begin(), khup_s.end(), khup_s.begin(),
-                   [](unsigned char c) { return static_cast<char>(std::toupper(c)); });
+    khup_s = kh_lower_copy(std::move(khup_s));   // ASCII, as every other name parser here.
 
-    if (khup_s == "SCENE") { affect_ui = false; ui_only = false; return true; }
-    if (khup_s == "BOTH")  { affect_ui = true;  ui_only = false; return true; }
-    if (khup_s == "UI")    { affect_ui = true;  ui_only = true;  return true; }
+    if (khup_s == "scene") { affect_ui = false; ui_only = false; return true; }
+    if (khup_s == "both")  { affect_ui = true;  ui_only = false; return true; }
+    if (khup_s == "ui")    { affect_ui = true;  ui_only = true;  return true; }
     return false;
 }
 
@@ -5886,6 +5886,10 @@ static bool kh_rv_color(const game_value& v, RenderIntegration::RenderObject& ob
     if (col.size() > 4) { err = "color must be [r, g, b, a] numbers"; return false; }
     for (size_t i = 0; i < col.size(); ++i) {
         if (col[i].type_enum() != game_data_type::SCALAR) { err = "color must be [r, g, b, a] numbers"; return false; }
+        // KH_EA_COLOR_NAN: a NaN is refused as every other parser refuses one (it was read as 1); an infinity is
+        // clamped by kh_sanitize_color (the RANGE RULE).
+        const float khrc_c = static_cast<float>(col[i]);
+        if (khrc_c != khrc_c) { err = "color must be [r, g, b, a] numbers, not NaN"; return false; }
     }
     for (size_t i = 0; i < 4 && i < col.size(); ++i) obj.color[i] = static_cast<float>(col[i]);
     RenderIntegration::kh_sanitize_color(obj.color);
@@ -5977,6 +5981,7 @@ static bool kh_rv_effect(const game_value& v, RenderIntegration::RenderObject& o
     return true;
 }
 
+// out is written only on success (kh_gv_bool), so a property's own field can be passed straight in.
 static bool kh_rv_bool(const game_value& v, bool& out, const char* what, std::string& err) {
     if (!kh_gv_bool(v, out)) { err = std::string(what) + " must be a boolean (true / false, or 1 / 0)"; return false; }   // KH_BOOL_SCALAR.
     return true;
@@ -6140,7 +6145,8 @@ static game_value kh_add_render3d(game_value_parameter args, const char* khar_cm
             obj.pos[0] = khr_ap[0]; obj.pos[1] = khr_ap[1]; obj.pos[2] = khr_ap[2];
             khr_apos = arr[0];
         } else if (!kh_rv_pos(arr[0], obj.pos, err)) {
-            kh_rv_report(khar_cmd, "position must be [x, y, zASL] or an object to follow");
+            kh_rv_report(khar_cmd, "position must be [x, y, zASL], [object, memoryPoint], [object, true/false], or an "
+                                   "object to follow");   // The words updateRender3D "position" uses.
             return game_value("");
         }
 
@@ -6341,7 +6347,7 @@ static bool kh_rv_fx_textures(const game_value& v, RenderIntegration::RenderObje
 static int kh_apply_shared_prop(RenderIntegration::RenderObject& obj,
                                 const std::string& prop, const game_value& val, std::string& err) {
     if (prop == "color")   return kh_rv_color(val, obj, err) ? 1 : 0;
-    if (prop == "visible") { bool b = obj.visible; if (!kh_rv_bool(val, b, "visible", err)) return 0; obj.visible = b; return 1; }
+    if (prop == "visible") return kh_rv_bool(val, obj.visible, "visible", err) ? 1 : 0;
     if (prop == "params" || prop == "fxparams") return kh_rv_params(val, obj, err) ? 1 : 0;
     if (prop == "blend")   return kh_rv_blend(val, obj, err) ? 1 : 0;
     if (prop == "band")    return kh_rv_band(val, obj, err) ? 1 : 0;
@@ -6407,20 +6413,28 @@ static bool kh_rv_cloth_pairs(const game_value& val, const char* khcp_what,
     return true;
 }
 
-// One numeric parameter, clamped to the range the solver is stable over. The clamp is silent on purpose: a script
-// asking for 400 iterations wants 'a lot', and failing the whole update over it helps nobody.
-static bool kh_rv_cloth_num(const game_value& val, const char* khcn_key, float khcn_lo,
-                            float khcn_hi, float& khcn_dst, std::string& err) {
+// One numeric parameter of a [key, value] property (khcn_what: clothSimulation's "cloth", chainSimulation's "chain",
+// "physicsCollider", "simulationLod"), clamped to the range the solver is stable over. The clamp is silent on
+// purpose: a script asking for 400 iterations wants 'a lot', and failing the whole update over it helps nobody.
+static bool kh_rv_key_num(const game_value& val, const char* khcn_what, const char* khcn_key, float khcn_lo,
+                          float khcn_hi, float& khcn_dst, std::string& err) {
     if (val.type_enum() != game_data_type::SCALAR) {
-        err = std::string("cloth parameter '") + khcn_key + "' must be a number";
+        err = std::string(khcn_what) + " parameter '" + khcn_key + "' must be a number";
         return false;
     }
     float khcn_v = static_cast<float>(val);
-    if (!(khcn_v == khcn_v)) { err = std::string("cloth parameter '") + khcn_key + "' is not a number"; return false; }
+    if (!(khcn_v == khcn_v)) {
+        err = std::string(khcn_what) + " parameter '" + khcn_key + "' is not a number";
+        return false;
+    }
     if (khcn_v < khcn_lo) khcn_v = khcn_lo;
     if (khcn_v > khcn_hi) khcn_v = khcn_hi;
     khcn_dst = khcn_v;
     return true;
+}
+static bool kh_rv_cloth_num(const game_value& val, const char* khcn_key, float khcn_lo,
+                            float khcn_hi, float& khcn_dst, std::string& err) {
+    return kh_rv_key_num(val, "cloth", khcn_key, khcn_lo, khcn_hi, khcn_dst, err);
 }
 
 // KH_SIM_LOD - "simulationLod": the cloth / chain solver's level of detail (RenderObject::sim_lod; the kernel is
@@ -6438,12 +6452,18 @@ static bool kh_rv_sim_lod(const game_value& val, RenderIntegration::RenderObject
     for (const auto& khsl_kv : khsl_p) {
         const std::string& k = khsl_kv.first;
         const game_value& v = khsl_kv.second;
-        if      (k == "floor")           { if (!kh_rv_cloth_num(v, "floor", 0.05f, 1.0f, khsl_v[0], err)) return false; }
-        else if (k == "fulldistance")    { if (!kh_rv_cloth_num(v, "fullDistance", 0.0f, 1.0e5f, khsl_v[1], err)) return false; }
-        else if (k == "mindistance")     { if (!kh_rv_cloth_num(v, "minDistance", 0.0f, 1.0e5f, khsl_v[2], err)) return false; }
-        else if (k == "fullscreenshare") { if (!kh_rv_cloth_num(v, "fullScreenShare", 0.0f, 1.0f, khsl_v[3], err)) return false; }
-        else if (k == "minscreenshare")  { if (!kh_rv_cloth_num(v, "minScreenShare", 0.0f, 1.0f, khsl_v[4], err)) return false; }
-        else {
+        // The key's slot in khsl_v, its shown name and its range.
+        int khsl_i = -1;
+        const char* khsl_n = nullptr;
+        float khsl_lo = 0.0f, khsl_hi = 1.0f;
+        if      (k == "floor")           { khsl_i = 0; khsl_n = "floor"; khsl_lo = 0.05f; }
+        else if (k == "fulldistance")    { khsl_i = 1; khsl_n = "fullDistance"; khsl_hi = 1.0e5f; }
+        else if (k == "mindistance")     { khsl_i = 2; khsl_n = "minDistance"; khsl_hi = 1.0e5f; }
+        else if (k == "fullscreenshare") { khsl_i = 3; khsl_n = "fullScreenShare"; }
+        else if (k == "minscreenshare")  { khsl_i = 4; khsl_n = "minScreenShare"; }
+        if (khsl_i >= 0) {
+            if (!kh_rv_key_num(v, "simulationLod", khsl_n, khsl_lo, khsl_hi, khsl_v[khsl_i], err)) return false;
+        } else {
             err = "unknown simulationLod key '" + k + "' (floor | fullDistance | minDistance | fullScreenShare | minScreenShare)";
             return false;
         }
@@ -6525,14 +6545,18 @@ static bool kh_rv_physics_collider(const game_value& val, RenderIntegration::Ren
     for (size_t khcc_i = 0; khcc_i < khcc_p.size(); ++khcc_i) {
         const std::string& k = khcc_p[khcc_i].first;
         const game_value& v = khcc_p[khcc_i].second;
-        if      (k == "margin")   { if (!kh_rv_cloth_num(v, "margin", 0.0f, 10.0f, khcc_margin, err)) return false; }
-        else if (k == "friction") { if (!kh_rv_cloth_num(v, "friction", 0.0f, 1.0f, khcc_friction, err)) return false; }
-        else if (k == "inside")   { if (!kh_rv_bool(v, khcc_inside, "inside", err)) return false; }
-        else if (k == "convex")   { if (!kh_rv_bool(v, khcc_convex, "convex", err)) return false; }   // KH_COL_CONVEX.
+        const char* const khcc_w = "physicsCollider";
+        bool khcc_ok = true;
+        if      (k == "margin")   khcc_ok = kh_rv_key_num(v, khcc_w, "margin", 0.0f, 10.0f, khcc_margin, err);
+        else if (k == "friction") khcc_ok = kh_rv_key_num(v, khcc_w, "friction", 0.0f, 1.0f, khcc_friction, err);
+        else if (k == "inside")   khcc_ok = kh_rv_bool(v, khcc_inside, "physicsCollider parameter 'inside'", err);
+        // KH_COL_CONVEX.
+        else if (k == "convex")   khcc_ok = kh_rv_bool(v, khcc_convex, "physicsCollider parameter 'convex'", err);
         else {
             err = "unknown physics collider parameter '" + k + "' (margin | friction | inside | convex)";
             return false;
         }
+        if (!khcc_ok) return false;
     }
     obj.physics_col_margin = khcc_margin;
     obj.physics_col_friction = khcc_friction;
@@ -6550,16 +6574,7 @@ static bool kh_rv_physics_collider(const game_value& val, RenderIntegration::Ren
 // owner.
 static bool kh_rv_chain_num(const game_value& val, const char* khcn_key, float khcn_lo, float khcn_hi,
                             float& khcn_dst, std::string& err) {
-    if (val.type_enum() != game_data_type::SCALAR) {
-        err = std::string("chain parameter '") + khcn_key + "' must be a number";
-        return false;
-    }
-    float khcn_v = static_cast<float>(val);
-    if (!(khcn_v == khcn_v)) { err = std::string("chain parameter '") + khcn_key + "' is not a number"; return false; }
-    if (khcn_v < khcn_lo) khcn_v = khcn_lo;
-    if (khcn_v > khcn_hi) khcn_v = khcn_hi;
-    khcn_dst = khcn_v;
-    return true;
+    return kh_rv_key_num(val, "chain", khcn_key, khcn_lo, khcn_hi, khcn_dst, err);
 }
 
 static bool kh_rv_chain_bone(const game_value& val, const char* khcb_key, std::string& khcb_dst, std::string& err) {
@@ -7013,7 +7028,7 @@ static bool kh_apply_render3d_prop(RenderIntegration::RenderObject& obj, const s
     }
     if (prop == "effect")   return kh_rv_effect(val, obj, false, err);
     if (prop == "lit" || prop == "lighting") return kh_rv_lit(val, obj, err);
-    if (prop == "twosided") { bool b = obj.two_sided; if (!kh_rv_bool(val, b, "twoSided", err)) return false; obj.two_sided = b; return true; }
+    if (prop == "twosided") return kh_rv_bool(val, obj.two_sided, "twoSided", err);
     if (prop == "lodlock") {
         bool b = obj.lod_lock;
         if (!kh_rv_bool(val, b, "lodLock", err)) return false;
@@ -7027,38 +7042,15 @@ static bool kh_apply_render3d_prop(RenderIntegration::RenderObject& obj, const s
         obj.lod_lock = b;
         return true;
     }
-    if (prop == "infront")  { bool b = obj.in_front;  if (!kh_rv_bool(val, b, "inFront", err))  return false; obj.in_front = b;  return true; }   // KH_INFRONT.
-    if (prop == "showinfront") {   // KH_SHOW_INFRONT: a mesh's alone, as inFront.
-        bool b = obj.show_in_front;
-        if (!kh_rv_bool(val, b, "showInFront", err)) return false;
-        obj.show_in_front = b;
-        return true;
-    }
+    if (prop == "infront") return kh_rv_bool(val, obj.in_front, "inFront", err);   // KH_INFRONT.
+    // KH_SHOW_INFRONT: a mesh's alone, as inFront.
+    if (prop == "showinfront") return kh_rv_bool(val, obj.show_in_front, "showInFront", err);
     // A mesh's alone: updatePostFX refuses it (a pass casts nothing; every caster test excludes passes).
-    if (prop == "casteronly") {
-        bool b = obj.caster_only;
-        if (!kh_rv_bool(val, b, "casterOnly", err)) return false;
-        obj.caster_only = b;
-        return true;
-    }
-    if (prop == "castshadow") {   // KH_SHADOW_SWITCH.
-        bool b = obj.cast_shadow;
-        if (!kh_rv_bool(val, b, "castShadow", err)) return false;
-        obj.cast_shadow = b;
-        return true;
-    }
-    if (prop == "receiveshadow") {   // KH_SHADOW_SWITCH.
-        bool b = obj.receive_shadow;
-        if (!kh_rv_bool(val, b, "receiveShadow", err)) return false;
-        obj.receive_shadow = b;
-        return true;
-    }
-    if (prop == "occluder") {   // KH_OCC_FORCE.
-        bool b = obj.occluder;
-        if (!kh_rv_bool(val, b, "occluder", err)) return false;
-        obj.occluder = b;
-        return true;
-    }
+    if (prop == "casteronly") return kh_rv_bool(val, obj.caster_only, "casterOnly", err);
+    // KH_SHADOW_SWITCH.
+    if (prop == "castshadow") return kh_rv_bool(val, obj.cast_shadow, "castShadow", err);
+    if (prop == "receiveshadow") return kh_rv_bool(val, obj.receive_shadow, "receiveShadow", err);
+    if (prop == "occluder") return kh_rv_bool(val, obj.occluder, "occluder", err);   // KH_OCC_FORCE.
     if (prop == "clothsimulation") return kh_rv_cloth_sim(val, obj, err);
     if (prop == "physicscollider")   return kh_rv_physics_collider(val, obj, err);
     if (prop == "chainsimulation") return kh_rv_chain_sim(val, obj, handle, err);
@@ -7087,7 +7079,7 @@ static bool kh_apply_postfx_prop(RenderIntegration::RenderObject& obj,
         }
         return true;   // KH_UI_REHOIST_LAST: kh_update_one hoists the UI driver once the write-back succeeded.
     }
-    if (prop == "uispill") { bool b = obj.ui_spill; if (!kh_rv_bool(val, b, "uiSpill", err)) return false; obj.ui_spill = b; return true; }
+    if (prop == "uispill") return kh_rv_bool(val, obj.ui_spill, "uiSpill", err);
     if (prop == "radius") {
         if (!RenderIntegration::read_vec3_or_uniform(val, obj.local_radius)) { err = "radius must be a number or [x, y, z] metres"; return false; }
         if (!kh_rv_finite3(obj.local_radius)) {   // KH_RV_FINITE.
@@ -7132,16 +7124,17 @@ static bool kh_apply_postfx_prop(RenderIntegration::RenderObject& obj,
         obj.local_shape = sh;
         return true;
     }
-    if (prop == "inverse") { bool b = obj.local_inverse; if (!kh_rv_bool(val, b, "inverse", err)) return false; obj.local_inverse = b; return true; }
+    if (prop == "inverse") return kh_rv_bool(val, obj.local_inverse, "inverse", err);
 
     err = "unknown property (position | effect | params | ui | uiSpill | radius | falloff | localSphere | shape | inverse | textures | color | visible | blend | band | duration)";
     return false;
 }
 
-// One [handle, property, value]: copied under the draw-list lock, parsed outside it, written back under it.
-static bool kh_update_one(const char* cmd, bool want_fullscreen,
-                          const game_value& triple, int index) {
-    const std::string where = index < 0 ? std::string() : (" [" + std::to_string(index) + "]");
+// The [handle, property, value] shape every update triple shares (updateRender3D, updatePostFX,
+// updatePhysicsAffector). where: " [index]" in the batch form, else empty. False after reporting a malformed triple;
+// otherwise the handle, and the property lower-cased.
+static bool kh_rv_triple(const char* cmd, const game_value& triple, const std::string& where,
+                         std::string& handle, std::string& prop) {
     if (triple.type_enum() != game_data_type::ARRAY) {
         kh_rv_report(cmd, "element" + where + " must be [handle, property, value]");
         return false;
@@ -7153,17 +7146,42 @@ static bool kh_update_one(const char* cmd, bool want_fullscreen,
     }
     if (t[0].type_enum() != game_data_type::STRING) { kh_rv_report(cmd, "handle" + where + " must be a string"); return false; }
     if (t[1].type_enum() != game_data_type::STRING) { kh_rv_report(cmd, "property" + where + " must be a string"); return false; }
-    const std::string handle = static_cast<std::string>(t[0]);
-    std::string prop = static_cast<std::string>(t[1]);
-    prop = kh_lower_copy(std::move(prop));
+    handle = static_cast<std::string>(t[0]);
+    prop = kh_lower_copy(static_cast<std::string>(t[1]));
+    return true;
+}
+
+// Contract 4: [handle, property, value], or an array of them - every triple applied that can be (each fault reported
+// on its own, with its index), true only if all applied. one(triple, index) applies one (index -1: the single form).
+template <class F>
+static game_value kh_rv_batch(const char* cmd, const game_value& args, F&& one) {
+    auto& arr = args.to_array();
+    if (arr.size() == 0) {
+        kh_rv_report(cmd, "expects [handle, property, value] or an array of them");
+        return game_value(false);
+    }
+    if (arr[0].type_enum() != game_data_type::ARRAY) return game_value(one(args, -1));
+    bool all = true;
+    for (size_t i = 0; i < arr.size(); ++i) {
+        if (!one(arr[i], static_cast<int>(i))) all = false;
+    }
+    return game_value(all);
+}
+
+// One [handle, property, value]: copied under the draw-list lock, parsed outside it, written back under it.
+static bool kh_update_one(const char* cmd, bool want_fullscreen,
+                          const game_value& triple, int index) {
+    const std::string where = index < 0 ? std::string() : (" [" + std::to_string(index) + "]");
+    std::string handle, prop;
+    if (!kh_rv_triple(cmd, triple, where, handle, prop)) return false;
+    auto& t = triple.to_array();
 
     // Parse OUTSIDE the draw-list lock: the value parsers may touch the disk (a first-seen .fbx runs the whole import
-    // and parks the render thread to publish; .hlsl / .cube / material paths walk the mod folders), and the render
-    // thread takes g_draw_list_mutex at several sites, so parsing under it stalls the frame and can invert the park
-    // (game thread waiting on a render thread blocked on this mutex). Sound because the write-back merges: the fields
-    // other writers keep writing meanwhile (the attachment pose - kh_attach_step runs on the render thread too - and
-    // the skinned / chain box) are taken from the live entry unless this property changed them (update_render_object,
-    // KH_UPDATE_MERGE).
+    // - its publish is left to the render thread, KH_EA_FBX_NO_PARK; .hlsl / .cube / material paths walk the mod
+    // folders), and the render thread takes g_draw_list_mutex at several sites, so parsing under it would stall the
+    // frame. Sound because the write-back merges: the fields other writers keep writing meanwhile (the attachment
+    // pose - kh_attach_step runs on the render thread too - and the skinned / chain box) are taken from the live
+    // entry unless this property changed them (update_render_object, KH_UPDATE_MERGE).
     RenderIntegration::RenderObject staged;
     std::string khuo_miss;   // KH_REPORT_UNLOCKED: report_error is an SQF call, made after the lock is released.
     {
@@ -7206,22 +7224,10 @@ static bool kh_update_one(const char* cmd, bool want_fullscreen,
     return true;
 }
 
-// [handle, property, value] or [[handle, property, value],..]. The batch form
-// applies every triple it can and returns true only if all applied.
 static game_value kh_update_many(const char* cmd, bool want_fullscreen, const game_value& args) {
-    auto& arr = args.to_array();
-    if (arr.size() == 0) {
-        kh_rv_report(cmd, "expects [handle, property, value] or an array of them");
-        return game_value(false);
-    }
-    if (arr[0].type_enum() != game_data_type::ARRAY) {
-        return game_value(kh_update_one(cmd, want_fullscreen, args, -1));
-    }
-    bool all = true;
-    for (size_t i = 0; i < arr.size(); ++i) {
-        if (!kh_update_one(cmd, want_fullscreen, arr[i], static_cast<int>(i))) all = false;
-    }
-    return game_value(all);
+    return kh_rv_batch(cmd, args, [&](const game_value& khum_t, int khum_i) {
+        return kh_update_one(cmd, want_fullscreen, khum_t, khum_i);
+    });
 }
 
 static game_value update_render3d_sqf(game_value_parameter args) {
@@ -7383,14 +7389,15 @@ static bool kh_aff_finite(float khaf_v) { return khaf_v == khaf_v && fabsf(khaf_
 
 // nil, [] or 0 = permanent; seconds; or [fadeIn, hold, fadeOut] - the
 // renderer's duration shape (parse_duration_gv), negatives read as 0.
-static bool kh_aff_lifetime(const game_value* khal_v, RenderIntegration::KhAffector& khal_a, std::string& err) {
+static bool kh_aff_lifetime(const game_value& khal_v, RenderIntegration::KhAffector& khal_a, std::string& err) {
     float khal_t[3] = { 0.0f, 0.0f, 0.0f };   // fadeIn, hold, fadeOut.
-    const char* khal_msg = "lifetime must be seconds or [fadeIn, hold, fadeOut] (nil, [] or 0 = permanent)";
-    if (khal_v && !khal_v->is_nil()) {
-        if (khal_v->type_enum() == game_data_type::SCALAR) {
-            khal_t[1] = static_cast<float>(*khal_v);
-        } else if (khal_v->type_enum() == game_data_type::ARRAY) {
-            auto& khal_arr = khal_v->to_array();
+    const char* khal_msg = "lifetime must be seconds or [fadeIn, hold, fadeOut], each finite and under 1e30 in size "
+                           "(nil, [] or 0 = permanent)";
+    if (!khal_v.is_nil()) {
+        if (khal_v.type_enum() == game_data_type::SCALAR) {
+            khal_t[1] = static_cast<float>(khal_v);
+        } else if (khal_v.type_enum() == game_data_type::ARRAY) {
+            auto& khal_arr = khal_v.to_array();
             if (khal_arr.size() > 3) { err = khal_msg; return false; }
             for (size_t khal_i = 0; khal_i < khal_arr.size(); ++khal_i) {
                 if (khal_arr[khal_i].type_enum() != game_data_type::SCALAR) { err = khal_msg; return false; }
@@ -7440,18 +7447,18 @@ static bool kh_aff_dir(const game_value& khad_v, float* khad_out, std::string& e
 }
 
 // A radius, or [x, y, z] half-extents along right / forward / up (each > 0); nil or a number <= 0 = everywhere.
-static bool kh_aff_scale(const game_value* khas_v, float* khas_out, std::string& err) {
+static bool kh_aff_scale(const game_value& khas_v, float* khas_out, std::string& err) {
     const char* khas_msg = "scale must be a radius in metres, [x, y, z] half-extents in metres (each > 0), or nil / 0 for everywhere";
     khas_out[0] = khas_out[1] = khas_out[2] = 0.0f;
-    if (!khas_v || khas_v->is_nil()) return true;
-    if (khas_v->type_enum() == game_data_type::SCALAR) {
-        const float khas_r = static_cast<float>(*khas_v);
+    if (khas_v.is_nil()) return true;
+    if (khas_v.type_enum() == game_data_type::SCALAR) {
+        const float khas_r = static_cast<float>(khas_v);
         if (!kh_aff_finite(khas_r)) { err = khas_msg; return false; }
         if (khas_r > 0.0f) khas_out[0] = khas_out[1] = khas_out[2] = fminf(khas_r, KH_AFF_SCALE_MAX);
         return true;
     }
-    if (khas_v->type_enum() != game_data_type::ARRAY) { err = khas_msg; return false; }
-    auto& khas_a = khas_v->to_array();
+    if (khas_v.type_enum() != game_data_type::ARRAY) { err = khas_msg; return false; }
+    auto& khas_a = khas_v.to_array();
     if (khas_a.size() != 3) { err = khas_msg; return false; }
     for (size_t k = 0; k < 3; ++k) {
         if (khas_a[k].type_enum() != game_data_type::SCALAR) { err = khas_msg; return false; }
@@ -7463,13 +7470,16 @@ static bool kh_aff_scale(const game_value* khas_v, float* khas_out, std::string&
 }
 
 // One of the type's own numbers into its lane; nil = its default.
-static bool kh_aff_param(const game_value* khap_v, const KhAffSchema& khap_s, int khap_i,
+static bool kh_aff_param(const game_value& khap_v, const KhAffSchema& khap_s, int khap_i,
                          RenderIntegration::KhAffector& khap_a, std::string& err) {
     const KhAffParam& khap_p = khap_s.prm[khap_i];
     float khap_x = khap_p.def;
-    if (khap_v && !khap_v->is_nil()) {
-        if (khap_v->type_enum() != game_data_type::SCALAR) { err = std::string(khap_p.shown) + " must be a number"; return false; }
-        khap_x = static_cast<float>(*khap_v);
+    if (!khap_v.is_nil()) {
+        if (khap_v.type_enum() != game_data_type::SCALAR) {
+            err = std::string(khap_p.shown) + " must be a number";
+            return false;
+        }
+        khap_x = static_cast<float>(khap_v);
         if (!(khap_x == khap_x)) { err = std::string(khap_p.shown) + " is not a number"; return false; }
         if (khap_x < khap_p.lo) khap_x = khap_p.lo;
         if (khap_x > khap_p.hi) khap_x = khap_p.hi;
@@ -7493,15 +7503,16 @@ static bool kh_aff_parse(const KhAffSchema& khap_s, const game_value& khap_v,
         return false;
     }
     if (khap_arr.size() < 2 || khap_arr[1].is_nil()) { err = "position is required: " + kh_aff_layout(khap_s); return false; }
-    auto khap_at = [&](size_t khap_i) -> const game_value* { return khap_i < khap_arr.size() ? &khap_arr[khap_i] : nullptr; };
+    // Every slot but position: nil or missing is the slot's default (kh_param's reading); any other value is checked.
+    auto khap_at = [&](size_t khap_i) { return kh_param(khap_arr, khap_i, game_value()); };
     khap_a.type = khap_s.type;
     size_t khap_k = 0;
     if (!kh_aff_lifetime(khap_at(khap_k++), khap_a, err)) return false;
     if (!kh_aff_position(khap_arr[khap_k++], khap_a.pos, err)) return false;
     for (int k = 0; k < 3; ++k) khap_a.dir[k] = khap_s.dir_def[k];
     if (khap_rot) {
-        const game_value* khap_d = khap_at(khap_k++);
-        if (khap_d && !khap_d->is_nil() && !kh_aff_dir(*khap_d, khap_a.dir, err)) return false;
+        const game_value khap_d = khap_at(khap_k++);
+        if (!khap_d.is_nil() && !kh_aff_dir(khap_d, khap_a.dir, err)) return false;
     }
     if (!kh_aff_scale(khap_at(khap_k++), khap_a.scale, err)) return false;
     for (int khap_i = 0; khap_i < 4; ++khap_i) khap_a.p[khap_i] = 0.0f;
@@ -7547,20 +7558,9 @@ static game_value add_physics_affector_sqf(game_value_parameter args) {
 static bool kh_aff_update_one(const game_value& triple, int index) {
     const char* cmd = "updatePhysicsAffector";
     const std::string where = index < 0 ? std::string() : (" [" + std::to_string(index) + "]");
-    if (triple.type_enum() != game_data_type::ARRAY) {
-        kh_rv_report(cmd, "element" + where + " must be [handle, property, value]");
-        return false;
-    }
+    std::string handle, prop;
+    if (!kh_rv_triple(cmd, triple, where, handle, prop)) return false;
     auto& t = triple.to_array();
-    if (t.size() != 3) {
-        kh_rv_report(cmd, "element" + where + " must be [handle, property, value] (" + std::to_string(t.size()) + " elements given)");
-        return false;
-    }
-    if (t[0].type_enum() != game_data_type::STRING) { kh_rv_report(cmd, "handle" + where + " must be a string"); return false; }
-    if (t[1].type_enum() != game_data_type::STRING) { kh_rv_report(cmd, "property" + where + " must be a string"); return false; }
-    const std::string handle = static_cast<std::string>(t[0]);
-    std::string prop = static_cast<std::string>(t[1]);
-    prop = kh_lower_copy(std::move(prop));
 
     const double khpu_now = RenderIntegration::effect_time_seconds_d();
     RenderIntegration::kh_aff_reap(khpu_now);
@@ -7577,7 +7577,7 @@ static bool kh_aff_update_one(const game_value& triple, int index) {
     bool ok = false;
     bool rearm = false;   // A new lifetime counts from now.
     if (prop == "lifetime") {
-        ok = kh_aff_lifetime(&val, staged, err);
+        ok = kh_aff_lifetime(val, staged, err);
         rearm = true;
     } else if (prop == "position") {
         ok = kh_aff_position(val, staged.pos, err);
@@ -7591,7 +7591,7 @@ static bool kh_aff_update_one(const game_value& triple, int index) {
             ok = kh_aff_dir(val, staged.dir, err);
         }
     } else if (prop == "scale") {
-        ok = kh_aff_scale(&val, staged.scale, err);
+        ok = kh_aff_scale(val, staged.scale, err);
     } else if (prop == "params") {
         ok = kh_aff_parse(*khpu_s, val, staged, err);
         rearm = true;
@@ -7601,7 +7601,7 @@ static bool kh_aff_update_one(const game_value& triple, int index) {
             if (prop == khpu_s->prm[khpu_j].key) { khpu_i = khpu_j; break; }
         }
         if (khpu_i >= 0) {
-            ok = kh_aff_param(&val, *khpu_s, khpu_i, staged, err);
+            ok = kh_aff_param(val, *khpu_s, khpu_i, staged, err);
         } else {
             err = std::string("unknown property for a ") + khpu_s->name + " affector (lifetime | position | " +
                   (RenderIntegration::kh_aff_rotated(staged.type) ? "rotation | " : "") + "scale | params";
@@ -7621,17 +7621,7 @@ static bool kh_aff_update_one(const game_value& triple, int index) {
 static game_value update_physics_affector_sqf(game_value_parameter args) {
     if (kh_gfx_off()) return game_value(false);   // KH_PLAYER_ONLY.
     try {
-        auto& arr = args.to_array();
-        if (arr.size() == 0) {
-            kh_rv_report("updatePhysicsAffector", "expects [handle, property, value] or an array of them");
-            return game_value(false);
-        }
-        if (arr[0].type_enum() != game_data_type::ARRAY) return game_value(kh_aff_update_one(args, -1));
-        bool all = true;
-        for (size_t i = 0; i < arr.size(); ++i) {
-            if (!kh_aff_update_one(arr[i], static_cast<int>(i))) all = false;
-        }
-        return game_value(all);
+        return kh_rv_batch("updatePhysicsAffector", args, kh_aff_update_one);
     } catch (const std::exception& e) {
         report_error(std::string("updatePhysicsAffector: ") + e.what());
         return game_value(false);
@@ -7704,6 +7694,9 @@ static game_value allow_dynamic_shadows_sqf(game_value_parameter arg) {
         }
         RenderIntegration::g_dls_allowed.store(static_cast<bool>(arg), std::memory_order_relaxed);
         return game_value(true);
+    } catch (const std::exception& e) {
+        report_error(std::string("allowDynamicShadows: ") + e.what());
+        return game_value(false);
     } catch (...) {
         report_error("allowDynamicShadows: unknown exception");
         return game_value(false);
@@ -7726,6 +7719,9 @@ static game_value set_ssgi_scale_sqf(game_value_parameter arg) {
         if (khss > 2.0f)  khss = 2.0f;
         RenderIntegration::g_khsg_scale.store(khss, std::memory_order_relaxed);   // KH_XTHREAD_ATOMIC.
         return game_value(true);
+    } catch (const std::exception& e) {
+        report_error(std::string("setSsgiScale: ") + e.what());
+        return game_value(false);
     } catch (...) {
         report_error("setSsgiScale: unknown exception");
         return game_value(false);
@@ -7782,6 +7778,9 @@ static game_value set_render_ao_sqf(game_value_parameter arg) {
             RenderIntegration::g_ao_dist_bits.store(khao_db, std::memory_order_relaxed);
         }
         return game_value(true);
+    } catch (const std::exception& e) {
+        report_error(std::string("setRenderAmbientOcclusion: ") + e.what());
+        return game_value(false);
     } catch (...) {
         report_error("setRenderAmbientOcclusion: unknown exception");
         return game_value(false);
@@ -7808,7 +7807,11 @@ static game_value reset_render_stats_sqf() {
         }
         RenderIntegration::reset_stat_counters();
         return game_value(true);
+    } catch (const std::exception& e) {
+        report_error(std::string("resetRenderStats: ") + e.what());
+        return game_value(false);
     } catch (...) {
+        report_error("resetRenderStats: unknown exception");
         return game_value(false);
     }
 }
@@ -8390,10 +8393,10 @@ static game_value add_local_postfx_sqf(game_value_parameter args) {
         if (arr.size() > 8 && !arr[8].is_nil() &&
             !kh_rv_duration(arr[8], obj, err)) { kh_rv_report("addLocalPostFX", err); return game_value(""); }
 
-        if (arr.size() > 9 && !arr[9].is_nil()) {
-            bool b = false;
-            if (!kh_rv_bool(arr[9], b, "inverse", err)) { kh_rv_report("addLocalPostFX", err); return game_value(""); }
-            obj.local_inverse = b;   // The effect reaches everything except the volume.
+        // inverse: the effect reaches everything except the volume.
+        if (arr.size() > 9 && !arr[9].is_nil() && !kh_rv_bool(arr[9], obj.local_inverse, "inverse", err)) {
+            kh_rv_report("addLocalPostFX", err);
+            return game_value("");
         }
 
         return game_value(RenderIntegration::add_render_object(obj));
@@ -9662,7 +9665,7 @@ static void initialize_sqf_integration() {
 
     _sqf_add_physics_affector_array = intercept::client::host::register_sqf_command(
         "addPhysicsAffector",
-        "Creates a physics affector that pushes simulated cloth and returns its handle.",
+        "Creates a physics affector that pushes simulated cloth and chains and returns its handle.",
         userFunctionWrapper<add_physics_affector_sqf>,
         game_data_type::STRING,
         game_data_type::ARRAY
@@ -9740,7 +9743,7 @@ static void initialize_sqf_integration() {
 
     _sqf_flush_ui_render = intercept::client::host::register_sqf_command(
         "flushUIRender",
-        "Immediately renders all passes that affect the UI.",
+        "Renders the passes that affect the UI now, or leaves them to the Present hook when it draws them.",
         userFunctionWrapper<flush_ui_render_sqf>,
         game_data_type::BOOL
     );

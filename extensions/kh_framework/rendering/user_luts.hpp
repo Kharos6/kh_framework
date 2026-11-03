@@ -79,7 +79,16 @@ inline bool kh_parse_cube_lut(const std::string& text, std::vector<float>& out_r
         }
 
         if (khcl_kw("LUT_3D_SIZE")) {
-            khcl_n = static_cast<int>(strtol(khcl_s + 11, nullptr, 10));
+            // KH_CUBE_ROW: read from this line alone, as every other keyword's values (strtol skips a line end too:
+            // a bare LUT_3D_SIZE read the next line's first number).
+            const char* const khcl_zp = khcl_s + 11;
+            char* khcl_ze = nullptr;
+            khcl_n = static_cast<int>(strtol(khcl_zp, &khcl_ze, 10));
+
+            if (khcl_ze == khcl_zp || khcl_ze > khcl_le) {
+                err = "line " + std::to_string(khcl_line) + ": expected a LUT_3D_SIZE value";
+                return false;
+            }
 
             if (khcl_n < 2 || khcl_n > 128) {
                 err = "LUT_3D_SIZE " + std::to_string(khcl_n) + " out of range (2..128)";
@@ -325,7 +334,7 @@ inline ID3D11ShaderResourceView* kh_user_lut_srv(ID3D11Device* dev, const std::s
 
     if (!khlu_e.srv) {
         khlu_e.failed = true;
-        report_error_once_safe("KH user LUT '" + path + "': " + khlu_err);
+        report_error_once_safe("KH RenderIntegration: user LUT '" + path + "': " + khlu_err);
     }
 
     g_user_lut_cache.emplace(std::move(khlu_key), khlu_e);

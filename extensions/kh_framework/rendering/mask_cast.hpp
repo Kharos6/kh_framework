@@ -108,9 +108,6 @@ inline void mask_cast_engine(ID3D11DeviceContext* ctx) {
         return;
     }
 
-    // The AABB slab path below (!sun_map) is not reached: the fire returns further below whenever the private sun map
-    // is not fresh (khcr_map_fresh), so sun_map is true there. Kept as it stands; were it reached, fill_frame's
-    // paint-once clamp (g_fire_clamp_painted) would zero the strength of every caster after the first.
     const uint64_t khcr_now = steady_now_ms();
     const bool khcr_q_churn =
         (g_lock_churn_ms_v == 0 || khcr_now - g_lock_churn_ms_v >= KH_CAST_READY_QUIET_MS);
@@ -169,14 +166,10 @@ inline void mask_cast_engine(ID3D11DeviceContext* ctx) {
     }
 
     // The map this fire consumes is THIS frame's: the once-per-frame render_sun_depth above builds it from this frame's
-    // casters before the fire reads it. The freshness bar was already taken at khcr_map_fresh, and the fire returned
-    // when it failed, so map_fresh is true by construction here - the g_sun_map_no_local branch below is inert and kept
-    // only because that flag has no other reader. The bar itself is a 250 ms wall-clock one, which at 60 fps would
-    // admit a map fifteen cycles old: it measures liveness, not currency, which is why the build above it and not this
-    // bar is what keeps the shadow with its caster.
-    const bool map_fresh = khcr_map_fresh;
-    if (!map_fresh && g_sun_map_no_local) {   return; }
-    const bool sun_map = map_fresh;
+    // casters before the fire reads it. The freshness bar (khcr_map_fresh) is a 250 ms wall-clock one, which at 60 fps
+    // would admit a map fifteen cycles old: it measures liveness, not currency, which is why the build above it and not
+    // this bar is what keeps the shadow with its caster. KH_EA_SLAB_DEAD: the fire paints through the sun map alone (a
+    // fire without a fresh one returned above), so every fill carries sunMeta.x (kh_fill_sun_tiers_cb).
 
     if (!g_mask.cast_dss && !g_mask.cast_states_failed) {
         ID3D11Device* dv2 = nullptr;
@@ -194,56 +187,25 @@ inline void mask_cast_engine(ID3D11DeviceContext* ctx) {
         ID3D11Device* dev = nullptr;
         ctx->GetDevice(&dev);
         if (!dev) { g_mask.engine_mask_failed = true;  return; }
+        D3D11_BLEND_DESC bd = {};
+        bd.RenderTarget[0].BlendEnable = TRUE;
+        bd.RenderTarget[0].SrcBlend = D3D11_BLEND_ONE;
+        bd.RenderTarget[0].DestBlend = D3D11_BLEND_ONE;
+        bd.RenderTarget[0].BlendOp = D3D11_BLEND_OP_MIN;
+        bd.RenderTarget[0].SrcBlendAlpha = D3D11_BLEND_ONE;
+        bd.RenderTarget[0].DestBlendAlpha = D3D11_BLEND_ONE;
+        bd.RenderTarget[0].BlendOpAlpha = D3D11_BLEND_OP_MIN;
+        bd.RenderTarget[0].RenderTargetWriteMask = D3D11_COLOR_WRITE_ENABLE_ALL;
 
-        if (!g_mask.min_blend) {
-            D3D11_BLEND_DESC bd = {};
-            bd.RenderTarget[0].BlendEnable = TRUE;
-            bd.RenderTarget[0].SrcBlend = D3D11_BLEND_ONE;
-            bd.RenderTarget[0].DestBlend = D3D11_BLEND_ONE;
-            bd.RenderTarget[0].BlendOp = D3D11_BLEND_OP_MIN;
-            bd.RenderTarget[0].SrcBlendAlpha = D3D11_BLEND_ONE;
-            bd.RenderTarget[0].DestBlendAlpha = D3D11_BLEND_ONE;
-            bd.RenderTarget[0].BlendOpAlpha = D3D11_BLEND_OP_MIN;
-            bd.RenderTarget[0].RenderTargetWriteMask = D3D11_COLOR_WRITE_ENABLE_ALL;
-
-            if (FAILED(dev->CreateBlendState(&bd, &g_mask.min_blend))) {
-                g_mask.engine_mask_failed = true;
-                dev->Release();
-                return;
-            }
+        if (FAILED(dev->CreateBlendState(&bd, &g_mask.min_blend))) {
+            g_mask.engine_mask_failed = true;
+            dev->Release();
+            return;
         }
 
         dev->Release();
     }
 
-    struct CastEntry { float pos[3]; float size[3]; };
-    CastEntry centries[64];
-    uint32_t ncb = 0;
-
-    if (!sun_map) {
-        kh_scene_sync();   // KH_SCENE: live walk by reference, no copy.
-        for (uint32_t khsc_i = 0; khsc_i < g_scene.objs.size(); ++khsc_i) {
-            if (!g_scene.alive[khsc_i]) continue;
-            if (ncb >= 64) break;
-            const RenderObject& o = g_scene.objs[khsc_i];
-            // The map path's casters (KH_SHADOW_ACTIVE, KH_SHADOW_SWITCH): lit world-space meshes only - a fullscreen
-            // pass carries default pos / size (a phantom 1 m shadow at the map origin) - visible or casterOnly, and
-            // castShadow on.
-            if (!kh_shadow_active(o)) continue;
-            memcpy(centries[ncb].pos, o.pos, 12);
-            // Slab entries stay SQF-ordered (the fill below swaps); a rotated mesh contributes its enclosing extents so
-            // the AABB slab stays conservative.
-            float khc_he[3];
-            kh_world_half_extents(o, khc_he);
-            centries[ncb].size[0] = khc_he[0] * 2.0f;   // SQF order.
-            centries[ncb].size[1] = khc_he[2] * 2.0f;
-            centries[ncb].size[2] = khc_he[1] * 2.0f;
-            ncb++;
-        }
-    }
-
-    // Map path: a valid sun map implies casters existed this frame (the pass refuses to render without any).
-    if (!sun_map && ncb == 0) {  return; }
     if (!g_fire_lock_valid) {   // frame's first fire: freeze the inputs.
         g_fire_lock = g_mask.cast_depth;   // The live cast depth is the frozen input.
         g_fire_lock->AddRef();
@@ -252,11 +214,13 @@ inline void mask_cast_engine(ID3D11DeviceContext* ctx) {
         g_fire_dims2[0] = g_mask.cast_dims[0];
         g_fire_dims2[1] = g_mask.cast_dims[1];
         // Seed the seam view from the carried frame_view: a consistent pair with only a uniform screen-space lag.
-                memcpy(g_fire_view2, g_ls.frame_view, sizeof(g_fire_view2));
+        memcpy(g_fire_view2, g_ls.frame_view, sizeof(g_fire_view2));
 
-        // The freeze below replaces it with the cycle's camera (the bridge's, or a live read when the latch is
-        // old) under the engine's frame rotation (KH_FIRE_ADOPT); the seed stands where no cycle camera is usable
-        // or the era guard refuses it.
+        // The freeze below replaces it with the cycle's camera (the bridge's clear-time latch, the draw-step retry,
+        // or this fire's retry when those failed) under the engine's frame rotation (KH_FIRE_ADOPT); the seed stands
+        // where no cycle camera is usable or the era guard refuses it. KH_EA_FIRE_LATCH: never a live mid-frame read
+        // beside a usable latch - a later camera than the one the engine's depth was drawn with (the DLS world pass's
+        // KH_DLSW_LATCH rule; that pass reconstructs through this freeze).
 
         if (g_ro.cycle_pv_stale) {
             RVExtBridge::ProjectionViewTransform khfe_pv = {};
@@ -274,30 +238,9 @@ inline void mask_cast_engine(ID3D11DeviceContext* ctx) {
 
         if (g_ro.cycle_pv_valid && !g_ro.cycle_pv_stale) {
             // The freeze.
-            float khpl_view[16];
-            bool khpl_live = false;
-
-            if (g_cycle_pv_age_s > KH_FIRE_PV_STALE_S) {
-                RVExtBridge::ProjectionViewTransform khpl_pv = {};
-
-                if (RVExtBridge::get_projection_view_transform(khpl_pv)) {
-                    for (int khpl_r = 0; khpl_r < 4; ++khpl_r) {
-                        for (int khpl_c = 0; khpl_c < 4; ++khpl_c) {
-                            khpl_view[khpl_r * 4 + khpl_c] = khpl_pv.view[khpl_r][khpl_c];
-                        }
-                    }
-
-                    khpl_live = true;
-                }
-            }
-
             float khfe_bc[3];
             float khfe_pc[3];
-            if (khpl_live) {
-                kh_cam_of(reinterpret_cast<const float(*)[4]>(khpl_view), khfe_bc);
-            } else {
-                kh_cam_of(g_ro.cycle_pv.view, khfe_bc);
-            }
+            kh_cam_of(g_ro.cycle_pv.view, khfe_bc);
             // frame_view[r*4+c] == cycle_pv.view[r][c] elementwise.
             kh_cam_of(reinterpret_cast<const float(*)[4]>(g_fire_view2), khfe_pc);
             const float khfe_dx = khfe_pc[0] - khfe_bc[0];
@@ -317,51 +260,15 @@ inline void mask_cast_engine(ID3D11DeviceContext* ctx) {
             // at its own time, so in such a cycle the freeze may hold the bridge's rotation while the meshes take the
             // frame's.
             RVExtBridge::ProjectionViewTransform khfe_apv = g_ro.cycle_pv;
-            if (khpl_live) memcpy(&khfe_apv.view[0][0], khpl_view, sizeof(khpl_view));
             kh_adopt_frame_view(khfe_apv);
 
-            // The shadow freeze. khfe_d is the distance between the incumbent frozen camera and the live one. The era
-            // guard refuses the bridge past 50 m so a foreign bridge never steers the fire, but refusing leaves the
-            // incumbent in place; the escape below lets a genuine jump re-converge.
-            if (khfe_d <= KH_LATCH_JUMP_M) {   // Era guard: a foreign bridge never steers the fire.
+            // The shadow freeze. khfe_d is the distance between the incumbent frozen camera and the cycle latch's.
+            // The era guard refuses the bridge past 50 m so a foreign bridge never steers the fire, but refusing
+            // leaves the incumbent in place; the escape (KH_FIRE_ERA_RECOVER_N consecutive refusals) lets a genuine
+            // jump re-converge.
+            if (khfe_d <= KH_LATCH_JUMP_M || ++g_fire_era_reject_run >= KH_FIRE_ERA_RECOVER_N) {
                 g_fire_era_reject_run = 0;
-                for (int khfe_r = 0; khfe_r < 4; ++khfe_r) {
-                    for (int khfe_c = 0; khfe_c < 4; ++khfe_c) {
-                        g_fire_view2[khfe_r * 4 + khfe_c] = khfe_apv.view[khfe_r][khfe_c];
-                    }
-                }
-
-            } else {
-                g_fire_era_reject_run++;
-
-                if (g_fire_era_reject_run >= KH_FIRE_ERA_RECOVER_N) {
-                    for (int khfe_r = 0; khfe_r < 4; ++khfe_r) {
-                        for (int khfe_c = 0; khfe_c < 4; ++khfe_c) {
-                            g_fire_view2[khfe_r * 4 + khfe_c] = khfe_apv.view[khfe_r][khfe_c];
-                        }
-                    }
-
-                    g_fire_era_reject_run = 0;
-                }
-            }
-        }
-
-        // Era-guarded against the publish camera exactly like the bridge adoption - a foreign sample never steers the
-        // fire - and a refusal falls back to the epoch just adopted.
-
-        if (g_fire_refreeze_pending) {
-            g_fire_refreeze_pending = false;
-            float khrv_a[3];
-            float khrv_b[3];
-            kh_cam_of(reinterpret_cast<const float(*)[4]>(g_fire_refreeze_view), khrv_a);
-            kh_cam_of(reinterpret_cast<const float(*)[4]>(g_fire_view2), khrv_b);
-            const float khrv_dx = khrv_a[0] - khrv_b[0];
-            const float khrv_dy = khrv_a[1] - khrv_b[1];
-            const float khrv_dz = khrv_a[2] - khrv_b[2];
-            const float khrv_d = sqrtf(khrv_dx * khrv_dx + khrv_dy * khrv_dy + khrv_dz * khrv_dz);
-
-            if (khrv_d <= KH_LATCH_JUMP_M) {
-                memcpy(g_fire_view2, g_fire_refreeze_view, sizeof(g_fire_view2));
+                memcpy(g_fire_view2, &khfe_apv.view[0][0], sizeof(g_fire_view2));
             }
         }
 
@@ -372,64 +279,22 @@ inline void mask_cast_engine(ID3D11DeviceContext* ctx) {
         g_fire_sun2[2] = fsun[2];
 
         // The engine erases the mask every frame, so a ghost is never stale paint. Once per freeze; re-fires replay it.
+        // KH_CAM_HONEST: the frozen view's cofactor inverse rotation in double, laid out for KhCastWorld's row dots
+        // (castMat[j][c] = cofactor[j][c] / det); refused (the fill keeps the rows, the transpose) for a determinant
+        // 0.1 or more off 1. KH_EA_FIRE_INV: through kh_view_inv_rows, the DLS world pass's twin - the same arithmetic.
         {
-            const double khoi_r[3][3] = {
-                { g_fire_view2[0], g_fire_view2[1], g_fire_view2[2] },
-                { g_fire_view2[4], g_fire_view2[5], g_fire_view2[6] },
-                { g_fire_view2[8], g_fire_view2[9], g_fire_view2[10] }
-            };
-            double khoi_def = 0.0;
-
-            for (int khoi_i = 0; khoi_i < 3; ++khoi_i) {
-                const double khoi_n = sqrt(khoi_r[khoi_i][0] * khoi_r[khoi_i][0] +
-                                           khoi_r[khoi_i][1] * khoi_r[khoi_i][1] +
-                                           khoi_r[khoi_i][2] * khoi_r[khoi_i][2]);
-                if (fabs(khoi_n - 1.0) > khoi_def) khoi_def = fabs(khoi_n - 1.0);
-
-                for (int khoi_j = khoi_i + 1; khoi_j < 3; ++khoi_j) {
-                    const double khoi_d = fabs(khoi_r[khoi_i][0] * khoi_r[khoi_j][0] +
-                                               khoi_r[khoi_i][1] * khoi_r[khoi_j][1] +
-                                               khoi_r[khoi_i][2] * khoi_r[khoi_j][2]);
-                    if (khoi_d > khoi_def) khoi_def = khoi_d;
-                }
-            }
-
-            // Cofactors: inv[c][j] = khoi_c[j][c] / det; the fill's row-dot wants castMat[j][c] = inv[c][j], i.e.
-            // khoi_c[j][c] / det.
-            const double khoi_c[3][3] = {
-                { khoi_r[1][1] * khoi_r[2][2] - khoi_r[1][2] * khoi_r[2][1],
-                  khoi_r[1][2] * khoi_r[2][0] - khoi_r[1][0] * khoi_r[2][2],
-                  khoi_r[1][0] * khoi_r[2][1] - khoi_r[1][1] * khoi_r[2][0] },
-                { khoi_r[0][2] * khoi_r[2][1] - khoi_r[0][1] * khoi_r[2][2],
-                  khoi_r[0][0] * khoi_r[2][2] - khoi_r[0][2] * khoi_r[2][0],
-                  khoi_r[0][1] * khoi_r[2][0] - khoi_r[0][0] * khoi_r[2][1] },
-                { khoi_r[0][1] * khoi_r[1][2] - khoi_r[0][2] * khoi_r[1][1],
-                  khoi_r[0][2] * khoi_r[1][0] - khoi_r[0][0] * khoi_r[1][2],
-                  khoi_r[0][0] * khoi_r[1][1] - khoi_r[0][1] * khoi_r[1][0] } };
-            const double khoi_det = khoi_r[0][0] * khoi_c[0][0] +
-                                    khoi_r[0][1] * khoi_c[0][1] +
-                                    khoi_r[0][2] * khoi_c[0][2];
-            g_fire_cast_inv_valid = false;
-
-            if (fabs(khoi_det - 1.0) < 0.1) {
-                for (int khoi_j = 0; khoi_j < 3; ++khoi_j) {
-                    for (int khoi_k = 0; khoi_k < 3; ++khoi_k) {
-                        g_fire_cast_inv[khoi_j * 3 + khoi_k] =
-                            static_cast<float>(khoi_c[khoi_j][khoi_k] / khoi_det);
-                    }
-                }
-
-                g_fire_cast_inv_valid = true;
-            }
+            float khoi_inv[3][3];
+            g_fire_cast_inv_valid = kh_view_inv_rows(reinterpret_cast<const float(*)[4]>(g_fire_view2), khoi_inv);
+            if (g_fire_cast_inv_valid) memcpy(g_fire_cast_inv, khoi_inv, sizeof(g_fire_cast_inv));
         }
         g_fire_lock_valid = true;
 
     }
 
     // KH_MASKCAST_NOPAINT: the fire replays per engine resolve, but the clamp paint hands the strength lane
-    // (castView[2].w) to exactly ONE fire per frame (the first with the mask SRV-bound, else the frame's last) and
-    // zeroes it elsewhere; a zero lane paints 1.0 into a MIN blend, i.e. nothing at full pixel cost, so such a fire
-    // skips the draw, the state save and the occupancy build. Once the frame's paint has landed no later fire can
+    // (castView[2].w) to exactly ONE fire per frame (the first with the mask SRV-bound, else the frame's last); any
+    // other fire would carry a zero lane, which paints 1.0 into a MIN blend, i.e. nothing at full pixel cost, so such a
+    // fire skips the draw, the state save and the occupancy build. Once the frame's paint has landed no later fire can
     // paint, so the probe (66 SRV gets per call) is skipped with the draw.
     g_fire_count_frame++;
     g_fire_mask_srv_now = g_fire_clamp_painted == 0 && kh_fire_mask_srv_bound(ctx);   // per-fire (at the statics).
@@ -620,11 +485,11 @@ inline void mask_cast_engine(ID3D11DeviceContext* ctx) {
         g_fire_lock->GetDesc(&khfs_d);
         if (khfs_d.Format == DXGI_FORMAT_R32_FLOAT) khfs_ulp = 1.1920929e-7f;
     }
-    if (sun_map && g_res.sun_srv) ctx->PSSetShaderResources(11, 1, &g_res.sun_srv);
-    if (sun_map && g_sun2_map_valid && g_res.sun2_srv) ctx->PSSetShaderResources(25, 1, &g_res.sun2_srv);
-    if (sun_map && g_sun3_map_valid && g_res.sun3_srv) ctx->PSSetShaderResources(26, 1, &g_res.sun3_srv);
-    if (sun_map && g_sun4_map_valid && g_res.sun4_srv) ctx->PSSetShaderResources(27, 1, &g_res.sun4_srv);
-    if (sun_map && g_sun5_map_valid && g_res.sun5_srv) ctx->PSSetShaderResources(32, 1, &g_res.sun5_srv);
+    if (g_res.sun_srv) ctx->PSSetShaderResources(11, 1, &g_res.sun_srv);
+    if (g_sun2_map_valid && g_res.sun2_srv) ctx->PSSetShaderResources(25, 1, &g_res.sun2_srv);
+    if (g_sun3_map_valid && g_res.sun3_srv) ctx->PSSetShaderResources(26, 1, &g_res.sun3_srv);
+    if (g_sun4_map_valid && g_res.sun4_srv) ctx->PSSetShaderResources(27, 1, &g_res.sun4_srv);
+    if (g_sun5_map_valid && g_res.sun5_srv) ctx->PSSetShaderResources(32, 1, &g_res.sun5_srv);
     ctx->PSSetSamplers(1, 1, &g_res.samp_pf);   // KH_SHADOW_GATHER: the cast chain's (null = the default, clamp).
     // t36 is not bound here: PSMaskCast never reads it. This fire binds only what it reads.
     if (g_res.thm_srv) ctx->PSSetShaderResources(10, 1, &g_res.thm_srv);   // Terrain snap (full-table
@@ -660,15 +525,9 @@ inline void mask_cast_engine(ID3D11DeviceContext* ctx) {
         cbd.cast_view[2][1] = g_fire_sun2[1];
         cbd.cast_view[2][2] = g_fire_sun2[2];
         cbd.cast_view[2][3] = g_shadow_map_strength;
-        {
-            const bool khsc_last = (g_fire_count_frame >= g_fire_clamp_target);
-
-            if (g_fire_clamp_painted == 0 && (g_fire_mask_srv_now || khsc_last)) {
-                g_fire_clamp_painted++;
-            } else {
-                cbd.cast_view[2][3] = 0.0f;
-            }
-        }
+        // KH_MASKCAST_NOPAINT: only the frame's painting fire gets here (the gate above; nothing between moves its
+        // terms), so this fill carries the frame's one paint.
+        g_fire_clamp_painted++;
         kh_fill_occ(cbd);   // terrain-snap lanes (zeroed = shader no-op).
         cbd.fog_below[2] = khfs_ulp;   // KH_CAST_SNAP_FACING: the snap's depth ulp.
         // One origin for every sun matrix this fill carries; the matrices are rebased to it at their own fills below.
@@ -682,95 +541,74 @@ inline void mask_cast_engine(ID3D11DeviceContext* ctx) {
         }
     };
 
-    if (sun_map) {
-        // Mesh-shaped cast: one fullscreen test against the sun-depth map covers every caster at once.
-        // centerSize/sizeAxes carry the combined caster bounds (engine axes) for the shader's locality clamp.
-        {
-            ConstantData cbd = {};
-            fill_frame(cbd);
-            cbd.center_size[0] = g_sun_map_bounds[0];
-            cbd.center_size[1] = g_sun_map_bounds[1];
-            cbd.center_size[2] = g_sun_map_bounds[2];
-            cbd.size_axes[0] = g_sun_map_bounds[3] * 2.0f;
-            cbd.size_axes[1] = g_sun_map_bounds[4] * 2.0f;
-            cbd.size_axes[2] = g_sun_map_bounds[5] * 2.0f;
-            kh_fill_sun_tiers_cb(cbd);
-            // The cast chain's own compare bias, one lane per tier plus the union.
-            cbd.sun_cast_bias[0]  = g_sun2_map_valid ? g_sun2_cast_bias : 0.0f;
-            cbd.sun_cast_bias[1]  = g_sun3_map_valid ? g_sun3_cast_bias : 0.0f;
-            cbd.sun_cast_bias[2]  = g_sun4_map_valid ? g_sun4_cast_bias : 0.0f;
-            cbd.sun_cast_bias[3]  = g_sun5_map_valid ? g_sun5_cast_bias : 0.0f;
-            cbd.sun_cast_bias2[0] = g_sun_map_cast_bias;   // The union (sunMeta.x gates its use).
-            cbd.locality_meta[0] = static_cast<float>(g_sun_local_count);
-            cbd.locality_meta[3] = static_cast<float>(KH_OCC_N);   // KH_OCC_N_LANE.
-            // See the shader gate.
-            cbd.locality_meta[2] = (g_sun_map_render_time >= 0.0f &&
-                                    effect_time_seconds() - g_sun_map_render_time > 0.5f)
-                                 ? 1.0f : 0.0f;
+    // Mesh-shaped cast: one fullscreen test against the sun-depth map covers every caster at once.
+    // centerSize/sizeAxes carry the combined caster bounds (engine axes) for the shader's locality clamp.
+    ConstantData cbd = {};
+    fill_frame(cbd);
+    cbd.center_size[0] = g_sun_map_bounds[0];
+    cbd.center_size[1] = g_sun_map_bounds[1];
+    cbd.center_size[2] = g_sun_map_bounds[2];
+    cbd.size_axes[0] = g_sun_map_bounds[3] * 2.0f;
+    cbd.size_axes[1] = g_sun_map_bounds[4] * 2.0f;
+    cbd.size_axes[2] = g_sun_map_bounds[5] * 2.0f;
+    kh_fill_sun_tiers_cb(cbd);
+    // The cast chain's own compare bias, one lane per tier plus the union.
+    cbd.sun_cast_bias[0]  = g_sun2_map_valid ? g_sun2_cast_bias : 0.0f;
+    cbd.sun_cast_bias[1]  = g_sun3_map_valid ? g_sun3_cast_bias : 0.0f;
+    cbd.sun_cast_bias[2]  = g_sun4_map_valid ? g_sun4_cast_bias : 0.0f;
+    cbd.sun_cast_bias[3]  = g_sun5_map_valid ? g_sun5_cast_bias : 0.0f;
+    cbd.sun_cast_bias2[0] = g_sun_map_cast_bias;   // The union (sunMeta.x gates its use).
+    cbd.locality_meta[0] = static_cast<float>(g_sun_local_count);
+    cbd.locality_meta[3] = static_cast<float>(KH_OCC_N);   // KH_OCC_N_LANE.
+    // See the shader gate.
+    cbd.locality_meta[2] = (g_sun_map_render_time >= 0.0f &&
+                            effect_time_seconds() - g_sun_map_render_time > 0.5f)
+                         ? 1.0f : 0.0f;
 
-            if (g_sun_local_count > 0 && g_sun_local_count <= 16) {
-                for (int li = 0; li < g_sun_local_count; ++li) {
-                    const float* lb = g_sun_locals.data() + static_cast<size_t>(li) * 6;
-                    cbd.locality[li * 2][0] = lb[0];
-                    cbd.locality[li * 2][1] = lb[1];
-                    cbd.locality[li * 2][2] = lb[2];
-                    cbd.locality[li * 2 + 1][0] = lb[3];
-                    cbd.locality[li * 2 + 1][1] = lb[4];
-                    cbd.locality[li * 2 + 1][2] = lb[5];
-                }
-            } else if (g_sun_local_count > 16 && kh_upload_locality_ext(ctx)) {
-                // Uncapped t2 twin; failure leaves meta.y = 0 and the shader takes the combined-bounds fallback.
-                cbd.locality_meta[1] = 1.0f;
-                ctx->PSSetShaderResources(2, 1, &g_res.locality_srv);
-                // Build and bind the occupancy grid; the shader then gates in O(1). Any failure leaves the per-pixel
-                // scan.
-                if (kh_cast_occ_build(ctx, cbd)) {
-                    ctx->PSSetShaderResources(35, 1, &g_res.castocc_srv);
-                } else {
-                    cbd.cast_mat[0][3] = 0.0f;
-                }
-            }
-
-            // Both slices (centerSize/sizeAxes ride b0; the cast matrices, sun map + locality list ride b1).
-            if (!kh_upload_obj_cb(ctx, g_res.composite_cb, cbd) ||
-                !kh_upload_frame_cb(ctx, g_res.composite_frame_cb, cbd)) {
-            } else {
-                // KH_CAST_SCISSOR: only where a caster's shadow can land; the rest of the screen would write 1 into a
-                // MIN (no change).
-                bool khsr_unorm = false;
-                {
-                    D3D11_RENDER_TARGET_VIEW_DESC khsr_rd = {};
-                    g_mask.engine_mask_rtv->GetDesc(&khsr_rd);
-                    khsr_unorm = khsr_rd.Format == DXGI_FORMAT_R8_UNORM || khsr_rd.Format == DXGI_FORMAT_R16_UNORM;
-                }
-                D3D11_RECT khsr_rect = {};
-                const int khsr_v = kh_cast_scissor(cbd, khsr_unorm, khsr_rect);
-                if (khsr_v == 1 && kh_cast_scissor_rs(ctx)) {
-                    ctx->RSSetState(g_mask.cast_rs_scissor);
-                    ctx->RSSetScissorRects(1, &khsr_rect);
-                    khsr_set = true;
-                    ctx->Draw(3, 0);
-                    ctx->RSSetState(nullptr);   // The fire's own state again.
-                } else if (khsr_v != 2) {
-                    ctx->Draw(3, 0);
-                }
-            }
+    if (g_sun_local_count > 0 && g_sun_local_count <= 16) {
+        for (int li = 0; li < g_sun_local_count; ++li) {
+            const float* lb = g_sun_locals.data() + static_cast<size_t>(li) * 6;
+            cbd.locality[li * 2][0] = lb[0];
+            cbd.locality[li * 2][1] = lb[1];
+            cbd.locality[li * 2][2] = lb[2];
+            cbd.locality[li * 2 + 1][0] = lb[3];
+            cbd.locality[li * 2 + 1][1] = lb[4];
+            cbd.locality[li * 2 + 1][2] = lb[5];
         }
+    } else if (g_sun_local_count > 16 && kh_upload_locality_ext(ctx)) {
+        // Uncapped t2 twin; failure leaves meta.y = 0 and the shader takes the combined-bounds fallback.
+        cbd.locality_meta[1] = 1.0f;
+        ctx->PSSetShaderResources(2, 1, &g_res.locality_srv);
+        // Build and bind the occupancy grid; the shader then gates in O(1). Any failure leaves the per-pixel
+        // scan.
+        if (kh_cast_occ_build(ctx, cbd)) {
+            ctx->PSSetShaderResources(35, 1, &g_res.castocc_srv);
+        } else {
+            cbd.cast_mat[0][3] = 0.0f;
+        }
+    }
+
+    // Both slices (centerSize/sizeAxes ride b0; the cast matrices, sun map + locality list ride b1).
+    if (!kh_upload_obj_cb(ctx, g_res.composite_cb, cbd) ||
+        !kh_upload_frame_cb(ctx, g_res.composite_frame_cb, cbd)) {
     } else {
-        // AABB slab fallback (not reached - the note at the fire's head): one fullscreen test per caster (zeroed
-        // sunMeta selects the shader's slab path).
-        for (uint32_t bi = 0; bi < ncb; ++bi) {
-            ConstantData cbd = {};
-            fill_frame(cbd);
-            cbd.center_size[0] = centries[bi].pos[0];
-            cbd.center_size[1] = centries[bi].pos[2];
-            cbd.center_size[2] = centries[bi].pos[1];
-            cbd.size_axes[0] = centries[bi].size[0];
-            cbd.size_axes[1] = centries[bi].size[2];
-            cbd.size_axes[2] = centries[bi].size[1];
-            // CB split: both slices per caster (slab path - not reached, the note at the fire's head).
-            if (!kh_upload_obj_cb(ctx, g_res.composite_cb, cbd) ||
-                !kh_upload_frame_cb(ctx, g_res.composite_frame_cb, cbd)) {  break; }
+        // KH_CAST_SCISSOR: only where a caster's shadow can land; the rest of the screen would write 1 into a
+        // MIN (no change).
+        bool khsr_unorm = false;
+        {
+            D3D11_RENDER_TARGET_VIEW_DESC khsr_rd = {};
+            g_mask.engine_mask_rtv->GetDesc(&khsr_rd);
+            khsr_unorm = khsr_rd.Format == DXGI_FORMAT_R8_UNORM || khsr_rd.Format == DXGI_FORMAT_R16_UNORM;
+        }
+        D3D11_RECT khsr_rect = {};
+        const int khsr_v = kh_cast_scissor(cbd, khsr_unorm, khsr_rect);
+        if (khsr_v == 1 && kh_cast_scissor_rs(ctx)) {
+            ctx->RSSetState(g_mask.cast_rs_scissor);
+            ctx->RSSetScissorRects(1, &khsr_rect);
+            khsr_set = true;
+            ctx->Draw(3, 0);
+            ctx->RSSetState(nullptr);   // The fire's own state again.
+        } else if (khsr_v != 2) {
             ctx->Draw(3, 0);
         }
     }

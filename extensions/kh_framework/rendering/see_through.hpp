@@ -151,16 +151,6 @@ inline void kh_wsee_arm(ID3D11Device* dev, const std::vector<std::pair<uint64_t,
     }
 }
 
-// The world range the chain and the sort decode with (kh_fill_depth_range_cb's rule, read now: the trigger draw's
-// viewport, else the scene's; a range that is not one, the scene's).
-inline void kh_wsee_world_range(float& khwr_lo, float& khwr_hi) {
-    khwr_lo = g_ro.trig_vp_valid ? g_ro.trig_vp_min : g_scene_vp_min_d;
-    khwr_hi = g_ro.trig_vp_valid ? g_ro.trig_vp_max : g_scene_vp_max_d;
-    if (!(khwr_lo >= 0.0f && khwr_hi <= 1.0f && khwr_lo < khwr_hi)) {
-        khwr_lo = g_scene_vp_min_d;
-        khwr_hi = g_scene_vp_max_d;
-    }
-}
 // The far split's distance D: KH_WSEE_FAR_FRAC of the far plane of the engine's latched projection pair (m22, m32:
 // ndc = m22 + m32 / d, far f = m32 / (1 - m22)), so D's ndc is m22 + (1 - m22) / KH_WSEE_FAR_FRAC - the pair alone.
 // TWIN: cb.hlsl KhWseeFarRaw computes the same from depthParams.x. Its raw in the world range (lo, hi). False: no
@@ -168,7 +158,7 @@ inline void kh_wsee_world_range(float& khwr_lo, float& khwr_hi) {
 static constexpr float KH_WSEE_FAR_FRAC = 0.25f;
 inline bool kh_wsee_far_raw(float& khfr_raw, float& khfr_lo, float& khfr_hi) {
     if (!g_ro.engine_proj_valid) return false;
-    kh_wsee_world_range(khfr_lo, khfr_hi);
+    kh_world_depth_range(khfr_lo, khfr_hi);   // The world range the chain and the sort decode with, read now.
     const float khfr_m22 = g_ro.engine_m22;
     const float khfr_ndc = khfr_m22 + (1.0f - khfr_m22) / KH_WSEE_FAR_FRAC;
     khfr_raw = khfr_lo + khfr_ndc * (khfr_hi - khfr_lo);
@@ -377,29 +367,9 @@ inline bool kh_wsee_snapshot(ID3D11DeviceContext* ctx, ID3D11RenderTargetView* k
         khwn_bk.capture(ctx);
         KhOmSave khwn_om;
         khwn_om.capture(ctx);
-        D3D11_VIEWPORT khwn_vp = {};
-        khwn_vp.Width = static_cast<FLOAT>(g_res.wsee_w);
-        khwn_vp.Height = static_cast<FLOAT>(g_res.wsee_h);
-        khwn_vp.MaxDepth = 1.0f;
-        // Replacing the OM targets unbinds the main depth's view first, which makes its SRV legal at t0.
-        ctx->OMSetRenderTargets(1, &g_res.wsee_s_rtv, nullptr);
-        ctx->RSSetViewports(1, &khwn_vp);
-        ctx->RSSetState(g_res.rasterizer);
-        ctx->IASetInputLayout(nullptr);
-        ctx->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
-        ctx->VSSetShader(g_res.vs_fullscreen, nullptr, 0);
-        ctx->PSSetShader(g_res.ps_vmsee_s0, nullptr, 0);
-        ctx->GSSetShader(nullptr, nullptr, 0);
-        ctx->HSSetShader(nullptr, nullptr, 0);
-        ctx->DSSetShader(nullptr, nullptr, 0);
-        ctx->PSSetShaderResources(0, 1, &g_res.depth_srv);
-        ctx->OMSetDepthStencilState(g_res.dss_off, 0);
-        const FLOAT khwn_bf[4] = { 0.0f, 0.0f, 0.0f, 0.0f };
-        ctx->OMSetBlendState(nullptr, khwn_bf, 0xFFFFFFFF);
-        ctx->Draw(3, 0);
-        ID3D11ShaderResourceView* khwn_null = nullptr;
-        ctx->PSSetShaderResources(0, 1, &khwn_null);   // Off t0 before the engine's depth view is bound again.
+        kh_depth_s0_pass(ctx, g_res.wsee_s_rtv, g_res.wsee_w, g_res.wsee_h);   // KH_EA_S0_PASS: S.
         if (khwn_zb) {   // KH_PSB_ZB: Zb from the S just written, at the record's size (one fullscreen triangle).
+            ID3D11ShaderResourceView* khwn_null = nullptr;
             D3D11_VIEWPORT khwn_zv = {};
             khwn_zv.Width = static_cast<FLOAT>((g_res.wsee_w + (1u << KH_PSB_LS) - 1u) >> KH_PSB_LS);
             khwn_zv.Height = static_cast<FLOAT>((g_res.wsee_h + (1u << KH_PSB_LS) - 1u) >> KH_PSB_LS);
@@ -520,28 +490,7 @@ inline bool kh_wsee_b2_take(ID3D11DeviceContext* ctx, ID3D11RenderTargetView* kh
         khwb_bk.capture(ctx);
         KhOmSave khwb_om;
         khwb_om.capture(ctx);
-        // S2: kh_wsee_snapshot's depth pass.
-        D3D11_VIEWPORT khwb_vp = {};
-        khwb_vp.Width = static_cast<FLOAT>(g_res.wsee_w);
-        khwb_vp.Height = static_cast<FLOAT>(g_res.wsee_h);
-        khwb_vp.MaxDepth = 1.0f;
-        ctx->OMSetRenderTargets(1, &g_res.wsee_s2_rtv, nullptr);
-        ctx->RSSetViewports(1, &khwb_vp);
-        ctx->RSSetState(g_res.rasterizer);
-        ctx->IASetInputLayout(nullptr);
-        ctx->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
-        ctx->VSSetShader(g_res.vs_fullscreen, nullptr, 0);
-        ctx->PSSetShader(g_res.ps_vmsee_s0, nullptr, 0);
-        ctx->GSSetShader(nullptr, nullptr, 0);
-        ctx->HSSetShader(nullptr, nullptr, 0);
-        ctx->DSSetShader(nullptr, nullptr, 0);
-        ctx->PSSetShaderResources(0, 1, &g_res.depth_srv);
-        ctx->OMSetDepthStencilState(g_res.dss_off, 0);
-        const FLOAT khwb_bf[4] = { 0.0f, 0.0f, 0.0f, 0.0f };
-        ctx->OMSetBlendState(nullptr, khwb_bf, 0xFFFFFFFF);
-        ctx->Draw(3, 0);
-        ID3D11ShaderResourceView* khwb_null = nullptr;
-        ctx->PSSetShaderResources(0, 1, &khwb_null);   // Off t0 before the engine's depth view is bound again.
+        kh_depth_s0_pass(ctx, g_res.wsee_s2_rtv, g_res.wsee_w, g_res.wsee_h);   // KH_EA_S0_PASS: S2, as S.
         ctx->OMSetRenderTargets(0, nullptr, nullptr);
         if (khwb_sync) g_wsee_d3_sync_cycle.store(g_topo_cycles, std::memory_order_relaxed);   // KH_WSEE_OQ.
         g_wsee_s2_cycle.store(g_topo_cycles, std::memory_order_relaxed);   // KH_WSEE_NOPRE: S2 stands (bit 9).
@@ -731,12 +680,8 @@ inline void kh_wsee_pre_draw(ID3D11DeviceContext* ctx) {
         ID3D11RenderTargetView* khwp_crtv = nullptr;
         ctx->OMGetRenderTargets(1, &khwp_crtv, nullptr);
         if (!khwp_crtv) return;
-        ID3D11Resource* khwp_cres = nullptr;
-        khwp_crtv->GetResource(&khwp_cres);
+        const bool khwp_cscene = kh_rtv_is_scene(khwp_crtv);   // KH_EA_SCENE_RTV.
         khwp_crtv->Release();
-        const bool khwp_cscene = khwp_cres != nullptr && g_topo_scene_tex_id != nullptr &&
-                                 static_cast<void*>(khwp_cres) == g_topo_scene_tex_id;
-        if (khwp_cres) khwp_cres->Release();
         if (!khwp_cscene) return;
         kh_wsee_taint(khwp_c);
         return;
@@ -781,13 +726,7 @@ inline void kh_wsee_pre_draw(ID3D11DeviceContext* ctx) {
     bool khwp_scene = false;
     if (khwp_over || khwp_add) {
         ctx->OMGetRenderTargets(1, &khwp_rtv, nullptr);
-        if (khwp_rtv) {
-            ID3D11Resource* khwp_res = nullptr;
-            khwp_rtv->GetResource(&khwp_res);
-            khwp_scene = khwp_res != nullptr && g_topo_scene_tex_id != nullptr &&
-                         static_cast<void*>(khwp_res) == g_topo_scene_tex_id;
-            if (khwp_res) khwp_res->Release();
-        }
+        khwp_scene = khwp_rtv != nullptr && kh_rtv_is_scene(khwp_rtv);   // KH_EA_SCENE_RTV.
     }
     // A blended draw writing no depth over the capture's depth, once the capture stands: an over-blend drawn with
     // its depth test off goes into T untested (it covered every fragment it drew) and NW; a light-adding one
@@ -1151,7 +1090,7 @@ static constexpr float KH_WSEE_SURF_TOL = 0.02f;
 // The world range's MaxDepth the chain and the sort decode with (kh_fill_depth_range_cb's rule, read at the draw).
 inline float kh_wsee_surf_max() {
     float khsm_lo = 0.0f, khsm_hi = 1.0f;
-    kh_wsee_world_range(khsm_lo, khsm_hi);
+    kh_world_depth_range(khsm_lo, khsm_hi);
     return khsm_hi;
 }
 struct KhWseeSurfVp {
@@ -1705,15 +1644,7 @@ inline void kh_wsee_inj_capture(ID3D11DeviceContext* ctx, bool khwi_world) {
     ID3D11RenderTargetView* khwi_rtv = nullptr;
     ctx->OMGetRenderTargets(1, &khwi_rtv, nullptr);
     if (!khwi_rtv) return;
-    bool khwi_scene = false;
-    {
-        ID3D11Resource* khwi_res = nullptr;
-        khwi_rtv->GetResource(&khwi_res);
-        khwi_scene = khwi_res != nullptr && g_topo_scene_tex_id != nullptr &&
-                     static_cast<void*>(khwi_res) == g_topo_scene_tex_id;
-        if (khwi_res) khwi_res->Release();
-    }
-    if (khwi_scene) {
+    if (kh_rtv_is_scene(khwi_rtv)) {   // KH_EA_SCENE_RTV.
         g_wsee_snap_cycle = khwi_c;
         if (kh_wsee_snapshot(ctx, khwi_rtv)) g_wsee_ok_cycle.store(khwi_c, std::memory_order_relaxed);
     }
@@ -1762,8 +1693,8 @@ inline bool kh_wsee_q_ensure(ID3D11Device* dev) {
         KH_SAFE_RELEASE(g_res.wsee_q_srv);
         KH_SAFE_RELEASE(g_res.wsee_q_tex);
         g_res.wsee_q_failed = true;
-        report_error_once_safe("KH world see-through: the sorted tail's scene capture could not be made (our "
-                               "translucent parts draw where they did, before the game's later layers)");
+        report_error_once_safe("KH RenderIntegration: world see-through: the sorted tail's scene capture could not "
+                               "be made (our translucent parts draw where they did, before the game's later layers)");
         return false;
     }
     return true;

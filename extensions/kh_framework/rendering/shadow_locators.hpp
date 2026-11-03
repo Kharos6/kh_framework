@@ -80,6 +80,10 @@ inline void skybind_step(ID3D11DeviceContext* ctx) {
         const uint32_t nf = g_skybind.bytes[i] / 4;
 
         if (nf >= 72 && locator_sky_anchor(f, nf)) {
+            // KH_EA_SKYBIND_BUF: a window at the buffer's start is the upload path's block - name its buffer, as an
+            // anchored upload does, or a lock by this path alone (before any admitted upload of the block, or onto a
+            // buffer the engine re-created) leaves kh_fog_probe_admits keyed on a null or dead buffer.
+            if (g_skybind.base_fl[i] == 0u && g_skybind.src[i]) g_sky_probe.buf = g_skybind.src[i];
             g_sky_probe.floats = nf;
             g_sky_probe.valid = true;
             g_sky_probe.hits++;
@@ -92,11 +96,8 @@ inline void skybind_step(ID3D11DeviceContext* ctx) {
         // flight arrive here. KH_VIEW_STAGED_LOCKED: those are not fed - a copy staged at an earlier opaque sample
         // would be published as this moment's frame view (the locked path stamps it now); locked, the scan's only use
         // of a copy is that publish (with its disagreement count against the bridge).
-        if (i >= 8 && g_skybind.src[i] && !g_ls.view_src_valid) {
-            if (g_ro.in_injection) {
-            } else {
-                shadow_view_scan(g_skybind.src[i], f, g_skybind.bytes[i], g_skybind.base_fl[i]);
-            }
+        if (i >= 8 && g_skybind.src[i] && !g_ls.view_src_valid && !g_ro.in_injection) {
+            shadow_view_scan(g_skybind.src[i], f, g_skybind.bytes[i], g_skybind.base_fl[i]);
         }
 
         ctx->Unmap(g_skybind.staging[i], 0);

@@ -35,8 +35,8 @@ namespace RenderIntegration {
 // corner swept down-sun (clip +z) to the band's floor, entering at the top when it starts above. The snap moves pw.y by
 // at most thmMeta.z: the regions are taken at both offsets. The windows come from the same CB lanes the shader reads
 // (kh_fill_sun_tiers_cb on this fill), rebased to sunOrigin as the shader rebases. The rectangle is the intersection of
-// the reach bound's rectangle and the windows'. Anything the shader could take another way (the slab path, the combined
-// fallback, no fade, a t2 count past the list, a window whose down-sun axis does not descend) draws whole. 0 = whole,
+// the reach bound's rectangle and the windows'. Anything the shader could take another way (the combined fallback, no
+// fade, a t2 count past the list, a window whose down-sun axis does not descend) draws whole. 0 = whole,
 // 1 = inside khcs_rect, 2 = no pixel can change (the draw is skipped).
 static constexpr double KH_CSC_EPS = 0.01;      // View depth (m) the boxes are clipped at.
 static constexpr double KH_CSC_PAD_M = 0.5;    // World padding (m): the shader's float reconstruction.
@@ -49,7 +49,7 @@ static constexpr int    KH_CSC_MANY = 32;
 inline int kh_cast_scissor(const ConstantData& khcs_cb, bool khcs_unorm, D3D11_RECT& khcs_rect) {
     if (!khcs_unorm) return 0;
     if (!(khcs_cb.cast_view[2][3] > 0.0f)) return 2;   // saturate(<= 0) = 0: shade is 1 everywhere.
-    if (khcs_cb.sun_meta[0] < 0.5f) return 0;         // The slab path: not bounded here.
+    if (khcs_cb.sun_meta[0] < 0.5f) return 0;         // No map (every fire fills one; KH_EA_SLAB_DEAD): whole.
     const double khcs_R = khcs_cb.mir_meta[3];
     if (!(khcs_R >= 0.5)) return 0;                    // No range fade: nothing bounds the reach.
     const double khcs_W = khcs_cb.cast_view[1][2], khcs_H = khcs_cb.cast_view[1][3];

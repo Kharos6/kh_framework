@@ -153,8 +153,9 @@ inline bool kh_mesh_alive(int id) {
 inline int kh_mesh_append(MeshDef&& def) {
     MeshStore& s = mesh_store();
     std::lock_guard<std::mutex> g(s.append_mx);
-    if (s.appended >= KH_MESH_ROOT * KH_MESH_BLOCK) return -1;   // Structurally unreachable in
-                                                                 // Practice.
+    // Full: ids are never reused (KH_MESH_FREE), so a script that builds a new spec every frame reaches this
+    // (mesh_generate.hpp's header); the callers report "mesh registry full".
+    if (s.appended >= KH_MESH_ROOT * KH_MESH_BLOCK) return -1;
     s.slot(s.appended) = new MeshDef(std::move(def));   // Lives until kh_mesh_release (KH_MESH_FREE).
     return static_cast<int>(s.appended++);
 }
@@ -175,10 +176,10 @@ inline MeshDef* kh_mesh_tombstone(int id) {
     return khmt_d;
 }
 
-// Only where no draw can index the new id before ensure_mesh_vbs lands: kh_fbx_register under a park and
-// kh_mesh_publish_land (flush_locked's housekeeping, and the injection ahead of its scene sync - KH_MESH_GEN_PUB), each
-// followed by ensure_mesh_vbs on its thread; and kh_mesh_release_session, under the park, which then releases every
-// non-builtin mesh, the one it published included.
+// Only where no draw can index the new id before ensure_mesh_vbs lands: kh_mesh_publish_land (flush_locked's
+// housekeeping, and the injection ahead of its scene sync - KH_MESH_GEN_PUB), followed by ensure_mesh_vbs on its
+// thread; and kh_mesh_release_session, under the park, which then releases every non-builtin mesh, the one it
+// published included.
 inline uint32_t kh_mesh_publish() {
     MeshStore& s = mesh_store();
     std::lock_guard<std::mutex> g(s.append_mx);
@@ -238,9 +239,9 @@ inline const MeshDef* kh_mesh_def_staged(int id) {
     return s.root[khms_id >> KH_MESH_BLOCK_SHIFT][khms_id & (KH_MESH_BLOCK - 1u)];
 }
 
-// Called from both mesh paths' ensure_resources, kh_mesh_publish_land (the flush's and the injection's publish),
-// kh_white_draw and kh_fbx_register. No lock: every caller holds the park (render thread stalled) or is the render
-// thread inside an engine call; they never overlap.
+// Called from both mesh paths' ensure_resources, kh_mesh_publish_land (the flush's and the injection's publish) and
+// kh_white_draw. No lock: every caller holds the park (render thread stalled) or is the render thread inside an engine
+// call; they never overlap.
 inline std::string ensure_mesh_vbs(ID3D11Device* dev) {
     const uint32_t khmv_n = mesh_count();
     if (g_res.mesh_ib.size() > g_res.mesh_vb.size()) g_res.mesh_ib.resize(g_res.mesh_vb.size());

@@ -126,11 +126,6 @@ inline void kh_cam_of(const float khco_v[4][4], float khco_out[3]) {
     }
 }
 
-inline void kh_cam_of_site(const float khco_v[4][4], float khco_out[3],
-                           int khco_site) {
-    kh_cam_of(khco_v, khco_out);
-}
-
 // KH_CAM_HONEST: a view's inverse rotation laid out for KhCastWorld's row dots - castMat[j][c] = cofactor[j][c] / det,
 // the freeze's own layout (g_fire_cast_inv) - in double. False (the caller keeps the transpose) for a rotation whose
 // determinant is 0.1 or more off 1, the freeze's own refusal.

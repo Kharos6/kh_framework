@@ -44,10 +44,7 @@ inline void band_capture(ID3D11DeviceContext* ctx, const float* cb, uint32_t off
     const float* sm = cb + off;
     const float* border = cb + off + 16;
 
-    if (!(border[1] > border[0]) || border[0] < 0.0f || border[1] > 4000.0f) {
-        memcpy(g_ls.band_last_reject, border, sizeof(g_ls.band_last_reject));
-        return;
-    }
+    if (!(border[1] > border[0]) || border[0] < 0.0f || border[1] > 4000.0f) return;
     // Slot: match an existing band by near edge, else take an invalid one, else replace the farthest band when this one
     // is nearer (none otherwise).
     int slot = -1;
@@ -76,8 +73,6 @@ inline void band_capture(ID3D11DeviceContext* ctx, const float* cb, uint32_t off
     {
         auto& b = g_ls.band[slot];
         const float now = effect_time_seconds();
-        // View source: the bridge PV.
-        if (!g_ro.cycle_pv_valid && !g_ls.frame_view_valid) {  return; }
         // KH_SUN_RAW: the raw cascade axis of every capture, ahead of the seal - the light direction the engine shadows
         // this frame with. Folded through the fresh frame view when live, the bridge PV otherwise.
         {
@@ -113,10 +108,8 @@ inline void band_capture(ID3D11DeviceContext* ctx, const float* cb, uint32_t off
             const bool khbx_fv = g_ls.frame_view_valid && g_ls.frame_view_time >= 0.0f &&
                                  now - g_ls.frame_view_time < 0.05f;
 
-            if (!(khbx_fv || g_ro.cycle_pv_valid)) {
-                khbx_foreign = true;
-// Pristine: no view source at all.
-            } else if (!khbx_fv && !g_ls.view_src_valid && b.last_time > 0.0f) {
+            // The bridge PV is always there (the entry gate), so the fold below always has a view.
+            if (!khbx_fv && !g_ls.view_src_valid && b.last_time > 0.0f) {
                 khbx_foreign = true;
             } else {
                 float khbx_w[3];
@@ -305,7 +298,7 @@ inline void band_capture(ID3D11DeviceContext* ctx, const float* cb, uint32_t off
 
         const bool fv = g_ls.frame_view_valid && g_ls.frame_view_time >= 0.0f &&
                         now - g_ls.frame_view_time < 0.05f;
-        const bool khsv_nat = !fv || kh_band_view_native(g_ls.frame_view, true);
+        const bool khsv_nat = !fv || kh_band_view_native(g_ls.frame_view);
         // A seal born on it still goes out pending (pending_view below), and the frame view's completion loop
         // (shadow_view_scan) completes it or drops it, as it does every seal.
         for (int c = 0; c < 3; ++c) {
@@ -481,6 +474,8 @@ inline void resolve_pair_capture(ID3D11DeviceContext* ctx) {
                                         D3D11_TEXTURE2D_DESC dd2 = {};
                                         dt->GetDesc(&dd2);
                                         const int df = static_cast<int>(dd2.Format);
+                                        // Single-channel views only (R32 / R24 / R16_FLOAT): the cast-depth reads
+                                        // take .x alone (static.hlsl KhCastZPick) - a two-plane format needs it too.
                                         depth_ok = dd2.Width == static_cast<UINT>(g_mask.cast_dims[0]) &&
                                                    (df == 39 || df == 40 || df == 41 || df == 46 || df == 54);
                                         dt->Release();
@@ -555,11 +550,6 @@ inline void mask_classify_rt(UINT n, ID3D11RenderTargetView* const* rtvs) {
     }
 
     res->Release();
-    for (uint32_t khmc_i = 0; khmc_i < g_rt0_desc_n; ++khmc_i) {
-        if (g_rt0_desc[khmc_i].res == static_cast<void*>(res)) {
-            break;
-        }
-    }
     if (khcr_fmt == 0) return;
     g_mask.rt_fmt_ok =
         (khcr_fmt == static_cast<uint32_t>(DXGI_FORMAT_R8_UNORM) ||
@@ -570,12 +560,5 @@ inline void mask_classify_rt(UINT n, ID3D11RenderTargetView* const* rtvs) {
     g_mask.rt_w = khcr_w;
     g_mask.rt_is_resolve = khcr_w >= kh_mask_min_w() &&   // KH_MASK_REL_W.
                            g_mask.rt_fmt_ok;
-    if (g_mask.rt_is_resolve) {
-        for (uint32_t khmt_i = 0; khmt_i < g_rt0_desc_n; ++khmt_i) {
-            if (g_rt0_desc[khmt_i].res == static_cast<void*>(res)) {
-                break;
-            }
-        }
-    }
 }
 }

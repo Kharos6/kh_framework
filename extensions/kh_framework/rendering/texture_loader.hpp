@@ -45,19 +45,21 @@ inline void kh_texldr_worker() {
         const char* khtl_fail = nullptr;
         try {
             if (kh_ends_with_ci(khtl_d.path, ".dds")) {   // Same read + guard as the sync path.
-                // PBO_PATH: kh_asset_read.
-                if (!kh_asset_read(khtl_d.path, khtl_d.dds, 256ull * 1024u * 1024u)) khtl_d.err = "read failed";
-                else if (!kh_dds_unblock(khtl_d.dds, khtl_d.err)) {   // KH_DDS_BLOCK4: a refusal drops the bytes.
-                    std::vector<uint8_t>().swap(khtl_d.dds);
-                } else if (kh_dds_mip_fill(khtl_d.dds, khtl_d.srgb, khtl_d.blob)) {   // KH_DDS_MIP_FILL: the blob.
-                    std::vector<uint8_t>().swap(khtl_d.dds);
+                // PBO_PATH: kh_asset_read. KH_EA_TEX_READ_WHY: a failed read leaves no bytes and says why in err.
+                if (kh_asset_read(khtl_d.path, khtl_d.dds, 256ull * 1024u * 1024u, &khtl_d.err)) {
+                    if (!kh_dds_unblock(khtl_d.dds, khtl_d.err)) {   // KH_DDS_BLOCK4: a refusal drops the bytes.
+                        std::vector<uint8_t>().swap(khtl_d.dds);
+                    } else if (kh_dds_mip_fill(khtl_d.dds, khtl_d.srgb, khtl_d.blob)) {   // KH_DDS_MIP_FILL: the blob.
+                        std::vector<uint8_t>().swap(khtl_d.dds);
+                    }
                 }
             } else if (kh_paa_ext(khtl_d.path)) {   // KH_PAA: the sync path's twin - .dds bytes for the pump.
                 std::vector<uint8_t> khtl_paa;
-                if (!kh_asset_read(khtl_d.path, khtl_paa, 256ull * 1024u * 1024u)) khtl_d.err = "read failed";
-                else if (!kh_paa_to_dds(khtl_paa, khtl_d.dds, khtl_d.err)) std::vector<uint8_t>().swap(khtl_d.dds);
-                else if (kh_dds_mip_fill(khtl_d.dds, khtl_d.srgb, khtl_d.blob)) {   // KH_DDS_MIP_FILL.
-                    std::vector<uint8_t>().swap(khtl_d.dds);
+                if (kh_asset_read(khtl_d.path, khtl_paa, 256ull * 1024u * 1024u, &khtl_d.err)) {   // As above.
+                    if (!kh_paa_to_dds(khtl_paa, khtl_d.dds, khtl_d.err)) std::vector<uint8_t>().swap(khtl_d.dds);
+                    else if (kh_dds_mip_fill(khtl_d.dds, khtl_d.srgb, khtl_d.blob)) {   // KH_DDS_MIP_FILL.
+                        std::vector<uint8_t>().swap(khtl_d.dds);
+                    }
                 }
             } else {
                 if (!kh_tex_blob_load(khtl_d.path, khtl_d.srgb, khtl_d.blob, khtl_d.from_cache, khtl_d.err,

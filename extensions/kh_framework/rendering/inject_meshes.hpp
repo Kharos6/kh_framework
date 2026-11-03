@@ -84,7 +84,7 @@ inline void inject_composited_meshes(ID3D11DeviceContext* ctx) {
         }
         kh_uvs_step(ctx);   // KH_USER_VS: a no-op for what the cast fire's step evaluated, but for a source this step just re-posed.
         if (g_sun_restep_cycle == g_topo_cycles) g_sun_map_rendered_frame = false;   // KH_SUN_RESTEP: rebuild from this step's poses.
-        // KH_MESH_GEN_PUB: a pending publish (a generated mesh, an import that could not park) lands here, before the
+        // KH_MESH_GEN_PUB: a pending publish (a generated mesh, an import - KH_EA_FBX_NO_PARK) lands here, before the
         // sync that would hold the objects naming it (KH_SCENE_UNPUB) - so a new or rebuilt mesh draws this cycle,
         // with the pose this step just placed. The render thread, between our draws: the flush's own window (its
         // housekeeping lands the same way), and ensure_resources below tops up the same buffers here on every
@@ -488,9 +488,7 @@ inline void inject_composited_meshes(ID3D11DeviceContext* ctx) {
                     g_ls.pub_ok_since_lock = false;
                     g_ls.view_locks++;
                     g_lock_churn_ms_v = steady_now_ms();   // lock-settle: fresh lock, hold the cast a beat.
-
-                                        g_ls.wipe_deferred = true;
-
+                    g_ls.wipe_deferred = true;
                 }
             }
         }
@@ -527,11 +525,8 @@ inline void inject_composited_meshes(ID3D11DeviceContext* ctx) {
     }
     float cam[3];
 
-    if (kh_view_camera_exact(pv.view, cam)) {
-        // The camera through the honest inverse of the view the pass draws with, never the transpose.
-    } else {
-        extract_camera_pos(pv.view, cam);
-    }
+    // The camera through the honest inverse of the view the pass draws with, never the transpose.
+    kh_cam_of(pv.view, cam);
     const bool khcs_engcam = kh_engcam_consume(pv.view, cam);
     g_ls.cam[0] = cam[0];
     g_ls.cam[1] = cam[1];
@@ -996,9 +991,6 @@ inline void inject_composited_meshes(ID3D11DeviceContext* ctx) {
                 khr_cbf.fog_uw_grad[0] = g_sky_probe.nb[68];
                 khr_cbf.fog_uw_grad[1] = g_sky_probe.nb[69];
                 khr_cbf.fog_uw_grad[2] = g_sky_probe.nb[70];
-                g_fog_uw_col[0] = khr_cbf.fog_uw[0];
-                g_fog_uw_col[1] = khr_cbf.fog_uw[1];
-                g_fog_uw_col[2] = khr_cbf.fog_uw[2];
             }
 
             // Camera altitude (engine Y-up), unclamped - see khr_fog_cam_y.
@@ -1653,11 +1645,7 @@ inline void inject_composited_meshes(ID3D11DeviceContext* ctx) {
         ctx->OMSetDepthStencilState(g_res.dss_test_write, 0);   // Plain write: the eraser is behind us.
     }
 
-    if (n_saved_vp > 0) ctx->RSSetViewports(n_saved_vp, saved_vp);
-
-    {
-        backup.restore(ctx);
-    }
+    backup.restore(ctx);   // The engine's viewports too (saved_vp is the same capture, taken after it).
     if (khr_anomalous) {
         // Not an injection for the hybrid guarantee's serial (the next flush must judge the next frame on its own
         // injection, not this frame's rescue) and not a cold-start metric.

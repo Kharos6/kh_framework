@@ -3,7 +3,6 @@
 // The feature half (rendering_integration_features.hpp): the material textures: the texture pages, DDS loading, PAA
 // decoding and the texture resolve. Never include it on its own.
 namespace RenderIntegration {
-inline void kh_tex_cache_release();   // material-texture cache (defined with the loader).
 // KH_STB_DEAD_TAIL: the png / jpg / jpeg / tga / bmp route of the synchronous load (the loader cannot start) - the disk
 // cache, else the decode and the CPU mip chain.
 inline ID3D11ShaderResourceView* kh_tex_load_cached(ID3D11Device* dev, const std::string& path,
@@ -14,12 +13,12 @@ inline ID3D11ShaderResourceView* kh_dds_create(ID3D11Device* dev, const std::vec
 // Defined with the loader worker in rendering/texture_loader.hpp (it needs the blob and disk-cache helpers).
 inline bool kh_texldr_queue(const std::string& khtl_key, const std::string& khtl_path, bool khtl_srgb, bool khtl_force);
 
-// Resolution happens only inside the serialized graphics windows (the injection, or a lock-held flush), so the map
-// needs no lock; entries name page layers, and the pages hold the device objects - released by
-// kh_tex_cache_release_device at a device reset (a pending entry stays: KH_TEX_RESET_KEEP_PENDING) and by
-// kh_tex_cache_release at mission end (reloads come from disk). A page is a Texture2DArray of every loaded texture
-// of one (width, height, mips, format) class; a map resolves to (page, layer). Pages grow by doubling and die when
-// their last layer is freed; page ids are stable indices into g_tex_pages.
+// Resolution happens only inside the serialized graphics windows (the render thread's injection, scene flush and UI
+// flush, or a flush under the park - KH_TEX_ASYNC), so the map needs no lock; entries name page layers, and the
+// pages hold the device objects - released by kh_tex_cache_release_device at a device reset (a pending entry stays:
+// KH_TEX_RESET_KEEP_PENDING) and by kh_tex_cache_release at mission end (reloads come from disk). A page is a
+// Texture2DArray of every loaded texture of one (width, height, mips, format) class; a map resolves to (page, layer).
+// Pages grow by doubling and die when their last layer is freed; page ids are stable indices into g_tex_pages.
 struct KhTexPage {
     ID3D11Texture2D* tex = nullptr;
     ID3D11ShaderResourceView* srv = nullptr;
@@ -196,7 +195,7 @@ inline ID3D11ShaderResourceView* kh_load_dds(ID3D11Device* dev, const std::vecto
     const uint32_t height = rd32(12), width = rd32(16);
     uint32_t mips = rd32(28);
     const uint32_t pf_flags = rd32(80), fourcc = rd32(84);
-    const uint32_t bitcount = rd32(88), rmask = rd32(92), amask = rd32(104);
+    const uint32_t bitcount = rd32(88), rmask = rd32(92);
     if (width == 0 || height == 0 || width > 16384 || height > 16384) { err = "bad dimensions"; return nullptr; }
     if (mips == 0) mips = 1;
     if (mips > 16) mips = 16;
@@ -231,13 +230,11 @@ inline ID3D11ShaderResourceView* kh_load_dds(ID3D11Device* dev, const std::vecto
         else if (fourcc == DXT5) { fmt = srgb ? DXGI_FORMAT_BC3_UNORM_SRGB : DXGI_FORMAT_BC3_UNORM; bc = true; }
         else { err = "unsupported FourCC"; return nullptr; }
     } else if ((pf_flags & 0x40u) && bitcount == 32) {
-        const bool has_a = amask != 0;
         if      (rmask == 0x00ff0000u) fmt = srgb ? DXGI_FORMAT_B8G8R8A8_UNORM_SRGB : DXGI_FORMAT_B8G8R8A8_UNORM;
         else if (rmask == 0x000000ffu) fmt = srgb ? DXGI_FORMAT_R8G8B8A8_UNORM_SRGB : DXGI_FORMAT_R8G8B8A8_UNORM;
         else { err = "unsupported 32-bit masks"; return nullptr; }
-        // An x8 variant (no alpha mask) is still created with an A8 format, so its alpha is the byte the writer left
-        // there - 255 from most writers, but a 0 reads transparent to a cutout or blend material.
-        (void)has_a;
+        // An x8 variant (no alpha mask) is still created with an A8 format: its padding byte was set to 255 by the
+        // routes' pre-pass (KH_EA_DDS_X8, kh_dds_unblock), so it reads opaque, as the format defines.
     } else {
         err = "unsupported pixel format (BC1/2/3/7 or 32-bit RGBA expected)";
         return nullptr;
@@ -770,14 +767,47 @@ inline bool kh_paa_to_dds(const std::vector<uint8_t>& khpa_f, std::vector<uint8_
     }
 }
 
+// KH_EA_DDS_X8 - a 32-bit file with no alpha mask (X8R8G8B8 / X8B8G8R8) has no alpha: its fourth byte is padding, and
+// the DDS format reads such a file opaque. kh_load_dds and kh_dds_mip_fill create every 32-bit file with an A8 format,
+// so that byte is set to 255 here, in every level kh_load_dds would take (its 32-bit rule), before either reads the
+// bytes: both .dds routes (the loader worker, the synchronous fallback) pass through kh_dds_unblock first. A .paa's
+// bytes always carry an alpha mask; any other file is left as it is. No allocation.
+inline void kh_dds_x8_opaque(std::vector<uint8_t>& khdx_f) {
+    if (khdx_f.size() < 128) return;
+    auto khdx_rd = [&](size_t khdx_o) {
+        uint32_t khdx_v;
+        memcpy(&khdx_v, khdx_f.data() + khdx_o, 4);
+        return khdx_v;
+    };
+    if (khdx_rd(0) != 0x20534444u) return;
+    const uint32_t khdx_h = khdx_rd(12), khdx_w = khdx_rd(16), khdx_pf = khdx_rd(80), khdx_rm = khdx_rd(92);
+    if (khdx_w == 0 || khdx_h == 0 || khdx_w > 16384 || khdx_h > 16384) return;
+    if ((khdx_pf & 0x4u) || !(khdx_pf & 0x40u) || khdx_rd(88) != 32u || khdx_rd(104) != 0u) return;
+    if (khdx_rm != 0x00ff0000u && khdx_rm != 0x000000ffu) return;
+    uint32_t khdx_mips = khdx_rd(28);   // KH_DDS_MIPS: kh_load_dds's count, a short chain where the file ends.
+    if (khdx_mips == 0) khdx_mips = 1;
+    uint32_t khdx_chain = 1;
+    for (uint32_t khdx_s = khdx_w > khdx_h ? khdx_w : khdx_h; khdx_s > 1; khdx_s >>= 1) ++khdx_chain;
+    if (khdx_mips > khdx_chain) khdx_mips = khdx_chain;
+    size_t khdx_end = 128;
+    for (uint32_t khdx_m = 0; khdx_m < khdx_mips; ++khdx_m) {
+        const size_t khdx_mw = khdx_w >> khdx_m ? khdx_w >> khdx_m : 1u;
+        const size_t khdx_mh = khdx_h >> khdx_m ? khdx_h >> khdx_m : 1u;
+        const size_t khdx_n = khdx_mw * 4u * khdx_mh;
+        if (khdx_end + khdx_n > khdx_f.size()) break;
+        khdx_end += khdx_n;
+    }
+    for (size_t khdx_i = 128u + 3u; khdx_i < khdx_end; khdx_i += 4u) khdx_f[khdx_i] = 0xFFu;
+}
 // KH_DDS_BLOCK4: Direct3D creates a block-compressed texture only when its full-size level is a multiple of 4 pixels on
 // a side. A BC1 / BC2 / BC3 .dds that is not (a 2 x 2, a 6 x 10) is rewritten here, before kh_load_dds (on the loader
 // worker, or in the synchronous fallback), as the 32-bit BGRA .dds kh_paa_to_dds makes of such a .paa: every level the
 // file holds, decoded by kh_paa_bc_block (Direct3D's decode). Such a BC7 file, which has no decoder here, is refused
 // with the reason (CreateTexture2D would give E_INVALIDARG). Every other file is left as it is - one whose header or
-// level 0 kh_load_dds refuses too, so its report stands. False: khdu_err says why, khdu_f unchanged. Never throws: a
-// failed allocation is a failed file.
+// level 0 kh_load_dds refuses too, so its report stands (an X8 file's padding byte aside: kh_dds_x8_opaque, first).
+// False: khdu_err says why, khdu_f unchanged. Never throws: a failed allocation is a failed file.
 inline bool kh_dds_unblock(std::vector<uint8_t>& khdu_f, std::string& khdu_err) {
+    kh_dds_x8_opaque(khdu_f);   // KH_EA_DDS_X8.
     try {
         auto khdu_rd = [&](size_t khdu_o) {
             uint32_t khdu_v;
@@ -915,7 +945,7 @@ inline bool kh_tex_map_srgb(const KhMaterial& khtm_m, int khtm_slot) {
 // new to the session (a device reset re-resolves every failed texture; the same path can be asked as
 // sRGB and as linear): the count is of distinct failures, as g_chain_warned's is of distinct keys.
 inline void kh_tex_report(const std::string& khtw_path, const std::string& khtw_err) {
-    const std::string khtw_msg = "KH texture '" + khtw_path + "': " + khtw_err;
+    const std::string khtw_msg = "KH RenderIntegration: texture '" + khtw_path + "': " + khtw_err;
     {
         std::lock_guard<std::mutex> khtw_g(g_err_once_mutex);
         if (std::find(g_err_once.begin(), g_err_once.end(), khtw_msg) != g_err_once.end()) return;
@@ -924,8 +954,9 @@ inline void kh_tex_report(const std::string& khtw_path, const std::string& khtw_
     if (khtw_n < 64u) {
         report_error_once_safe(khtw_msg);
     } else if (khtw_n == 64u) {
-        report_error_once_safe("KH texture: more than 64 textures failed this session; later ones are not "
-                               "reported");
+        // KH_EA_ERR_CLASS: a notice, not an error - logged, never thrown.
+        kh_log_once_safe("KH RenderIntegration: texture: more than 64 textures failed this session; later ones are "
+                         "not reported");
     }
 }
 
@@ -958,12 +989,16 @@ inline KhTexRef kh_tex_resolve(ID3D11Device* dev, ID3D11DeviceContext* ctx,
 
     if (kh_ends_with_ci(path, ".dds")) {
         std::vector<uint8_t> bytes;
-        if (!kh_asset_read(path, bytes, 256ull * 1024u * 1024u)) err = "read failed";   // PBO_PATH.
-        else if (kh_dds_unblock(bytes, err)) khtr_single = kh_dds_create(dev, bytes, srgb, err);   // KH_DDS_MIP_FILL.
+        // PBO_PATH. KH_EA_TEX_READ_WHY: a failed read says why in err (the loader worker's twin).
+        if (kh_asset_read(path, bytes, 256ull * 1024u * 1024u, &err) && kh_dds_unblock(bytes, err)) {
+            khtr_single = kh_dds_create(dev, bytes, srgb, err);   // KH_DDS_MIP_FILL.
+        }
     } else if (kh_paa_ext(path)) {   // KH_PAA: made into .dds bytes, then the .dds route.
         std::vector<uint8_t> khtr_paa, khtr_dds;
-        if (!kh_asset_read(path, khtr_paa, 256ull * 1024u * 1024u)) err = "read failed";   // PBO_PATH.
-        else if (kh_paa_to_dds(khtr_paa, khtr_dds, err)) khtr_single = kh_dds_create(dev, khtr_dds, srgb, err);
+        if (kh_asset_read(path, khtr_paa, 256ull * 1024u * 1024u, &err) &&   // As above.
+            kh_paa_to_dds(khtr_paa, khtr_dds, err)) {
+            khtr_single = kh_dds_create(dev, khtr_dds, srgb, err);
+        }
     } else {
         khtr_single = kh_tex_load_cached(dev, path, srgb, err);   // KH_STB_DEAD_TAIL.
     }

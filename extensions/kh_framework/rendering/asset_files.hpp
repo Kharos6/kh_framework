@@ -117,13 +117,13 @@ private:
 // resolved asset goes through here: the .fbx import, the texture loads (sync, the loader worker, the .dds and .paa
 // routes) and kh_user_shader_source (.hlsl and .cube). False when it cannot be read, is empty, or holds khar_max
 // bytes or more; khar_err says which ("cannot open file", "empty file", "file too large", "read failed", or the PBO
-// reader's reason).
+// reader's reason - "read failed" when it gave none).
 inline bool kh_asset_read(const std::string& khar_path, std::vector<uint8_t>& khar_out, uint64_t khar_max,
                           std::string* khar_err = nullptr) {
     khar_out.clear();
     auto khar_fail = [&](const std::string& khar_why) {
         khar_out.clear();
-        if (khar_err) *khar_err = khar_why;
+        if (khar_err) *khar_err = khar_why.empty() ? std::string("read failed") : khar_why;   // Never no reason.
         return false;
     };
 

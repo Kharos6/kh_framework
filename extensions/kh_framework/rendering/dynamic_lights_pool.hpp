@@ -3,7 +3,6 @@
 // The injection half (rendering_integration_injection.hpp): the dynamic-light harvest, part 2: the structural tests,
 // the windows, origin derivation, the anchors and the pool. Never include it on its own.
 namespace RenderIntegration {
-inline uint64_t kh_dl_win_origin_seq(const void* khp_buf);   // KH_DL_PRES_FRESH.
 
 // Structural affine test shared by the derivation. Form codes: 0 = 4x4 row-vector ((0,0,0,1) column checked); 1 = 4x4
 // transposed / HLSL column-major (lane checked); 2 = 4x3 in 3 registers, rows [a, b, c, t] (the shadow_mats
@@ -83,7 +82,7 @@ inline bool dl_rot_identity(const float (&khd_v)[4][4]) {
 
 // The frame-structure proof shared by every route: bare triples must be near-exact - a random constant must not fake a
 // camera.
-inline bool dl_origin_validate(float khd_ex, float khd_ey, float khd_ez, bool khd_pair,
+inline bool dl_origin_validate(float khd_ex, float khd_ey, float khd_ez,
                                float khd_ytol, float khd_gtol, float khd_q,
                                float& khd_ox, float& khd_oz, float& khd_res) {
     if (!(khd_q > 0.0f)) return false;   // KH_DL_ORIGIN_GRID: no grid known yet.
@@ -348,12 +347,10 @@ inline bool dynlights_derive_origin(const uint8_t* khd_win, const DlWindowMeta& 
         // lights near it and a wrong one displaces every light. Proximity is the primary key, residual the tiebreak,
         // and the margin keeps noise from flapping the choice.
         bool khd_take = false;
-        const bool khd_nrank = true;
-        const float khd_nr_new = khd_nrank ? khd_near_of(ox, oz) : -1.0f;
-        const float khd_nr_old = (khd_nrank && khd_have_nz)
-                               ? khd_near_of(khd_b_ox, khd_b_oz) : -1.0f;
+        const float khd_nr_new = khd_near_of(ox, oz);
+        const float khd_nr_old = khd_have_nz ? khd_near_of(khd_b_ox, khd_b_oz) : -1.0f;
         const bool khd_near_decides =
-            khd_nrank && khd_have_nz && khd_nr_new >= 0.0f && khd_nr_old >= 0.0f &&
+            khd_have_nz && khd_nr_new >= 0.0f && khd_nr_old >= 0.0f &&
             fabsf(khd_nr_new - khd_nr_old) > KH_DL_NEAR_MARGIN_M;
 
         if (!khd_have_nz) {
@@ -424,7 +421,7 @@ inline bool dynlights_derive_origin(const uint8_t* khd_win, const DlWindowMeta& 
                 const float* khd_t = khd_block(khd_h_slot) + khd_h_off;
 
                 if (dl_finite(khd_t[0]) && dl_finite(khd_t[1]) && dl_finite(khd_t[2]) && dl_origin_validate(khd_bcam[0] - khd_t[0], khd_bcam[1] - khd_t[1],
-                                       khd_bcam[2] - khd_t[2], true, 0.5f, 0.25f, kh_dl_grid(),
+                                       khd_bcam[2] - khd_t[2], 0.5f, 0.25f, kh_dl_grid(),
                                        khd_tox, khd_toz, khd_tres) && khd_tres <= KH_DL_ORIGIN_RES_MAX && khd_range_ok(khd_tox, khd_toz) && !(khd_tox == 0.0f && khd_toz == 0.0f)) {
                     khd_hit = true;
                 }
@@ -440,7 +437,7 @@ inline bool dynlights_derive_origin(const uint8_t* khd_win, const DlWindowMeta& 
 
                 if (dl_finite(khd_t[0]) && dl_finite(khd_t[1]) && dl_finite(khd_t[2]) && dl_cand_structure(khd_block(khd_h_wslot) + khd_h_woff,
                                       khd_h_wform, khd_vw) && dl_rot_identity(khd_vw) && dl_origin_validate(khd_vw[3][0] - khd_t[0], khd_vw[3][1] - khd_t[1],
-                                       khd_vw[3][2] - khd_t[2], true, 0.5f, 0.25f, kh_dl_grid(),
+                                       khd_vw[3][2] - khd_t[2], 0.5f, 0.25f, kh_dl_grid(),
                                        khd_tox, khd_toz, khd_tres) && khd_tres <= KH_DL_ORIGIN_RES_MAX && khd_range_ok(khd_tox, khd_toz) && !(khd_tox == 0.0f && khd_toz == 0.0f)) {
                     khd_hit = true;
                 }
@@ -465,7 +462,7 @@ inline bool dynlights_derive_origin(const uint8_t* khd_win, const DlWindowMeta& 
                     if (dl_finite(khd_cam[0]) && dl_finite(khd_cam[1]) && dl_finite(khd_cam[2]) && dl_origin_validate(khd_bcam[0] - khd_cam[0] - khd_vw[3][0],
                                            khd_bcam[1] - khd_cam[1] - khd_vw[3][1],
                                            khd_bcam[2] - khd_cam[2] - khd_vw[3][2],
-                                           true, KH_DL_DERIVE_Y_TOL, KH_DL_DERIVE_GRID_TOL, kh_dl_grid_base(),
+                                           KH_DL_DERIVE_Y_TOL, KH_DL_DERIVE_GRID_TOL, kh_dl_grid_base(),
                                            khd_tox, khd_toz, khd_tres) && khd_tres <= KH_DL_ORIGIN_RES_MAX && khd_range_ok(khd_tox, khd_toz) && !(khd_tox == 0.0f && khd_toz == 0.0f)) {
                         khd_hit = true;
                     }
@@ -540,7 +537,7 @@ inline bool dynlights_derive_origin(const uint8_t* khd_win, const DlWindowMeta& 
                     }
 
                     if (dl_origin_validate(khd_bcam[0] - khd_cam[0], khd_bcam[1] - khd_cam[1],
-                                           khd_bcam[2] - khd_cam[2], false,
+                                           khd_bcam[2] - khd_cam[2],
                                            KH_DL_DERIVE_Y_TOL, KH_DL_DERIVE_GRID_TOL, kh_dl_grid_base(),
                                            khd_tox, khd_toz, khd_tres)) {
                         khd_offer(khd_tox, khd_toz, khd_tres, static_cast<uint8_t>(0),
@@ -580,7 +577,7 @@ inline bool dynlights_derive_origin(const uint8_t* khd_win, const DlWindowMeta& 
             if (dl_origin_validate(khd_bcam[0] - khd_mv[a].cam[0] - khd_wm[b].t[0],
                                    khd_bcam[1] - khd_mv[a].cam[1] - khd_wm[b].t[1],
                                    khd_bcam[2] - khd_mv[a].cam[2] - khd_wm[b].t[2],
-                                   true, KH_DL_DERIVE_Y_TOL, KH_DL_DERIVE_GRID_TOL, kh_dl_grid_base(),
+                                   KH_DL_DERIVE_Y_TOL, KH_DL_DERIVE_GRID_TOL, kh_dl_grid_base(),
                                    khd_tox, khd_toz, khd_tres)) {
                 khd_offer(khd_tox, khd_toz, khd_tres, 1,
                           khd_mv[a].slot, khd_mv[a].off, khd_mv[a].form,
@@ -603,7 +600,7 @@ inline bool dynlights_derive_origin(const uint8_t* khd_win, const DlWindowMeta& 
 
             // t = camera in the light frame.
             if (dl_origin_validate(khd_bcam[0] - khd_t[0], khd_bcam[1] - khd_t[1],
-                                   khd_bcam[2] - khd_t[2], true, 0.5f, 0.25f, kh_dl_grid(),
+                                   khd_bcam[2] - khd_t[2], 0.5f, 0.25f, kh_dl_grid(),
                                    khd_tox, khd_toz, khd_tres)) {
                 khd_offer(khd_tox, khd_toz, khd_tres, 2,
                           static_cast<int32_t>(khd_s), khd_off, 0, -1, 0, 0);
@@ -612,7 +609,7 @@ inline bool dynlights_derive_origin(const uint8_t* khd_win, const DlWindowMeta& 
             // t = object position in the light frame, against each true-world W translation.
             for (uint32_t b = 0; b < khd_wm_n; ++b) {
                 if (dl_origin_validate(khd_wm[b].t[0] - khd_t[0], khd_wm[b].t[1] - khd_t[1],
-                                       khd_wm[b].t[2] - khd_t[2], true, 0.5f, 0.25f, kh_dl_grid(),
+                                       khd_wm[b].t[2] - khd_t[2], 0.5f, 0.25f, kh_dl_grid(),
                                        khd_tox, khd_toz, khd_tres)) {
                     khd_offer(khd_tox, khd_toz, khd_tres, 3,
                               static_cast<int32_t>(khd_s), khd_off, 0,
@@ -623,16 +620,6 @@ inline bool dynlights_derive_origin(const uint8_t* khd_win, const DlWindowMeta& 
     }
 
     if (khd_have_nz) {
-        {   // How near the winning origin puts this window's closest light to the capture camera.
-            float khd_nr = -1.0f;
-
-            for (uint32_t i = 0; i < khd_rn; ++i) {
-                const float khd_ex = khd_b_ox + khd_rxz[i][0] - khd_bcam[0];
-                const float khd_ez = khd_b_oz + khd_rxz[i][2] - khd_bcam[2];
-                const float khd_ed = sqrtf(khd_ex * khd_ex + khd_ez * khd_ez);
-                if (khd_nr < 0.0f || khd_ed < khd_nr) khd_nr = khd_ed;
-            }
-        }
         khd_ox = khd_b_ox;
         khd_oz = khd_b_oz;
         khd_res = khd_b_res;
@@ -1017,8 +1004,7 @@ inline void dynlights_merge_windows(const uint8_t* khd_base, int khd_side, bool 
 
         if (!khd_derived_ok) {
             // Propagation: vote this window's records against the pool.
-            if (dynlights_pool_vote(khd_l, khd_total, khd_o_x, khd_o_z)) {
-            } else {
+            if (!dynlights_pool_vote(khd_l, khd_total, khd_o_x, khd_o_z)) {
                 {   // KH_DL_WINPROV: this window is down, per window.
                     const uint32_t khd_ws = kh_dl_win_slot(khd_m.buf);
                     if (g_dl.win_fail_run[khd_ws] < 0xFFFFFFFFu) g_dl.win_fail_run[khd_ws]++;
@@ -1394,38 +1380,14 @@ inline void dynlights_publish(const uint8_t* khd_p, int khd_s) {
         return;
     }
 
-    // Publish (render thread).
+    // Publish (render thread): what getRenderStats reports (dlValid, dlViewValid, the counts, the capture camera and
+    // the light list).
     g_dl.point_n = khd_pc;
     g_dl.spot_n = khd_sc;
-    memcpy(g_dl.ctl, khd_ctl, sizeof(g_dl.ctl));
     if (khd_total > 0) memcpy(g_dl.lights, khd_l, static_cast<size_t>(khd_total) * KH_DL_LIGHT_BYTES);
-    memcpy(g_dl.view_cols, g_dl.pending_view[khd_s], sizeof(g_dl.view_cols));
     g_dl.view_valid = g_dl.pending_view_ok[khd_s] != 0;
     memcpy(g_dl.cam, g_dl.pending_cam[khd_s], sizeof(g_dl.cam));
     g_dl.valid = true;
-
-    uint64_t khd_h = CryptoGenerator::FNV1A64_OFFSET;   // FNV-1a over counts (word mixes) + active
-                                                        // records (bytes).
-    khd_h = (khd_h ^ khd_pc) * CryptoGenerator::FNV1A64_PRIME;
-    khd_h = (khd_h ^ khd_sc) * CryptoGenerator::FNV1A64_PRIME;
-    const uint8_t* khd_hb = khd_p + KH_DL_CTL_BYTES;
-    const size_t khd_hn = static_cast<size_t>(khd_total) * KH_DL_LIGHT_BYTES;
-    khd_h = CryptoGenerator::fnv1a64_update(khd_h, khd_hb, khd_hn);
-    if (khd_h != g_dl.hash) {  g_dl.hash = khd_h; }
-
-    DlRingEntry& khd_r = g_dl.ring[g_dl.ring_head++ % KH_DL_RING];
-    khd_r.point_n = khd_pc;
-    khd_r.spot_n = khd_sc;
-    memcpy(khd_r.cam, g_dl.cam, sizeof(khd_r.cam));
-
-    if (khd_total > 0) {
-        khd_r.l0[0] = khd_l[0];  khd_r.l0[1] = khd_l[1];  khd_r.l0[2] = khd_l[2];
-        khd_r.l0[3] = khd_l[8];  khd_r.l0[4] = khd_l[9];  khd_r.l0[5] = khd_l[10];
-        khd_r.l0[6] = khd_l[20];
-        khd_r.l0[7] = khd_l[7];
-    } else {
-        memset(khd_r.l0, 0, sizeof(khd_r.l0));
-    }
 }
 
 // Runs inside an accepted injection on the render thread (never on anomalous/rescue cycles) - or at its trigger when it
@@ -1493,12 +1455,6 @@ inline void dynlights_acquire(ID3D11DeviceContext* ctx, const float view[4][4]) 
         g_dl.slot_bytes11[0] = khd_want11;
 
         if (view) {
-            for (int khd_k = 0; khd_k < 3; ++khd_k) {
-                g_dl.pending_view[0][khd_k * 4 + 0] = view[0][khd_k];
-                g_dl.pending_view[0][khd_k * 4 + 1] = view[1][khd_k];
-                g_dl.pending_view[0][khd_k * 4 + 2] = view[2][khd_k];
-                g_dl.pending_view[0][khd_k * 4 + 3] = 0.0f;
-            }
             kh_cam_of(view, g_dl.pending_cam[0]);
             g_dl.pending_view_ok[0] = 1;
         } else {
@@ -1571,16 +1527,8 @@ inline void dynlights_acquire(ID3D11DeviceContext* ctx, const float view[4][4]) 
     g_dl.slot_bytes11[khd_w] = khd_want11;
     g_dl.inflight[khd_w] = 1;
 
-    // View columns + camera captured with the list: the space decode and the plant comparison must use the frame's own
-    // view.
+    // The camera captured with the list (getRenderStats reports it with the list).
     if (view) {
-        for (int khd_k = 0; khd_k < 3; ++khd_k) {
-            g_dl.pending_view[khd_w][khd_k * 4 + 0] = view[0][khd_k];
-            g_dl.pending_view[khd_w][khd_k * 4 + 1] = view[1][khd_k];
-            g_dl.pending_view[khd_w][khd_k * 4 + 2] = view[2][khd_k];
-            g_dl.pending_view[khd_w][khd_k * 4 + 3] = 0.0f;
-        }
-
         kh_cam_of(view, g_dl.pending_cam[khd_w]);
         g_dl.pending_view_ok[khd_w] = 1;
     } else {
@@ -1591,7 +1539,7 @@ inline void dynlights_acquire(ID3D11DeviceContext* ctx, const float view[4][4]) 
     khd_b11->Release();
 }
 
-// Session reset for the mirror: clears the PODs, the censuses and the ring (device objects are
+// Session reset for the mirror: clears the PODs and the censuses (device objects are
 // release_shadow_device_state's job).
 inline void dynlights_reset_session() {
     g_dl_idle.store(0, std::memory_order_relaxed);   // KH_DL_IDLE.
@@ -1601,20 +1549,12 @@ inline void dynlights_reset_session() {
     memset(g_dl_keep_cycle, 0, sizeof(g_dl_keep_cycle));
     g_dl.valid = false;
     g_dl.point_n = g_dl.spot_n = 0;
-    memset(g_dl.ctl, 0, sizeof(g_dl.ctl));
     g_dl.view_valid = false;
     g_dl.cam[0] = g_dl.cam[1] = g_dl.cam[2] = 0.0f;
-    g_dl.hash = 0;
     g_dl.inflight[0] = g_dl.inflight[1] = 0;
     g_dl.slot_bytes11[0] = g_dl.slot_bytes11[1] = 0;
     g_dl.pending_view_ok[0] = g_dl.pending_view_ok[1] = 0;
 
-    memset(g_dl.ring, 0, sizeof(g_dl.ring));
-    g_dl.ring_head = 0;
-    g_dl_cd_n = 0;
-
-    memset(g_dl_cd_bufs, 0, sizeof(g_dl_cd_bufs));
-    memset(g_dl_cd_first, 0, sizeof(g_dl_cd_first));
     // Arena / pool / origin machinery (device objects stay with release_shadow_device_state).
     g_dl.arena_inflight[0] = g_dl.arena_inflight[1] = 0;
     g_dl.arena_write = 0;

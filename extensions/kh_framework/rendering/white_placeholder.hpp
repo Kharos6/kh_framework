@@ -24,7 +24,8 @@ inline void kh_white_ensure(ID3D11Device* dev) {
     if (!khw_err.empty() || !khw_vsb || !khw_psb) {
         if (khw_vsb) khw_vsb->Release();
         if (khw_psb) khw_psb->Release();
-        report_error_once_safe("KH white preview: " + (khw_err.empty() ? std::string("no blob") : khw_err));
+        report_error_once_safe("KH RenderIntegration: white preview: " +
+                               (khw_err.empty() ? std::string("no blob") : khw_err));
         return;
     }
     // khw_step / khw_hr: the last attempted call and its result, for the one report below.
@@ -93,7 +94,7 @@ inline void kh_white_ensure(ID3D11Device* dev) {
         KH_SAFE_RELEASE(g_res.white_frame_cb);
         KH_SAFE_RELEASE(g_res.rast_white);
         KH_SAFE_RELEASE(g_res.dss_white);
-        report_error_once_safe(std::string("KH white preview: ") + khw_step + " " + hr_str(khw_hr) +
+        report_error_once_safe(std::string("KH RenderIntegration: white preview: ") + khw_step + " " + hr_str(khw_hr) +
                         " (preview stands down)");
         return;
     }
@@ -111,8 +112,16 @@ inline void kh_white_draw(ID3D11Device* dev, ID3D11DeviceContext* ctx) {
     if (g_scene.alive_n == 0) return;
 
     const float khw_now = effect_time_seconds();
+    // KH_EA_WHITE_CAM: the flush meshes' camera (flush_locked) - the cycle latch, the boundary camera the engine's
+    // depth was drawn with; the live bridge only without a usable latch; then the frame view's rotation when fresh.
+    // Not mirrored: the flush's live pick on a sparse in-flight cycle (khf_sparse_live, under 16 opaque draws).
     RVExtBridge::ProjectionViewTransform khw_pv = {};
-    if (!RVExtBridge::get_projection_view_transform(khw_pv)) return;
+    if (g_ro.cycle_pv_valid && fabsf(g_ro.cycle_pv.projection[2][2]) >= 1e-6f) {
+        khw_pv = g_ro.cycle_pv;
+    } else if (!RVExtBridge::get_projection_view_transform(khw_pv)) {
+        return;
+    }
+    kh_adopt_frame_view(khw_pv);
 
     ConstantData khw_cbf = {};
     mul_4x4(khw_pv.view, khw_pv.projection, khw_cbf.view_proj);

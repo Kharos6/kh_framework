@@ -1,79 +1,79 @@
 #pragma once
 
-// The injection half (rendering_integration_injection.hpp): KH_CHAIN_END: the chain-end table and draw, the skeleton
-// bone names and kh_chain_prepare. Never include it on its own.
+// The injection half (rendering_integration_injection.hpp): CHAIN_END: the chain-end table and draw, the skeleton
+// bone names and chain_prepare. Never include it on its own.
 namespace RenderIntegration {
-// KH_CHAIN_END_DRAW - a chain's end that follows an object or a memory point is a physics target: the job holds
+// CHAIN_END_DRAW - a chain's end that follows an object or a memory point is a physics target: the job holds
 // the end where the Draw3D it was fed from put it, and on a terrain whose Draw3D lands after the frame's injection
 // that is one frame older than the pose the frame draws. So each render-thread step with a device context re-places
-// the end where THIS frame puts it (kh_chain_end_draw): the frame's own Draw3D targets by sample number (the ring,
-// published by kh_chain_prepare), else the render thread's read of them (kh_chain_end_rt_read, KH_RT_PAINT_READ).
+// the end where THIS frame puts it (chain_end_draw): the frame's own Draw3D targets by sample number (the ring,
+// published by chain_prepare), else the render thread's read of them (chain_end_rt_read, RT_PAINT_READ).
 // An end fixed in the world (a world endPosition / endRotation, or one held where it first stood) is the same
 // target every frame, but the job placed it in the frame the carrier had then, and the chain draws in the frame
 // the carrier has now: the draw re-places it where the job held it, in the world. An end held on the bound
 // skeleton's bone (true, on a skeletal binding) moves with the skeleton: the draw re-places it where the pin step's
-// guide puts that bone, against where the job's guide did (kh_chain_end_bone). On any other object the bone's
+// guide puts that bone, against where the job's guide did (chain_end_bone). On any other object the bone's
 // place is fixed on the carrier, and nothing is corrected.
 // The end body and everything hanging past it take the whole correction (turned about the held point), the links
 // between the start and the end a share growing along the chain - the target's motion since the Draw3D the job was
 // fed from: a frame's when a job lands every frame, more while the job is still busy with an earlier one. Both
-// targets are taken as the solver holds them, within the chain's reach of its start (kh_chain_end_taut). What is
+// targets are taken as the solver holds them, within the chain's reach of its start (chain_end_taut). What is
 // written is stored in the front's box grown to hold it (the object's bounds) and keyed by its own shape
-// (kh_chain_end_store, kh_cloth_step_shape): the front's key would tell the caching passes nothing changed.
-// A crew member's end keeps the Draw3D's measurement alone (KH_CREW_LAG): the render thread does not read it, and
-// the final step waits for the frame's own sample (kh_chain_end_on_crew), as for a crew binding.
-struct KhChainEndSmp {
+// (chain_end_store, cloth_step_shape): the front's key would tell the caching passes nothing changed.
+// A crew member's end keeps the Draw3D's measurement alone (CREW_LAG): the render thread does not read it, and
+// the final step waits for the frame's own sample (chain_end_on_crew), as for a crew binding.
+struct ChainEndSmp {
     uint64_t seq = 0;                  // The Draw3D sample number (a chain's own number never matches a cycle).
     bool     p_ok = false, r_ok = false;
-    double   p[3] = {};                // World, engine axes (KhChainCfg::live_pos).
-    float    r[9] = {};                // Engine axes (KhChainCfg::live_rot).
+    double   p[3] = {};                // World, engine axes (ChainCfg::live_pos).
+    float    r[9] = {};                // Engine axes (ChainCfg::live_rot).
 };
-struct KhChainEnd {
+struct ChainEnd {
     uint64_t   seq = 0;                // The object (RenderObject::seq).
-    uint8_t    pos_k = KH_CHE_FREE, rot_k = KH_CHE_FREE;
-    game_value pos_obj, proxy, rot_obj;   // Game thread's (KhChainCfg's), read by the render thread under the mutex.
-    KhChainEndSmp smp[KH_GTS_N];
+    uint8_t    pos_k = CHE_FREE, rot_k = CHE_FREE;
+    game_value pos_obj, proxy, rot_obj;   // Game thread's (ChainCfg's), read by the render thread under the mutex.
+    ChainEndSmp smp[GTS_N];
     uint32_t   smp_w = 0;
     // Render thread: its own page caches and its read for cycle rt_cyc.
-    KhChainRead rt_rd_p, rt_rd_r;
+    ChainRead rt_rd_p, rt_rd_r;
     uint64_t   rt_cyc = ~0ull;
-    KhChainEndSmp rt;
+    ChainEndSmp rt;
 };
-static std::unordered_map<std::string, KhChainEnd>& g_chain_end = *(new std::unordered_map<std::string, KhChainEnd>());
+static std::unordered_map<std::string, ChainEnd>& g_chain_end = *(new std::unordered_map<std::string, ChainEnd>());
 // Does a chain file in the table: a lane followed or fixed in the world, or held on the bone of a skeletal object's
-// skeleton. Under g_draw_list_mutex (the object's kind is the draw list's). Game thread (kh_chain_end_publish).
-// KH_CHAIN_REFUSED_END: not a chain that builds nothing (KhChainCfg::nobuild - no skeleton, or its build refused):
+// skeleton. Under g_draw_list_mutex (the object's kind is the draw list's). Game thread (chain_end_publish).
+// CHAIN_REFUSED_END: not a chain that builds nothing (ChainCfg::nobuild - no skeleton, or its build refused):
 // it has no instance, so nothing draws its end and nothing its end would move; filed, the render thread would read
-// its ends every frame, the final step wait up to KH_GTS_CREW_CAP_MS for its crew sample, and every step take
+// its ends every frame, the final step wait up to GTS_CREW_CAP_MS for its crew sample, and every step take
 // g_cloth_mu for it, all for nothing.
-inline bool kh_chain_end_filed(const KhChainCfg& khef_c, const std::string& khef_h) {
-    if (khef_c.nobuild) return false;   // KH_CHAIN_REFUSED_END.
-    if (kh_chain_end_drawn(khef_c.pos) || kh_chain_end_drawn(khef_c.rot)) return true;
-    if (khef_c.pos != KH_CHE_BONE && khef_c.rot != KH_CHE_BONE) return false;
-    const auto khef_d = g_draw_list.find(khef_h);
-    return khef_d != g_draw_list.end() && khef_d->second.seq == khef_c.seq && khef_d->second.skel;
+inline bool chain_end_filed(const ChainCfg& c, const std::string& h) {
+    if (c.nobuild) return false;   // CHAIN_REFUSED_END.
+    if (chain_end_drawn(c.pos) || chain_end_drawn(c.rot)) return true;
+    if (c.pos != CHE_BONE && c.rot != CHE_BONE) return false;
+    const auto d = g_draw_list.find(h);
+    return d != g_draw_list.end() && d->second.seq == c.seq && d->second.skel;
 }
-// Game thread, at the end of kh_chain_prepare (khep_seq: that pass's sample number): every chain with a followed
+// Game thread, at the end of chain_prepare (seq: that pass's sample number): every chain with a followed
 // lane files this Draw3D's targets (a lane fixed in the world or held on a bone files nothing: the job and the pin
 // step record those); a chain with none of them leaves the table.
-inline void kh_chain_end_publish(uint64_t khep_seq) {
-    std::lock_guard<std::mutex> khep_g(g_draw_list_mutex);
-    for (auto khep_it = g_chain_end.begin(); khep_it != g_chain_end.end();) {
-        const auto khep_c = g_chain_cfg.find(khep_it->first);
-        if (khep_c == g_chain_cfg.end() || khep_c->second.seq != khep_it->second.seq ||
-            !(kh_chain_end_filed(khep_c->second, khep_it->first))) {
-            khep_it = g_chain_end.erase(khep_it);
+inline void chain_end_publish(uint64_t seq) {
+    std::lock_guard<std::mutex> g(g_draw_list_mutex);
+    for (auto it = g_chain_end.begin(); it != g_chain_end.end();) {
+        const auto ep_c = g_chain_cfg.find(it->first);
+        if (ep_c == g_chain_cfg.end() || ep_c->second.seq != it->second.seq ||
+            !(chain_end_filed(ep_c->second, it->first))) {
+            it = g_chain_end.erase(it);
         } else {
-            ++khep_it;
+            ++it;
         }
     }
-    for (auto& khep_kv : g_chain_cfg) {
-        const KhChainCfg& c = khep_kv.second;
-        if (!kh_chain_end_filed(c, khep_kv.first)) continue;
-        KhChainEnd& e = g_chain_end[khep_kv.first];
+    for (auto& kv : g_chain_cfg) {
+        const ChainCfg& c = kv.second;
+        if (!chain_end_filed(c, kv.first)) continue;
+        ChainEnd& e = g_chain_end[kv.first];
         if (e.seq != c.seq || e.pos_k != c.pos || e.rot_k != c.rot || e.pos_obj.data.get() != c.pos_obj.data.get() ||
             e.proxy.data.get() != c.proxy.data.get() || e.rot_obj.data.get() != c.rot_obj.data.get()) {
-            e = KhChainEnd();   // A new object or new lanes: nothing earlier describes them.
+            e = ChainEnd();   // A new object or new lanes: nothing earlier describes them.
             e.seq = c.seq;
             e.pos_k = c.pos;
             e.rot_k = c.rot;
@@ -81,558 +81,558 @@ inline void kh_chain_end_publish(uint64_t khep_seq) {
             e.proxy = c.proxy;
             e.rot_obj = c.rot_obj;
         }
-        KhChainEndSmp& s = e.smp[e.smp_w++ % KH_GTS_N];
-        s.seq = khep_seq;
-        s.p_ok = kh_chain_end_followed(c.pos) && c.live_p;
-        s.r_ok = kh_chain_end_followed(c.rot) && c.live_r;
+        ChainEndSmp& s = e.smp[e.smp_w++ % GTS_N];
+        s.seq = seq;
+        s.p_ok = chain_end_followed(c.pos) && c.live_p;
+        s.r_ok = chain_end_followed(c.rot) && c.live_r;
         memcpy(s.p, c.live_pos, sizeof(s.p));
         memcpy(s.r, c.live_rot, sizeof(s.r));
     }
     g_chain_end_n.store(static_cast<uint32_t>(g_chain_end.size()), std::memory_order_relaxed);
-    if (g_gts_done_defer != 0u) {   // The sample and its chain targets together (g_gts_done_defer).
-        g_gts_done_pub.store(g_gts_done_defer, std::memory_order_release);
-        g_gts_done_defer = 0u;
+    if (g_gts.done_defer != 0u) {   // The sample and its chain targets together (g_gts.done_defer).
+        g_gts.done_pub.store(g_gts.done_defer, std::memory_order_release);
+        g_gts.done_defer = 0u;
     }
 }
-// KH_CREW_LAG - a chain end on a crew member: its position lane's object (or memory point's owner) or its own
+// CREW_LAG - a chain end on a crew member: its position lane's object (or memory point's owner) or its own
 // rotation object riding in a vehicle. The render thread does not read it (its drawn pose is the Draw3D's
-// measurement, not a read of its state); kh_chain_end_crew_n counts it for g_gts_crew_n, so the final step waits
+// measurement, not a read of its state); chain_end_crew_n counts it for g_gts.crew_n, so the final step waits
 // for the frame's own sample as it does for a crew binding. Under g_draw_list_mutex (either thread).
-inline bool kh_chain_end_on_crew(const KhChainEnd& khecr_e) {
-    const KhCrewEnt* const khecr_c1 = kh_crew_of(khecr_e.pos_obj);
-    const KhCrewEnt* const khecr_c2 = khecr_e.rot_k == KH_CHE_OBJ ? kh_crew_of(khecr_e.rot_obj) : nullptr;
-    return (khecr_c1 && khecr_c1->in) || (khecr_c2 && khecr_c2->in);
+inline bool chain_end_on_crew(const ChainEnd& e) {
+    const CrewEnt* const c1 = crew_of(e.pos_obj);
+    const CrewEnt* const c2 = e.rot_k == CHE_OBJ ? crew_of(e.rot_obj) : nullptr;
+    return (c1 && c1->in) || (c2 && c2->in);
 }
-// KH_CREW_LAG - the chain ends with a followed lane kh_chain_end_on_crew holds on a crew member (the Draw3D sampler,
-// game thread, under g_draw_list_mutex; the table as the last kh_chain_end_publish left it).
-inline uint32_t kh_chain_end_crew_n() {
-    uint32_t khecn_n = 0;
-    for (const auto& khecn_kv : g_chain_end) {
-        const KhChainEnd& khecn_e = khecn_kv.second;
-        if ((kh_chain_end_followed(khecn_e.pos_k) || kh_chain_end_followed(khecn_e.rot_k)) &&
-            kh_chain_end_on_crew(khecn_e)) ++khecn_n;
+// CREW_LAG - the chain ends with a followed lane chain_end_on_crew holds on a crew member (the Draw3D sampler,
+// game thread, under g_draw_list_mutex; the table as the last chain_end_publish left it).
+inline uint32_t chain_end_crew_n() {
+    uint32_t n = 0;
+    for (const auto& kv : g_chain_end) {
+        const ChainEnd& e = kv.second;
+        if ((chain_end_followed(e.pos_k) || chain_end_followed(e.rot_k)) &&
+            chain_end_on_crew(e)) ++n;
     }
-    return khecn_n;
+    return n;
 }
-// Render thread, from kh_rt_paint_read (under g_draw_list_mutex, the frame's own sample absent): each followed end
-// read as kh_chain_prepare reads it - twice, taken only if both passes agree bit for bit - a memory point through
+// Render thread, from rt_paint_read (under g_draw_list_mutex, the frame's own sample absent): each followed end
+// read as chain_prepare reads it - twice, taken only if both passes agree bit for bit - a memory point through
 // the estimator with the frame's own number. A lane the newest Draw3D could not place and a dead object are not
-// read (the draw then keeps what the job held); nor is a crew member's end (kh_chain_end_on_crew: the final step
+// read (the draw then keeps what the job held); nor is a crew member's end (chain_end_on_crew: the final step
 // waits for its own sample instead).
-inline void kh_chain_end_rt_read(uint64_t khcr_cyc, uint64_t khcr_own, int64_t khcr_q) {
-    for (auto& khcr_kv : g_chain_end) {
-        KhChainEnd& e = khcr_kv.second;
-        const KhChainEndSmp* khcr_n = nullptr;
-        for (const KhChainEndSmp& khcr_s : e.smp) {
-            if (khcr_s.seq != 0u && (!khcr_n || khcr_s.seq > khcr_n->seq)) khcr_n = &khcr_s;
+inline void chain_end_rt_read(uint64_t cyc, uint64_t own, int64_t q) {
+    for (auto& kv : g_chain_end) {
+        ChainEnd& e = kv.second;
+        const ChainEndSmp* n = nullptr;
+        for (const ChainEndSmp& s : e.smp) {
+            if (s.seq != 0u && (!n || s.seq > n->seq)) n = &s;
         }
-        if (!khcr_n) continue;
-        const bool khcr_wp = kh_chain_end_followed(e.pos_k) && khcr_n->p_ok;
-        const bool khcr_wr = kh_chain_end_followed(e.rot_k) && khcr_n->r_ok;
-        if (!khcr_wp && !khcr_wr) continue;
-        const game_value& khcr_px = e.pos_k == KH_CHE_MEM ? e.proxy : e.pos_obj;
-        const game_value& khcr_rx = e.rot_k == KH_CHE_MEM ? e.proxy : e.rot_obj;
-        if (kh_chain_end_on_crew(e)) continue;   // KH_CREW_LAG: the final step waits for its own sample.
-        if ((khcr_wp && kh_attach_obj_dead(khcr_px)) || (khcr_wr && kh_attach_obj_dead(khcr_rx))) continue;
-        float khcr_a[24] = {}, khcr_b[24] = {};   // Position lane: p, r; rotation lane: p, r.
-        auto khcr_read = [&](float* o) -> bool {
-            if (khcr_wp && !kh_attach_raw(khcr_px, e.rt_rd_p.off, e.rt_rd_p.vb, e.rt_rd_p.bb, e.rt_rd_p.avb,
-                                          e.rt_rd_p.abb, o, o + 3)) return false;
-            if (khcr_wr && !kh_attach_raw(khcr_rx, e.rt_rd_r.off, e.rt_rd_r.vb, e.rt_rd_r.bb, e.rt_rd_r.avb,
-                                          e.rt_rd_r.abb, o + 12, o + 15)) return false;
+        if (!n) continue;
+        const bool wp = chain_end_followed(e.pos_k) && n->p_ok;
+        const bool wr = chain_end_followed(e.rot_k) && n->r_ok;
+        if (!wp && !wr) continue;
+        const game_value& px = e.pos_k == CHE_MEM ? e.proxy : e.pos_obj;
+        const game_value& rx = e.rot_k == CHE_MEM ? e.proxy : e.rot_obj;
+        if (chain_end_on_crew(e)) continue;   // CREW_LAG: the final step waits for its own sample.
+        if ((wp && attach_obj_dead(px)) || (wr && attach_obj_dead(rx))) continue;
+        float a[24] = {}, b[24] = {};   // Position lane: p, r; rotation lane: p, r.
+        auto read = [&](float* o) -> bool {
+            if (wp && !attach_raw(px, e.rt_rd_p.off, e.rt_rd_p.vb, e.rt_rd_p.bb, e.rt_rd_p.avb,
+                                  e.rt_rd_p.abb, o, o + 3)) return false;
+            if (wr && !attach_raw(rx, e.rt_rd_r.off, e.rt_rd_r.vb, e.rt_rd_r.bb, e.rt_rd_r.avb,
+                                  e.rt_rd_r.abb, o + 12, o + 15)) return false;
             return true;
         };
-        if (!khcr_read(khcr_a) || !khcr_read(khcr_b) || memcmp(khcr_a, khcr_b, sizeof(khcr_a)) != 0) continue;
-        KhChainEndSmp& r = e.rt;
-        r.seq = khcr_own;
-        r.p_ok = khcr_wp;
-        r.r_ok = khcr_wr;
-        if (khcr_wp) {
-            float khcr_sd[3] = { 0.0f, 0.0f, 0.0f };
-            if (e.pos_k == KH_CHE_MEM) kh_pxy_smooth_note(e.proxy, khcr_own, khcr_q, khcr_a, khcr_sd);
-            r.p[0] = static_cast<double>(khcr_a[0]) + static_cast<double>(khcr_sd[0]);   // SQF order -> engine axes.
-            r.p[1] = static_cast<double>(khcr_a[2]) + static_cast<double>(khcr_sd[2]);
-            r.p[2] = static_cast<double>(khcr_a[1]) + static_cast<double>(khcr_sd[1]);
+        if (!read(a) || !read(b) || memcmp(a, b, sizeof(a)) != 0) continue;
+        ChainEndSmp& r = e.rt;
+        r.seq = own;
+        r.p_ok = wp;
+        r.r_ok = wr;
+        if (wp) {
+            float sd[3] = { 0.0f, 0.0f, 0.0f };
+            if (e.pos_k == CHE_MEM) pxy_smooth_note(e.proxy, own, q, a, sd);
+            r.p[0] = static_cast<double>(a[0]) + static_cast<double>(sd[0]);   // SQF order -> engine axes.
+            r.p[1] = static_cast<double>(a[2]) + static_cast<double>(sd[2]);
+            r.p[2] = static_cast<double>(a[1]) + static_cast<double>(sd[1]);
         }
-        if (khcr_wr) memcpy(r.r, khcr_a + 15, sizeof(r.r));
-        e.rt_cyc = khcr_cyc;
+        if (wr) memcpy(r.r, a + 15, sizeof(r.r));
+        e.rt_cyc = cyc;
     }
 }
 
-// KH_SKEL_PROXY_CULL - the skeleton as the proxy filter. A bone has geometry when any level's vertex takes weight from
-// it (skin_inf, parallel to verts). khbn_h / khbn_seq name the handle whose chain settings (g_chain_cfg) add their
+// SKEL_PROXY_CULL - the skeleton as the proxy filter. A bone has geometry when any level's vertex takes weight from
+// it (skin_inf, parallel to verts). h / seq name the handle whose chain settings (g_chain_cfg) add their
 // bones to keep; "" for a mesh with no handle yet (addRender3D), where no chain can have been configured. Those
 // settings, when the handle has any (a set that has been switched off keeps them), add their start bone (or the
-// skeleton's first root, kh_chain_build's default) and their end bone (or the chain's tip when the start's subtree does
+// skeleton's first root, chain_build's default) and their end bone (or the chain's tip when the start's subtree does
 // not branch) to the keep set. GAME THREAD (staged lookup; g_chain_cfg is game thread only).
-inline KhSkelBones kh_skel_bone_names(int khbn_mesh, const std::string& khbn_h = std::string(),
-                                      uint64_t khbn_seq = 0) {
-    KhSkelBones khbn_out;
-    const MeshDef* khbn_d = kh_mesh_def_staged(khbn_mesh);
-    if (!khbn_d) return khbn_out;
-    const size_t khbn_nb = khbn_d->skin_bones.size();
-    khbn_out.name.reserve(khbn_nb);
-    khbn_out.parent.reserve(khbn_nb);
-    for (const KhSkinBone& khbn_b : khbn_d->skin_bones) {
-        khbn_out.name.push_back(khbn_b.name);
-        khbn_out.parent.push_back(khbn_b.parent);
+inline SkelBones skel_bone_names(int mesh, const std::string& h = std::string(),
+                                 uint64_t seq = 0) {
+    SkelBones out;
+    const MeshDef* d = mesh_def_staged(mesh);
+    if (!d) return out;
+    const size_t nb = d->skin_bones.size();
+    out.name.reserve(nb);
+    out.parent.reserve(nb);
+    for (const SkinBone& b : d->skin_bones) {
+        out.name.push_back(b.name);
+        out.parent.push_back(b.parent);
     }
-    khbn_out.geom.assign(khbn_nb, 0u);
-    if (khbn_d->skin_inf.size() == khbn_d->verts.size()) {
-        for (const KhSkinInf& khbn_f : khbn_d->skin_inf) {
-            for (int khbn_j = 0; khbn_j < 4; ++khbn_j) {
-                if (khbn_f.w[khbn_j] > 0.0f && khbn_f.b[khbn_j] < khbn_nb) khbn_out.geom[khbn_f.b[khbn_j]] = 1u;
+    out.geom.assign(nb, 0u);
+    if (d->skin_inf.size() == d->verts.size()) {
+        for (const SkinInf& f : d->skin_inf) {
+            for (int j = 0; j < 4; ++j) {
+                if (f.w[j] > 0.0f && f.b[j] < nb) out.geom[f.b[j]] = 1u;
             }
         }
     }
-    if (khbn_h.empty() || khbn_nb == 0u) return khbn_out;
-    const auto khbn_ci = g_chain_cfg.find(khbn_h);
-    if (khbn_ci == g_chain_cfg.end() || khbn_ci->second.seq != khbn_seq) return khbn_out;
-    const KhChainCfg& khbn_c = khbn_ci->second;
-    // The start, as kh_chain_build resolves it.
-    int32_t khbn_s = -1;
-    if (khbn_c.start.empty()) {
-        for (size_t khbn_b = 0; khbn_b < khbn_nb; ++khbn_b) if (khbn_out.parent[khbn_b] < 0) { khbn_s = static_cast<int32_t>(khbn_b); break; }
+    if (h.empty() || nb == 0u) return out;
+    const auto ci = g_chain_cfg.find(h);
+    if (ci == g_chain_cfg.end() || ci->second.seq != seq) return out;
+    const ChainCfg& c = ci->second;
+    // The start, as chain_build resolves it.
+    int32_t s = -1;
+    if (c.start.empty()) {
+        for (size_t b = 0; b < nb; ++b) if (out.parent[b] < 0) { s = static_cast<int32_t>(b); break; }
     } else {
-        for (size_t khbn_b = 0; khbn_b < khbn_nb; ++khbn_b) if (khbn_out.name[khbn_b] == khbn_c.start) { khbn_s = static_cast<int32_t>(khbn_b); break; }
+        for (size_t b = 0; b < nb; ++b) if (out.name[b] == c.start) { s = static_cast<int32_t>(b); break; }
     }
-    if (khbn_s < 0) return khbn_out;   // The chain will not build; nothing to keep for it.
-    khbn_out.keep.push_back(khbn_out.name[static_cast<size_t>(khbn_s)]);
-    if (!khbn_c.end.empty()) {
-        khbn_out.keep.push_back(khbn_c.end);   // Below the start or not, the build decides; a proxy for it costs one.
-        return khbn_out;
+    if (s < 0) return out;   // The chain will not build; nothing to keep for it.
+    out.keep.push_back(out.name[static_cast<size_t>(s)]);
+    if (!c.end.empty()) {
+        out.keep.push_back(c.end);   // Below the start or not, the build decides; a proxy for it costs one.
+        return out;
     }
     // The default end: the tip of the start's subtree, when it does not branch.
-    std::vector<std::vector<int32_t>> khbn_kids(khbn_nb);
-    for (size_t khbn_b = 0; khbn_b < khbn_nb; ++khbn_b) {
-        const int32_t khbn_p = khbn_out.parent[khbn_b];
-        if (khbn_p >= 0 && static_cast<size_t>(khbn_p) < khbn_nb && khbn_p != static_cast<int32_t>(khbn_b)) khbn_kids[static_cast<size_t>(khbn_p)].push_back(static_cast<int32_t>(khbn_b));
+    std::vector<std::vector<int32_t>> kids(nb);
+    for (size_t b = 0; b < nb; ++b) {
+        const int32_t p = out.parent[b];
+        if (p >= 0 && static_cast<size_t>(p) < nb && p != static_cast<int32_t>(b)) kids[static_cast<size_t>(p)].push_back(static_cast<int32_t>(b));
     }
-    std::vector<uint8_t> khbn_seen(khbn_nb, 0u);
-    std::vector<int32_t> khbn_order;
-    khbn_order.push_back(khbn_s);
-    khbn_seen[static_cast<size_t>(khbn_s)] = 1u;
-    bool khbn_branch = false;
-    for (size_t khbn_i = 0; khbn_i < khbn_order.size(); ++khbn_i) {
-        const std::vector<int32_t>& khbn_k = khbn_kids[static_cast<size_t>(khbn_order[khbn_i])];
-        if (khbn_k.size() > 1u) khbn_branch = true;
-        for (int32_t khbn_x : khbn_k) {
-            if (khbn_seen[static_cast<size_t>(khbn_x)]) continue;
-            khbn_seen[static_cast<size_t>(khbn_x)] = 1u;
-            khbn_order.push_back(khbn_x);
+    std::vector<uint8_t> seen(nb, 0u);
+    std::vector<int32_t> order;
+    order.push_back(s);
+    seen[static_cast<size_t>(s)] = 1u;
+    bool branch = false;
+    for (size_t i = 0; i < order.size(); ++i) {
+        const std::vector<int32_t>& k = kids[static_cast<size_t>(order[i])];
+        if (k.size() > 1u) branch = true;
+        for (int32_t x : k) {
+            if (seen[static_cast<size_t>(x)]) continue;
+            seen[static_cast<size_t>(x)] = 1u;
+            order.push_back(x);
         }
     }
-    if (!khbn_branch && khbn_order.size() >= 2u) khbn_out.keep.push_back(khbn_out.name[static_cast<size_t>(khbn_order.back())]);
-    return khbn_out;
+    if (!branch && order.size() >= 2u) out.keep.push_back(out.name[static_cast<size_t>(order.back())]);
+    return out;
 }
 
-// KH_SKEL_PROXY_CULL - re-makes a bound skeleton's proxies when its chain settings change (chainSimulation, after
+// SKEL_PROXY_CULL - re-makes a bound skeleton's proxies when its chain settings change (chainSimulation, after
 // g_chain_cfg took the new set): the keep set may have gained or lost a bone. Only when the kept memory points differ
 // from the installed ones, so a stiffness change costs one SQF list read and no proxy. A rebuild runs
-// kh_attach_skel_set's ordinary path (old proxies to the delete queue, skel_gen moves, the skin's caches and the stash
+// attach_skel_set's ordinary path (old proxies to the delete queue, skel_gen moves, the skin's caches and the stash
 // start over). GAME THREAD, from a command entry point holding no lock (it makes SQF calls). False with err only when
 // the make fails; a handle with no skeletal binding is true.
-inline bool kh_skel_chain_rebind(const std::string& khcr_h, const RenderObject& khcr_o, std::string& err) {
-    if (!khcr_o.skel) return true;
-    game_value khcr_parent;
-    std::vector<std::string> khcr_have;
+inline bool skel_chain_rebind(const std::string& h, const RenderObject& o, std::string& err) {
+    if (!o.skel) return true;
+    game_value parent;
+    std::vector<std::string> have;
     {
-        std::lock_guard<std::mutex> khcr_g(g_draw_list_mutex);
-        const auto khcr_it = g_attach.find(khcr_h);
-        if (khcr_it == g_attach.end() || !khcr_it->second.skel) return true;
-        khcr_parent = khcr_it->second.bone_parent;
-        khcr_have = khcr_it->second.skel_mem;
+        std::lock_guard<std::mutex> g(g_draw_list_mutex);
+        const auto it = g_attach.find(h);
+        if (it == g_attach.end() || !it->second.skel) return true;
+        parent = it->second.bone_parent;
+        have = it->second.skel_mem;
     }
-    if (!kh_attach_is_obj(khcr_parent) || kh_attach_obj_dead(khcr_parent)) return true;   // The step's death test owns this.
-    const KhSkelBones khcr_b = kh_skel_bone_names(khcr_o.mesh, khcr_h, khcr_o.seq);
-    std::vector<std::string> khcr_plan, khcr_raw;
-    kh_skel_plan(static_cast<object>(khcr_parent), khcr_b, khcr_plan, khcr_raw);
-    if (khcr_plan == khcr_have) return true;
-    KhSkelOwn khcr_own;
-    std::vector<std::string> khcr_mem;
-    if (!kh_skel_make(khcr_parent, khcr_b, khcr_own.proxies, khcr_mem, err)) return false;
-    kh_attach_skel_set(khcr_h, khcr_own.release(), khcr_mem, khcr_parent, kh_attach_bone_rot_state(khcr_h));
+    if (!attach_is_obj(parent) || attach_obj_dead(parent)) return true;   // The step's death test owns this.
+    const SkelBones b = skel_bone_names(o.mesh, h, o.seq);
+    std::vector<std::string> plan, raw;
+    skel_plan(static_cast<object>(parent), b, plan, raw);
+    if (plan == have) return true;
+    SkelOwn own;
+    std::vector<std::string> mem;
+    if (!skel_make(parent, b, own.proxies, mem, err)) return false;
+    attach_skel_set(h, own.release(), mem, parent, attach_bone_rot_state(h));
     return true;
 }
-// KH_CHAIN_END_DRAW - from kh_attach_step's end (render thread, g_draw_list_mutex held, every binding placed and
+// CHAIN_END_DRAW - from attach_step's end (render thread, g_draw_list_mutex held, every binding placed and
 // skinned), at each step with a device context: every chain in g_chain_end whose frame targets are known - a followed
 // lane's own Draw3D's by number, else the render thread's read for this cycle; a lane fixed in the world, the job's
 // world target; a lane on a skeletal object's bone, the pin step's guide - each taken within the chain's reach
-// (kh_chain_end_taut), is re-skinned from its front's bone maps (a skeletal one's: this cycle's pin re-placement,
-// KH_CLOTH_PIN_STEP, which must have run) with the end corrected, in the frame the object draws at now
-// (kh_cloth_carrier_at), and written as the pin step writes, in the front's box grown to hold it and under its own key
-// (kh_chain_end_store / kh_cloth_step_shape); the object takes that box, as the upload's put would. Bytes it wrote
-// whose inputs have not changed since, with no other write between, are kept (C3, KhClothInst::vb_wr). Takes
+// (chain_end_taut), is re-skinned from its front's bone maps (a skeletal one's: this cycle's pin re-placement,
+// CLOTH_PIN_STEP, which must have run) with the end corrected, in the frame the object draws at now
+// (cloth_carrier_at), and written as the pin step writes, in the front's box grown to hold it and under its own key
+// (chain_end_store / cloth_step_shape); the object takes that box, as the upload's put would. Bytes it wrote
+// whose inputs have not changed since, with no other write between, are kept (C3, ClothInst::vb_wr). Takes
 // g_cloth_mu (list -> cloth).
-inline void kh_chain_end_draw(ID3D11DeviceContext* khed_ctx) {
-    if (!khed_ctx || !reorder_on_render_thread() || g_chain_end.empty()) return;
-    const uint64_t khed_cyc = g_topo_cycles;
-    const uint64_t khed_want = static_cast<uint64_t>(static_cast<int64_t>(khed_cyc) + g_gid_k);
-    for (auto& khed_kv : g_chain_end) {
-        KhChainEnd& e = khed_kv.second;
+inline void chain_end_draw(ID3D11DeviceContext* ctx) {
+    if (!ctx || !reorder_on_render_thread() || g_chain_end.empty()) return;
+    const uint64_t cyc = g_topo_cycles;
+    const uint64_t want = static_cast<uint64_t>(static_cast<int64_t>(cyc) + g_gid_k);
+    for (auto& kv : g_chain_end) {
+        ChainEnd& e = kv.second;
         // A followed lane: this frame's target, when known (identity learned); a fixed one: the job's own.
-        const KhChainEndSmp* khed_s = nullptr;
+        const ChainEndSmp* s = nullptr;
         if (g_gid_ok) {
-            for (const KhChainEndSmp& khed_k : e.smp) if (khed_k.seq == khed_want && khed_k.seq != 0u) khed_s = &khed_k;
-            if (!khed_s && e.rt_cyc == khed_cyc) khed_s = &e.rt;
+            for (const ChainEndSmp& ed_k : e.smp) if (ed_k.seq == want && ed_k.seq != 0u) s = &ed_k;
+            if (!s && e.rt_cyc == cyc) s = &e.rt;
         }
-        const bool khed_wp = kh_chain_end_fixed(e.pos_k);   // Fixed in the world (not khed_fr: the carrier frame).
-        const bool khed_wr = kh_chain_end_fixed(e.rot_k);
-        const bool khed_bp = e.pos_k == KH_CHE_BONE;   // Held on the skeleton's bone (a skeletal object's alone).
-        const bool khed_br = e.rot_k == KH_CHE_BONE;
-        bool khed_tp = khed_wp || khed_bp || (khed_s && khed_s->p_ok && kh_chain_end_followed(e.pos_k));
-        bool khed_tr = khed_wr || khed_br || (khed_s && khed_s->r_ok && kh_chain_end_followed(e.rot_k));
-        if (!khed_tp && !khed_tr) continue;   // Nothing known for this frame: the job's end stands.
-        const auto khed_it = g_draw_list.find(khed_kv.first);
-        if (khed_it == g_draw_list.end() || khed_it->second.seq != e.seq || khed_it->second.slot == 0xFFFFFFFFu) {
+        const bool wp = chain_end_fixed(e.pos_k);   // Fixed in the world (not fr: the carrier frame).
+        const bool wr = chain_end_fixed(e.rot_k);
+        const bool bp = e.pos_k == CHE_BONE;   // Held on the skeleton's bone (a skeletal object's alone).
+        const bool br = e.rot_k == CHE_BONE;
+        bool tp = wp || bp || (s && s->p_ok && chain_end_followed(e.pos_k));
+        bool tr = wr || br || (s && s->r_ok && chain_end_followed(e.rot_k));
+        if (!tp && !tr) continue;   // Nothing known for this frame: the job's end stands.
+        const auto it = g_draw_list.find(kv.first);
+        if (it == g_draw_list.end() || it->second.seq != e.seq || it->second.slot == 0xFFFFFFFFu) {
             continue;
         }
-        RenderObject& khed_o = khed_it->second;
-        bool khed_wrote = false;
-        bool khed_new = false;   // KH_CHAIN_END_NOTE: bytes written this call (not the kept ones).
-        bool khed_cycw = false;  // KH_CHAIN_END_NOTE: the bytes drawn now were written this cycle.
-        float khed_size[3] = {};
-        bool khed_race_cycw = false;   // KH_CHAIN_END_RACE: skipped on a running job, over bytes written this cycle.
-        // A do-while(false): every early exit leaves khed_wrote false, and the race skip still notes the bytes an
+        RenderObject& o = it->second;
+        bool wrote = false;
+        bool ed_new = false;   // CHAIN_END_NOTE: bytes written this call (not the kept ones).
+        bool cycw = false;  // CHAIN_END_NOTE: the bytes drawn now were written this cycle.
+        float size[3] = {};
+        bool race_cycw = false;   // CHAIN_END_RACE: skipped on a running job, over bytes written this cycle.
+        // A do-while(false): every early exit leaves wrote false, and the race skip still notes the bytes an
         // earlier step wrote (below).
         do {
-            std::lock_guard<std::mutex> khed_g(g_cloth_mu);
-            const auto khed_ci = g_cloth.find(khed_o.slot);
-            if (khed_ci == g_cloth.end()) continue;
-            KhClothInst& in = *khed_ci->second;
-            if (!in.chain || in.retired || !in.built || in.rest.empty() || !in.vb || in.seq != khed_o.seq) continue;
-            // KH_CHAIN_END_OWNER: the box below is the object's only while it simulates this chain on this mesh (the
+            std::lock_guard<std::mutex> g(g_cloth_mu);
+            const auto ci = g_cloth.find(o.slot);
+            if (ci == g_cloth.end()) continue;
+            ClothInst& in = *ci->second;
+            if (!in.chain || in.retired || !in.built || in.rest.empty() || !in.vb || in.seq != o.seq) continue;
+            // CHAIN_END_OWNER: the box below is the object's only while it simulates this chain on this mesh (the
             // upload's put tests the same two). A chain switched off, or a mesh changed, before the sync retires the
             // instance keeps its box off the object: the command already gave the object its own size back.
-            if (!khed_o.chain_sim || in.mesh != khed_o.mesh) continue;
-            const bool khed_direct = khed_o.slot < g_cloth_vb_slot.size() && g_cloth_vb_slot[khed_o.slot] == in.vb;
-            if (!khed_direct && !kh_uvs_draws_from(khed_o.slot, in.vb)) continue;   // Not installed yet.
-            // A skeletal chain's kinematic bones are this cycle's pin re-placement (KH_CLOTH_PIN_STEP, which must
+            if (!o.chain_sim || in.mesh != o.mesh) continue;
+            const bool direct = o.slot < g_cloth_vb_slot.size() && g_cloth_vb_slot[o.slot] == in.vb;
+            if (!direct && !uvs_draws_from(o.slot, in.vb)) continue;   // Not installed yet.
+            // A skeletal chain's kinematic bones are this cycle's pin re-placement (CLOTH_PIN_STEP, which must
             // have run), in the front it placed and whose box it handed the object; a plain chain's the front now.
-            const bool khed_skel = khed_o.skel;
-            if (khed_skel && in.pin_step_cycle != khed_cyc) continue;
-            const uint32_t khed_gen = in.gen.load(std::memory_order_acquire);
-            const uint32_t f = khed_skel ? (in.pin_front & 1u) : (in.front.load(std::memory_order_acquire) & 1u);
-            // KH_CHAIN_END_RACE: a skeletal chain reads the front its pin step placed. Once a job has published past
+            const bool skel = o.skel;
+            if (skel && in.pin_step_cycle != cyc) continue;
+            const uint32_t gen = in.gen.load(std::memory_order_acquire);
+            const uint32_t f = skel ? (in.pin_front & 1u) : (in.front.load(std::memory_order_acquire) & 1u);
+            // CHAIN_END_RACE: a skeletal chain reads the front its pin step placed. Once a job has published past
             // it, the next job writes that buffer (its back) without the lock and the bytes below would be read
             // mid-write, so while one runs on it the job's end stands this frame, as on a frame with nothing known.
             // running, not busy: a queued job cannot start while g_cloth_mu is held (running is set at the pop, under
-            // it), so that read goes ahead. Bytes an earlier step of this cycle wrote are still noted (khed_race_cycw).
-            if (khed_skel && in.running.load(std::memory_order_acquire) &&
+            // it), so that read goes ahead. Bytes an earlier step of this cycle wrote are still noted (race_cycw).
+            if (skel && in.running.load(std::memory_order_acquire) &&
                 (in.front.load(std::memory_order_acquire) & 1u) != f) {
-                khed_race_cycw = in.end_new_cyc == khed_cyc;
+                race_cycw = in.end_new_cyc == cyc;
                 continue;
             }
-            const KhChainState& c = in.ch;
+            const ChainState& c = in.ch;
             const size_t nb = c.body_of.size();
             const size_t nv = in.rest.size();
             if (c.end_body < 0 || nb == 0u || in.ch_mat[f].size() != nb * 12u || in.out[f].size() != nv ||
                 !in.box_on[f]) continue;
             // A bone lane: the pin step's guide (this cycle's, above) against the job's; a skeletal object's alone.
-            const bool khed_bg = khed_skel && in.pin_g.size() == nb * 12u;
-            khed_tp = khed_tp && (khed_bp ? khed_bg : in.end_job_p[f]);
-            khed_tr = khed_tr && (khed_br ? khed_bg : in.end_job_r[f]);
-            if (!khed_tp && !khed_tr) continue;
-            if (khed_skel && in.pin_mat.size() != nb * 12u) continue;
-            float khed_bnq[4] = { 0.0f, 0.0f, 0.0f, 1.0f }, khed_bjq[4] = { 0.0f, 0.0f, 0.0f, 1.0f };
-            float khed_bnp[3] = {}, khed_bjp[3] = {};
-            // KH_CHAIN_REACH_ROT: the job's bone pose also for a bone ROTATION lane this frame does not follow (a
+            const bool bg = skel && in.pin_g.size() == nb * 12u;
+            tp = tp && (bp ? bg : in.end_job_p[f]);
+            tr = tr && (br ? bg : in.end_job_r[f]);
+            if (!tp && !tr) continue;
+            if (skel && in.pin_mat.size() != nb * 12u) continue;
+            float bnq[4] = { 0.0f, 0.0f, 0.0f, 1.0f }, bjq[4] = { 0.0f, 0.0f, 0.0f, 1.0f };
+            float bnp[3] = {}, bjp[3] = {};
+            // CHAIN_REACH_ROT: the job's bone pose also for a bone ROTATION lane this frame does not follow (a
             // plain object: no guide, the rest - the orientation the solver held), so the position twin below clamps
             // as the solver did.
-            if ((khed_tp && khed_bp) || (khed_tr && khed_br) || (khed_tp && khed_br)) {
-                const std::vector<float>& khed_jg = in.out_guide[f];   // The job's as it held it (KH_CHAIN_HELD_REC), or none: the rest.
-                kh_chain_end_bone(c, khed_jg.size() == nb * 12u ? khed_jg.data() : nullptr, nb, khed_bjq, khed_bjp);
-                if (khed_tr || khed_bg) kh_chain_end_bone(c, in.pin_g.data(), nb, khed_bnq, khed_bnp);
+            if ((tp && bp) || (tr && br) || (tp && br)) {
+                const std::vector<float>& jg = in.out_guide[f];   // The job's as it held it (CHAIN_HELD_REC), or none: the rest.
+                chain_end_bone(c, jg.size() == nb * 12u ? jg.data() : nullptr, nb, bjq, bjp);
+                if (tr || bg) chain_end_bone(c, in.pin_g.data(), nb, bnq, bnp);
             }
-            // The frame the object draws at now, as kh_cloth_sync builds the job's.
-            float khed_wc[3];
-            double khed_wd[3];
-            kh_cloth_carrier_at(khed_o, c.auth_ctr, khed_wc, khed_wd);
-            KhClothFrame khed_fr;
-            memcpy(khed_fr.rot, khed_o.rot_m, sizeof(khed_fr.rot));
-            khed_fr.rotated = khed_o.rotated;
+            // The frame the object draws at now, as cloth_sync builds the job's.
+            float wc[3];
+            double wd[3];
+            cloth_carrier_at(o, c.auth_ctr, wc, wd);
+            ClothFrame fr;
+            memcpy(fr.rot, o.rot_m, sizeof(fr.rot));
+            fr.rotated = o.rotated;
             float qf[4];
-            kh_chain_frame_q(khed_fr, qf);
+            chain_frame_q(fr, qf);
             const float qfc[4] = { -qf[0], -qf[1], -qf[2], qf[3] };
             float dp[3] = { 0.0f, 0.0f, 0.0f };
             float dq[4] = { 0.0f, 0.0f, 0.0f, 1.0f };
             // This frame's rotation target, carrier-local (a followed kind: its frame's; a bone: this cycle's pin
-            // guide's), and the job's - what the solver held (KH_CHAIN_REACH_ROT: the position twin reads them too).
-            float khed_qn[4] = { 0.0f, 0.0f, 0.0f, 1.0f };
-            if (khed_tr && !khed_br) {
+            // guide's), and the job's - what the solver held (CHAIN_REACH_ROT: the position twin reads them too).
+            float qn[4] = { 0.0f, 0.0f, 0.0f, 1.0f };
+            if (tr && !br) {
                 float qt[4];
-                if (khed_wr) memcpy(qt, in.end_job_wq[f], sizeof(qt));
-                else kh_q_from_axes(khed_s->r, qt);
-                kh_q_mul(qfc, qt, khed_qn);
-                kh_q_norm(khed_qn);
+                if (wr) memcpy(qt, in.end_job_wq[f], sizeof(qt));
+                else q_from_axes(s->r, qt);
+                q_mul(qfc, qt, qn);
+                q_norm(qn);
             }
-            const float* const khed_qj = khed_br ? khed_bjq : (in.end_job_r[f] ? in.end_job_q[f] : nullptr);
-            const float* const khed_qf = khed_tr ? (khed_br ? khed_bnq : khed_qn) : khed_qj;
-            if (khed_tp) {
-                float khed_tn[3], khed_tj[3];   // This frame's position target and the job's, carrier-local.
-                if (khed_bp) {
-                    memcpy(khed_tn, khed_bnp, sizeof(khed_tn));
-                    memcpy(khed_tj, khed_bjp, sizeof(khed_tj));
+            const float* const qj = br ? bjq : (in.end_job_r[f] ? in.end_job_q[f] : nullptr);
+            const float* const ed_qf = tr ? (br ? bnq : qn) : qj;
+            if (tp) {
+                float tn[3], tj[3];   // This frame's position target and the job's, carrier-local.
+                if (bp) {
+                    memcpy(tn, bnp, sizeof(tn));
+                    memcpy(tj, bjp, sizeof(tj));
                 } else {
-                    const double* const khed_tw =   // The target, in the world.
-                        khed_wp ? static_cast<const double*>(in.end_job_w[f]) : static_cast<const double*>(khed_s->p);
-                    const float d[3] = { static_cast<float>(khed_tw[0] - khed_wd[0]),
-                                         static_cast<float>(khed_tw[1] - khed_wd[1]),
-                                         static_cast<float>(khed_tw[2] - khed_wd[2]) };
-                    kh_q_rot(qfc, d, khed_tn);
-                    memcpy(khed_tj, in.end_job_x[f], sizeof(khed_tj));
+                    const double* const tw =   // The target, in the world.
+                        wp ? static_cast<const double*>(in.end_job_w[f]) : static_cast<const double*>(s->p);
+                    const float d[3] = { static_cast<float>(tw[0] - wd[0]),
+                                         static_cast<float>(tw[1] - wd[1]),
+                                         static_cast<float>(tw[2] - wd[2]) };
+                    q_rot(qfc, d, tn);
+                    memcpy(tj, in.end_job_x[f], sizeof(tj));
                 }
                 // As the solver holds them: within the chain's reach of its pin - the job's where the job's maps put
                 // the start, this frame's where this frame's do (the maps the correction is applied to, below).
-                kh_chain_end_taut(c, in.ch_mat[f], khed_tj, khed_qj);
-                kh_chain_end_taut(c, khed_skel ? in.pin_mat : in.ch_mat[f], khed_tn, khed_qf);
-                for (int k = 0; k < 3; ++k) dp[k] = khed_tn[k] - khed_tj[k];
+                chain_end_taut(c, in.ch_mat[f], tj, qj);
+                chain_end_taut(c, skel ? in.pin_mat : in.ch_mat[f], tn, ed_qf);
+                for (int k = 0; k < 3; ++k) dp[k] = tn[k] - tj[k];
             }
-            if (khed_tr && khed_br) {
-                const float jc[4] = { -khed_bjq[0], -khed_bjq[1], -khed_bjq[2], khed_bjq[3] };
-                kh_q_mul(khed_bnq, jc, dq);
-                kh_q_norm(dq);
-            } else if (khed_tr) {
+            if (tr && br) {
+                const float jc[4] = { -bjq[0], -bjq[1], -bjq[2], bjq[3] };
+                q_mul(bnq, jc, dq);
+                q_norm(dq);
+            } else if (tr) {
                 const float* jq = in.end_job_q[f];
                 const float jc[4] = { -jq[0], -jq[1], -jq[2], jq[3] };
-                kh_q_mul(khed_qn, jc, dq);
-                kh_q_norm(dq);
+                q_mul(qn, jc, dq);
+                q_norm(dq);
             }
             if (!(dp[0] == dp[0] && dp[1] == dp[1] && dp[2] == dp[2] && dq[0] == dq[0] && dq[1] == dq[1] &&
                   dq[2] == dq[2] && dq[3] == dq[3])) continue;
-            in.end_mat = khed_skel ? in.pin_mat : in.ch_mat[f];
-            kh_chain_end_fix(c, in.end_mat, dp, dq, in.end_anc);
+            in.end_mat = skel ? in.pin_mat : in.ch_mat[f];
+            chain_end_fix(c, in.end_mat, dp, dq, in.end_anc);
             // C3: the bytes this draw last wrote are kept (not skinned and written again) unless another write came
             // since or an input differs (the maps bit for bit, the front, its box).
-            float khed_box[6];
-            memcpy(khed_box, in.box_ctr[f], sizeof(float) * 3u);
-            memcpy(khed_box + 3, in.box_size[f], sizeof(float) * 3u);
-            const bool khed_keep = in.end_wr_ok && in.end_wr == in.vb_wr && in.end_vb == in.vb && in.end_f == f &&
-                                   in.end_gen == khed_gen && in.end_mat_last.size() == in.end_mat.size() &&
-                                   memcmp(in.end_mat_last.data(), in.end_mat.data(),
-                                          in.end_mat.size() * sizeof(float)) == 0 &&
-                                   memcmp(in.end_box, khed_box, sizeof(khed_box)) == 0;
+            float box[6];
+            memcpy(box, in.box_ctr[f], sizeof(float) * 3u);
+            memcpy(box + 3, in.box_size[f], sizeof(float) * 3u);
+            const bool keep = in.end_wr_ok && in.end_wr == in.vb_wr && in.end_vb == in.vb && in.end_f == f &&
+                              in.end_gen == gen && in.end_mat_last.size() == in.end_mat.size() &&
+                              memcmp(in.end_mat_last.data(), in.end_mat.data(),
+                                     in.end_mat.size() * sizeof(float)) == 0 &&
+                              memcmp(in.end_box, box, sizeof(box)) == 0;
             float be[3];
-            if (khed_keep) {
+            if (keep) {
                 memcpy(be, in.end_be, sizeof(be));
             } else {
                 // Skinned and stored as the writeback stores a shape: in the front's box, grown about its centre
-                // where the corrected end leaves it (kh_chain_end_store).
+                // where the corrected end leaves it (chain_end_store).
                 float bc[3];
                 for (int k = 0; k < 3; ++k) bc[k] = in.box_ctr[f][k] - c.auth_ctr[k];
                 in.end_out.resize(nv);
-                kh_chain_end_store(in.rest.data(), nv, c.ext, c.inf.size() == nv ? c.inf.data() : nullptr,
-                                   c.lvl0.size() == nv ? c.lvl0.data() : nullptr, in.end_mat.data(), nb, bc,
-                                   in.box_size[f], in.end_met, in.end_out.data(), be);
-                D3D11_MAPPED_SUBRESOURCE khed_m = {};
-                if (FAILED(khed_ctx->Map(in.vb, 0, D3D11_MAP_WRITE_DISCARD, 0, &khed_m)) || !khed_m.pData) continue;
-                memcpy(khed_m.pData, in.end_out.data(), nv * sizeof(MeshVertex));   // The whole array, as the upload.
-                khed_ctx->Unmap(in.vb, 0);
-                kh_uvs_src_wrote(khed_o.slot);   // KH_USER_VS.
-                khed_new = true;
-                in.end_new_cyc = khed_cyc;   // KH_CHAIN_END_NOTE.
-                in.uploaded_shape = kh_cloth_step_shape(in.end_shape_ref, in.end_shape_key, in.end_met);
+                chain_end_store(in.rest.data(), nv, c.ext, c.inf.size() == nv ? c.inf.data() : nullptr,
+                                c.lvl0.size() == nv ? c.lvl0.data() : nullptr, in.end_mat.data(), nb, bc,
+                                in.box_size[f], in.end_met, in.end_out.data(), be);
+                D3D11_MAPPED_SUBRESOURCE m = {};
+                if (FAILED(ctx->Map(in.vb, 0, D3D11_MAP_WRITE_DISCARD, 0, &m)) || !m.pData) continue;
+                memcpy(m.pData, in.end_out.data(), nv * sizeof(MeshVertex));   // The whole array, as the upload.
+                ctx->Unmap(in.vb, 0);
+                uvs_src_wrote(o.slot);   // KH_USER_VS.
+                ed_new = true;
+                in.end_new_cyc = cyc;   // CHAIN_END_NOTE.
+                in.uploaded_shape = cloth_step_shape(in.end_shape_ref, in.end_shape_key, in.end_met);
                 in.end_wr = ++in.vb_wr;
                 in.end_wr_ok = true;
                 in.end_vb = in.vb;
                 in.end_f = f;
-                in.end_gen = khed_gen;
+                in.end_gen = gen;
                 in.end_mat_last = in.end_mat;
-                memcpy(in.end_box, khed_box, sizeof(khed_box));
+                memcpy(in.end_box, box, sizeof(box));
                 memcpy(in.end_be, be, sizeof(be));
             }
-            // What the upload records with a write, for these bytes: their key (kh_cloth_step_shape: the key follows
+            // What the upload records with a write, for these bytes: their key (cloth_step_shape: the key follows
             // the bytes) and their box (the front's centre, the grown size) - which the upload's chain put and
-            // kh_skin_upload hand the object. A plain chain the rest too (KH_CLOTH_PIN_STEP's rule), so the upload
+            // skin_upload hand the object. A plain chain the rest too (CLOTH_PIN_STEP's rule), so the upload
             // leaves this buffer this cycle; a skeletal one's the pin step recorded, for this same front.
             memcpy(in.uploaded_box_size, be, sizeof(in.uploaded_box_size));
-            if (!khed_skel) {
-                in.uploaded_gen = khed_gen;
+            if (!skel) {
+                in.uploaded_gen = gen;
                 in.uploaded_box_on = in.box_on[f];
                 memcpy(in.uploaded_box_ctr, in.box_ctr[f], sizeof(in.uploaded_box_ctr));
-                in.pin_step_cycle = khed_cyc;
+                in.pin_step_cycle = cyc;
             }
-            if (khed_direct) g_cloth_gen_slot[khed_o.slot] = in.uploaded_shape;
-            khed_size[0] = be[0];   // SQF order, as the upload's put.
-            khed_size[1] = be[2];
-            khed_size[2] = be[1];
-            khed_cycw = in.end_new_cyc == khed_cyc;   // KH_CHAIN_END_NOTE.
-            khed_wrote = true;
+            if (direct) g_cloth_gen_slot[o.slot] = in.uploaded_shape;
+            size[0] = be[0];   // SQF order, as the upload's put.
+            size[1] = be[2];
+            size[2] = be[1];
+            cycw = in.end_new_cyc == cyc;   // CHAIN_END_NOTE.
+            wrote = true;
         } while (false);
-        if (!khed_wrote) {
-            // KH_CHAIN_END_RACE: as the note below takes such bytes at a final or repick step.
-            if (khed_race_cycw && (g_attach_final_step || g_attach_repick_step)) {
-                kh_attach_moved_note(khed_o, true, true);
+        if (!wrote) {
+            // CHAIN_END_RACE: as the note below takes such bytes at a final or repick step.
+            if (race_cycw && (g_attach_final_step || g_attach_repick_step)) {
+                attach_moved_note(o, true, true);
             }
             continue;
         }
-        if (memcmp(khed_o.size, khed_size, sizeof(khed_size)) != 0) {   // Either kind: the box of its bytes.
-            memcpy(khed_o.size, khed_size, sizeof(khed_size));
-            khed_new = true;
+        if (memcmp(o.size, size, sizeof(size)) != 0) {   // Either kind: the box of its bytes.
+            memcpy(o.size, size, sizeof(size));
+            ed_new = true;
         }
-        // Re-filed; a final step's reopens the sun map (KH_SUN_RESTEP), a repick step's the fire's (KH_CAST_REPICK).
-        // KH_CHAIN_END_NOTE: only when the bytes or the box changed, or - at a final or repick step - the bytes an
+        // Re-filed; a final step's reopens the sun map (SUN_RESTEP), a repick step's the fire's (CAST_REPICK).
+        // CHAIN_END_NOTE: only when the bytes or the box changed, or - at a final or repick step - the bytes an
         // earlier step of this cycle wrote (a seam, mirror or in-front step writes a plain chain's newer front after
         // the cast fire built the sun map, and its note reopens nothing). Do not note bytes kept from an earlier cycle
         // in an unchanged box: the scene and the maps already hold them, and noting them re-runs the sun ladder and
         // the repick every frame for an idle chain.
-        kh_attach_moved_note(khed_o, khed_new || ((g_attach_final_step || g_attach_repick_step) && khed_cycw), true);
+        attach_moved_note(o, ed_new || ((g_attach_final_step || g_attach_repick_step) && cycw), true);
     }
 }
 
-// KH_CREW_LAG (declared with the crew table): any chain set up; the characters a simulating chain's end follows -
+// CREW_LAG (declared with the crew table): any chain set up; the characters a simulating chain's end follows -
 // its object, its memory point's owner, its rotation object - for the census (a Man among them joins the table).
 // Game thread; the second under g_draw_list_mutex (the draw list is read).
-inline bool kh_crew_chain_any() { return !g_chain_cfg.empty(); }
-inline void kh_crew_chain_cand(std::vector<std::pair<game_value, bool>>& khcc_out) {
-    for (const auto& khcc_kv : g_chain_cfg) {
-        const KhChainCfg& khcc_c = khcc_kv.second;
-        const auto khcc_d = g_draw_list.find(khcc_kv.first);
-        if (khcc_d == g_draw_list.end() || khcc_d->second.seq != khcc_c.seq || !kh_chain_obj_sim(khcc_d->second)) {
+inline bool crew_chain_any() { return !g_chain_cfg.empty(); }
+inline void crew_chain_cand(std::vector<std::pair<game_value, bool>>& out) {
+    for (const auto& kv : g_chain_cfg) {
+        const ChainCfg& c = kv.second;
+        const auto d = g_draw_list.find(kv.first);
+        if (d == g_draw_list.end() || d->second.seq != c.seq || !chain_obj_sim(d->second)) {
             continue;
         }
-        if ((khcc_c.pos == KH_CHE_OBJ || khcc_c.pos == KH_CHE_MEM) && kh_attach_is_obj(khcc_c.pos_obj)) {
-            khcc_out.emplace_back(khcc_c.pos_obj, false);
+        if ((c.pos == CHE_OBJ || c.pos == CHE_MEM) && attach_is_obj(c.pos_obj)) {
+            out.emplace_back(c.pos_obj, false);
         }
-        if (khcc_c.rot == KH_CHE_OBJ && kh_attach_is_obj(khcc_c.rot_obj)) khcc_out.emplace_back(khcc_c.rot_obj, false);
+        if (c.rot == CHE_OBJ && attach_is_obj(c.rot_obj)) out.emplace_back(c.rot_obj, false);
     }
 }
-// KH_CHAIN - GAME THREAD, from flush_frame ahead of the cloth step and ahead of its empty-list return (a removed
+// CHAIN - GAME THREAD, from flush_frame ahead of the cloth step and ahead of its empty-list return (a removed
 // object's proxy is deleted whether or not anything is left to draw), holding no lock across an engine read. Drops the
 // settings of objects that are gone, handing their proxies to the delete queue, and reads every followed end: an
-// object's transform, or a memory point's through its proxy, by the raw page-gated reads kh_attach_step uses - no
+// object's transform, or a memory point's through its proxy, by the raw page-gated reads attach_step uses - no
 // script call. A memory-point proxy the attach has not yet moved off its spawn point fails the parent-reach test, as a
-// skeletal binding's does, and the lane stays free that frame. khcp_gts: this flush_frame's sampler took a sample
-// (kh_attach_gt_snap's answer) - its number and stamp are this pass's.
-inline void kh_chain_prepare(bool khcp_gts) {
-    KH_PROF_SCOPE(KHP_CHAIN_PREPARE);   // KH_PROF.
+// skeletal binding's does, and the lane stays free that frame. gts: this flush_frame's sampler took a sample
+// (attach_gt_snap's answer) - its number and stamp are this pass's.
+inline void chain_prepare(bool gts) {
+    KH_PROF_SCOPE(PROF_CHAIN_PREPARE);   // PROF.
     if (g_chain_cfg.empty()) {
-        if (g_chain_end_n.load(std::memory_order_relaxed) != 0u) kh_chain_end_publish(0u);   // Empties the table.
+        if (g_chain_end_n.load(std::memory_order_relaxed) != 0u) chain_end_publish(0u);   // Empties the table.
         return;
     }
-    std::vector<std::string> khcp_dead, khcp_read;
+    std::vector<std::string> dead, read;
     {
-        std::lock_guard<std::mutex> khcp_g(g_draw_list_mutex);
-        for (auto& khcp_kv : g_chain_cfg) {
-            const auto khcp_it = g_draw_list.find(khcp_kv.first);
-            if (khcp_it == g_draw_list.end() || khcp_it->second.seq != khcp_kv.second.seq) {
-                khcp_dead.push_back(khcp_kv.first);
+        std::lock_guard<std::mutex> g(g_draw_list_mutex);
+        for (auto& kv : g_chain_cfg) {
+            const auto it = g_draw_list.find(kv.first);
+            if (it == g_draw_list.end() || it->second.seq != kv.second.seq) {
+                dead.push_back(kv.first);
                 continue;
             }
-            KhChainCfg& khcp_c = khcp_kv.second;
-            khcp_c.live_p = false;
-            khcp_c.live_r = false;
-            // KH_CHAIN_REFUSED_END: the verdict, once per chain per Draw3D (a key built only while a refusal is filed),
-            // for kh_chain_end_publish; the reads below take every chain. A mesh still loading is not a verdict: it
+            ChainCfg& c = kv.second;
+            c.live_p = false;
+            c.live_r = false;
+            // CHAIN_REFUSED_END: the verdict, once per chain per Draw3D (a key built only while a refusal is filed),
+            // for chain_end_publish; the reads below take every chain. A mesh still loading is not a verdict: it
             // files, and builds once it lands.
-            khcp_c.nobuild = (kh_mesh_alive(khcp_it->second.mesh) && !kh_chain_mesh_ok(khcp_it->second.mesh)) ||
-                             kh_chain_refused(khcp_kv.first, khcp_it->second);
-            const bool khcp_follow = khcp_c.pos == KH_CHE_OBJ || khcp_c.pos == KH_CHE_MEM ||
-                                     khcp_c.rot == KH_CHE_OBJ || khcp_c.rot == KH_CHE_MEM;
-            if (khcp_follow && kh_chain_obj_sim(khcp_it->second)) khcp_read.push_back(khcp_kv.first);
+            c.nobuild = (mesh_alive(it->second.mesh) && !chain_mesh_ok(it->second.mesh)) ||
+                        chain_refused(kv.first, it->second);
+            const bool follow = c.pos == CHE_OBJ || c.pos == CHE_MEM ||
+                                c.rot == CHE_OBJ || c.rot == CHE_MEM;
+            if (follow && chain_obj_sim(it->second)) read.push_back(kv.first);
         }
     }
-    for (const std::string& khcp_h : khcp_dead) {
-        const auto khcp_it = g_chain_cfg.find(khcp_h);
-        if (khcp_it == g_chain_cfg.end()) continue;
-        kh_attach_proxy_orphan(khcp_it->second.proxy);   // Takes g_draw_list_mutex itself.
-        g_chain_cfg.erase(khcp_it);
+    for (const std::string& h : dead) {
+        const auto it = g_chain_cfg.find(h);
+        if (it == g_chain_cfg.end()) continue;
+        attach_proxy_orphan(it->second.proxy);   // Takes g_draw_list_mutex itself.
+        g_chain_cfg.erase(it);
     }
-    // KH_PXY_SMOOTH: this pass's sample. When the Draw3D sampler took one in this flush_frame (it runs first): its
+    // PXY_SMOOTH: this pass's sample. When the Draw3D sampler took one in this flush_frame (it runs first): its
     // number and stamp, so a proxy a binding shares steps once (the entry hands the sampler's result back) and one
     // it does not takes one step at the frame's stamp. When it took none, a sample of the chain's own
-    // (KH_PXY_SEQ_CHAIN). Key on the sampler's run, not on the binding count: a binding the census expires after the
+    // (PXY_SEQ_CHAIN). Key on the sampler's run, not on the binding count: a binding the census expires after the
     // sampler stepped a shared proxy leaves the count at zero, and a sample of the chain's own then steps the entry
     // twice in one pass.
-    const int64_t khcp_q = khcp_gts ? g_gts_stamp_pub[g_gts_seq % KH_GTS_STAMPS].load(std::memory_order_relaxed)
-                                    : kh_gts_qpc();
-    const uint64_t khcp_seq = khcp_gts ? g_gts_seq : (KH_PXY_SEQ_CHAIN | static_cast<uint64_t>(khcp_q));
-    for (const std::string& khcp_h : khcp_read) {
-        const auto khcp_it = g_chain_cfg.find(khcp_h);
-        if (khcp_it == g_chain_cfg.end()) continue;
-        KhChainCfg& khcp_c = khcp_it->second;
-        float khcp_p[3], khcp_r[9];
-        bool khcp_mem_ok = false;
-        float khcp_mr[9];
-        if (khcp_c.pos == KH_CHE_MEM || khcp_c.rot == KH_CHE_MEM) {
-            float khcp_pp[3], khcp_pr[9];
-            if (!kh_attach_obj_dead(khcp_c.pos_obj) && !kh_attach_obj_dead(khcp_c.proxy) &&
-                kh_attach_raw(khcp_c.proxy, khcp_c.rd_pos.off, khcp_c.rd_pos.vb, khcp_c.rd_pos.bb, khcp_c.rd_pos.avb, khcp_c.rd_pos.abb, khcp_p, khcp_mr) &&
-                kh_attach_raw(khcp_c.pos_obj, khcp_c.rd_par.off, khcp_c.rd_par.vb, khcp_c.rd_par.bb, khcp_c.rd_par.avb, khcp_c.rd_par.abb, khcp_pp, khcp_pr)) {
-                // KH_CREW_LAG: the memory point moved by its character's correction, its reach tested against where
+    const int64_t q = gts ? g_gts.stamp_pub[g_gts_seq % GTS_STAMPS].load(std::memory_order_relaxed)
+                                    : gts_qpc();
+    const uint64_t seq = gts ? g_gts_seq : (PXY_SEQ_CHAIN | static_cast<uint64_t>(q));
+    for (const std::string& h : read) {
+        const auto it = g_chain_cfg.find(h);
+        if (it == g_chain_cfg.end()) continue;
+        ChainCfg& c = it->second;
+        float p[3], r[9];
+        bool mem_ok = false;
+        float mr[9];
+        if (c.pos == CHE_MEM || c.rot == CHE_MEM) {
+            float pp[3], pr[9];
+            if (!attach_obj_dead(c.pos_obj) && !attach_obj_dead(c.proxy) &&
+                attach_raw(c.proxy, c.rd_pos.off, c.rd_pos.vb, c.rd_pos.bb, c.rd_pos.avb, c.rd_pos.abb, p, mr) &&
+                attach_raw(c.pos_obj, c.rd_par.off, c.rd_par.vb, c.rd_par.bb, c.rd_par.avb, c.rd_par.abb, pp, pr)) {
+                // CREW_LAG: the memory point moved by its character's correction, its reach tested against where
                 // the character is drawn (its own state holds the get-in pose while it is crew).
-                const KhCrewEnt* const khcp_cw = kh_crew_of(khcp_c.pos_obj);
-                if (khcp_cw) {
-                    kh_crew_apply(khcp_cw->t, khcp_cw->h, khcp_cw->dm, khcp_p, khcp_mr);
-                    for (int k = 0; k < 3; ++k) khcp_pp[k] = static_cast<float>(khcp_cw->t[k]);
+                const CrewEnt* const cw = crew_of(c.pos_obj);
+                if (cw) {
+                    crew_apply(cw->t, cw->h, cw->dm, p, mr);
+                    for (int k = 0; k < 3; ++k) pp[k] = static_cast<float>(cw->t[k]);
                 }
-                float khcp_d[3];
-                for (int k = 0; k < 3; ++k) khcp_d[k] = khcp_p[k] - khcp_pp[k];
-                khcp_mem_ok = khcp_d[0] * khcp_d[0] + khcp_d[1] * khcp_d[1] + khcp_d[2] * khcp_d[2] <=
-                              KH_SKEL_REACH_M * KH_SKEL_REACH_M;
+                float d[3];
+                for (int k = 0; k < 3; ++k) d[k] = p[k] - pp[k];
+                mem_ok = d[0] * d[0] + d[1] * d[1] + d[2] * d[2] <=
+                         SKEL_REACH_M * SKEL_REACH_M;
             }
-            if (khcp_mem_ok && khcp_c.pos == KH_CHE_MEM) {
-                // KH_PXY_SMOOTH: the memory point where the estimator has it (the proxy is the pool's), in double.
-                float khcp_sd[3];
-                kh_pxy_smooth_note(khcp_c.proxy, khcp_seq, khcp_q, khcp_p, khcp_sd);
-                khcp_c.live_pos[0] = static_cast<double>(khcp_p[0]) + static_cast<double>(khcp_sd[0]);
-                khcp_c.live_pos[1] = static_cast<double>(khcp_p[2]) + static_cast<double>(khcp_sd[2]);
-                khcp_c.live_pos[2] = static_cast<double>(khcp_p[1]) + static_cast<double>(khcp_sd[1]);
-                khcp_c.live_p = true;
+            if (mem_ok && c.pos == CHE_MEM) {
+                // PXY_SMOOTH: the memory point where the estimator has it (the proxy is the pool's), in double.
+                float sd[3];
+                pxy_smooth_note(c.proxy, seq, q, p, sd);
+                c.live_pos[0] = static_cast<double>(p[0]) + static_cast<double>(sd[0]);
+                c.live_pos[1] = static_cast<double>(p[2]) + static_cast<double>(sd[2]);
+                c.live_pos[2] = static_cast<double>(p[1]) + static_cast<double>(sd[1]);
+                c.live_p = true;
             }
-            if (khcp_mem_ok && khcp_c.rot == KH_CHE_MEM) {
-                memcpy(khcp_c.live_rot, khcp_mr, sizeof(khcp_c.live_rot));
-                khcp_c.live_r = true;
+            if (mem_ok && c.rot == CHE_MEM) {
+                memcpy(c.live_rot, mr, sizeof(c.live_rot));
+                c.live_r = true;
             }
         }
-        if (khcp_c.pos == KH_CHE_OBJ && !kh_attach_obj_dead(khcp_c.pos_obj) &&
-            kh_attach_raw(khcp_c.pos_obj, khcp_c.rd_pos.off, khcp_c.rd_pos.vb, khcp_c.rd_pos.bb, khcp_c.rd_pos.avb, khcp_c.rd_pos.abb, khcp_p, khcp_r)) {
-            khcp_c.live_pos[0] = khcp_p[0]; khcp_c.live_pos[1] = khcp_p[2]; khcp_c.live_pos[2] = khcp_p[1];
-            const KhCrewEnt* const khcp_cw = kh_crew_of(khcp_c.pos_obj);   // KH_CREW_LAG: where it is drawn.
-            if (khcp_cw) {
-                khcp_c.live_pos[0] = khcp_cw->t[0];
-                khcp_c.live_pos[1] = khcp_cw->t[2];
-                khcp_c.live_pos[2] = khcp_cw->t[1];
+        if (c.pos == CHE_OBJ && !attach_obj_dead(c.pos_obj) &&
+            attach_raw(c.pos_obj, c.rd_pos.off, c.rd_pos.vb, c.rd_pos.bb, c.rd_pos.avb, c.rd_pos.abb, p, r)) {
+            c.live_pos[0] = p[0]; c.live_pos[1] = p[2]; c.live_pos[2] = p[1];
+            const CrewEnt* const cw = crew_of(c.pos_obj);   // CREW_LAG: where it is drawn.
+            if (cw) {
+                c.live_pos[0] = cw->t[0];
+                c.live_pos[1] = cw->t[2];
+                c.live_pos[2] = cw->t[1];
             }
-            khcp_c.live_p = true;
+            c.live_p = true;
         }
-        if (khcp_c.rot == KH_CHE_OBJ && !kh_attach_obj_dead(khcp_c.rot_obj) &&
-            kh_attach_raw(khcp_c.rot_obj, khcp_c.rd_rot.off, khcp_c.rd_rot.vb, khcp_c.rd_rot.bb, khcp_c.rd_rot.avb, khcp_c.rd_rot.abb, khcp_p, khcp_r)) {
-            memcpy(khcp_c.live_rot, khcp_r, sizeof(khcp_c.live_rot));
-            const KhCrewEnt* const khcp_cw = kh_crew_of(khcp_c.rot_obj);   // KH_CREW_LAG: turned as drawn.
-            if (khcp_cw) memcpy(khcp_c.live_rot, khcp_cw->cr, sizeof(khcp_c.live_rot));
-            khcp_c.live_r = true;
+        if (c.rot == CHE_OBJ && !attach_obj_dead(c.rot_obj) &&
+            attach_raw(c.rot_obj, c.rd_rot.off, c.rd_rot.vb, c.rd_rot.bb, c.rd_rot.avb, c.rd_rot.abb, p, r)) {
+            memcpy(c.live_rot, r, sizeof(c.live_rot));
+            const CrewEnt* const cw = crew_of(c.rot_obj);   // CREW_LAG: turned as drawn.
+            if (cw) memcpy(c.live_rot, cw->cr, sizeof(c.live_rot));
+            c.live_r = true;
         }
-        // A refused read holds the lane's last transform (KhChainCfg::read_p); a dead object frees it.
-        const game_value& khcp_po = khcp_c.pos_obj;
-        if (khcp_c.pos == KH_CHE_OBJ || khcp_c.pos == KH_CHE_MEM) {
-            if (khcp_c.live_p) {
-                memcpy(khcp_c.last_pos, khcp_c.live_pos, sizeof(khcp_c.last_pos));
-                khcp_c.read_p = true;
+        // A refused read holds the lane's last transform (ChainCfg::read_p); a dead object frees it.
+        const game_value& po = c.pos_obj;
+        if (c.pos == CHE_OBJ || c.pos == CHE_MEM) {
+            if (c.live_p) {
+                memcpy(c.last_pos, c.live_pos, sizeof(c.last_pos));
+                c.read_p = true;
             } else {
-                if (khcp_c.read_p && !kh_attach_obj_dead(khcp_po)) {
-                    memcpy(khcp_c.live_pos, khcp_c.last_pos, sizeof(khcp_c.live_pos));
-                    khcp_c.live_p = true;
+                if (c.read_p && !attach_obj_dead(po)) {
+                    memcpy(c.live_pos, c.last_pos, sizeof(c.live_pos));
+                    c.live_p = true;
                 } else {
-                    khcp_c.read_p = false;
+                    c.read_p = false;
                 }
             }
         }
-        if (khcp_c.rot == KH_CHE_OBJ || khcp_c.rot == KH_CHE_MEM) {
-            const game_value& khcp_ro = khcp_c.rot == KH_CHE_MEM ? khcp_po : khcp_c.rot_obj;
-            if (khcp_c.live_r) {
-                memcpy(khcp_c.last_rot, khcp_c.live_rot, sizeof(khcp_c.last_rot));
-                khcp_c.read_r = true;
+        if (c.rot == CHE_OBJ || c.rot == CHE_MEM) {
+            const game_value& ro = c.rot == CHE_MEM ? po : c.rot_obj;
+            if (c.live_r) {
+                memcpy(c.last_rot, c.live_rot, sizeof(c.last_rot));
+                c.read_r = true;
             } else {
-                if (khcp_c.read_r && !kh_attach_obj_dead(khcp_ro)) {
-                    memcpy(khcp_c.live_rot, khcp_c.last_rot, sizeof(khcp_c.live_rot));
-                    khcp_c.live_r = true;
+                if (c.read_r && !attach_obj_dead(ro)) {
+                    memcpy(c.live_rot, c.last_rot, sizeof(c.live_rot));
+                    c.live_r = true;
                 } else {
-                    khcp_c.read_r = false;
+                    c.read_r = false;
                 }
             }
         }
     }
-    kh_chain_end_publish(khcp_seq);   // KH_CHAIN_END_DRAW: this Draw3D's targets, by its sample number.
+    chain_end_publish(seq);   // CHAIN_END_DRAW: this Draw3D's targets, by its sample number.
 }
 }

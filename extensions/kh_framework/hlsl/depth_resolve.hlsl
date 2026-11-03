@@ -27,8 +27,8 @@ float2 PSDepthResolve(float4 pos : SV_Position) : SV_Target
 #endif
 }
 
-// KH_VM_SEE: sample 0 of the live depth, raw - the sample cb.hlsl's LoadDepthRaw reads, so the effect chain compares
-// a pixel's snapshot with its live depth bit for bit - into an R32_FLOAT target (kh_vmsee_snapshot).
+// VM_SEE: sample 0 of the live depth, raw - the sample cb.hlsl's LoadDepthRaw reads, so the effect chain compares
+// a pixel's snapshot with its live depth bit for bit - into an R32_FLOAT target (vmsee_snapshot).
 float PSDepthS0(float4 pos : SV_Position) : SV_Target
 {
     const int2 p = int2(pos.xy);
@@ -39,8 +39,8 @@ float PSDepthS0(float4 pos : SV_Position) : SV_Target
 #endif
 }
 
-// KH_PSB_ZB: the one pass's block bound Zb (C++ kh_wsee_snapshot, right after S; compiled with MSAA_DEPTH 0 - t0 is S,
-// 1x at the main depth's size - at KH_PSB_ZB_LS = log2 s, TWIN of KH_PSB_LS): at the record's texel (X, Y) the largest
+// PSB_ZB: the one pass's block bound Zb (C++ wsee_snapshot, right after S; compiled with MSAA_DEPTH 0 - t0 is S,
+// 1x at the main depth's size - at KH_PSB_ZB_LS = log2 s, TWIN of PSB_LS): at the record's texel (X, Y) the largest
 // of S over the block's s x s pixels (X s + (k & (s - 1)), Y s + (k >> log2 s)), a pixel past the frame's edge loads 0
 // as the variant's loop does, and the first k holding it (the loop's first read). R32G32_FLOAT, a fullscreen triangle.
 #ifndef KH_PSB_ZB_LS
@@ -66,7 +66,7 @@ float2 PSPsbZb(float4 pos : SV_Position) : SV_Target
     return float2(khzb_m, float(khzb_k));
 }
 
-// KH_WSEE: the late opaque replay's pixel shader (the store path) - an engine draw that writes depth after the
+// WSEE: the late opaque replay's pixel shader (the store path) - an engine draw that writes depth after the
 // snapshot, drawn again into khWsT with depth EQUAL: (1, 1, 1, 1) = T reset (the surface hides the layers behind it),
 // G = 1. Inputs: system values alone, so the signature links after any vertex shader. It also keeps the opaque's OWN
 // depth, D3 (u3: R32F, one value a pixel): the pass runs per SAMPLE (SV_SampleIndex) under [earlydepthstencil], so an
@@ -74,7 +74,7 @@ float2 PSPsbZb(float4 pos : SV_Position) : SV_Target
 // raw (resolveSrc t0: the depth's MS view beside its read-only DSV - the value PSDepthS0 reads, bit for bit). A store
 // to an unbound UAV is dropped and an unbound t0 loads 0, so the same blob serves without D3. Compiled multisampled
 // only (MSAA_DEPTH 1 at the live count; prewarmed at 2 / 4 / 8); the single-sample branch keeps the unit compiling.
-// KH_WSEE_OQ2: u3 - above the post twins' three targets (SV_Target0 - SV_Target2: T, Tp, D3m; PSWseeOneZ's note).
+// WSEE_OQ2: u3 - above the post twins' three targets (SV_Target0 - SV_Target2: T, Tp, D3m; PSWseeOneZ's note).
 RWTexture2D<float> khWsD3 : register(u3);
 void KhWseeD3Store(float4 pos, uint khs)
 {
@@ -85,8 +85,8 @@ void KhWseeD3Store(float4 pos, uint khs)
     if (khs == 0u) khWsD3[p] = resolveSrc.Load(int3(p, 0));
 #endif
 }
-// KH_WSEE_OQ2: a post replay's third target D3m (SV_Target2: R32_FLOAT at the main depth's sample count and quality,
-// bound beside T and Tp - C++ kh_wsee_re_set): the Z twins below write their own depth there, the store path
+// WSEE_OQ2: a post replay's third target D3m (SV_Target2: R32_FLOAT at the main depth's sample count and quality,
+// bound beside T and Tp - C++ wsee_re_set): the Z twins below write their own depth there, the store path
 // (PSWseeOne / PSWseeOneL, the store above) writes -1 - "no depth here": the resolve (PSWseeD3Res) then keeps the
 // store's D3. Written at exactly the samples T's G is (one pass, no blend state, the engine's sample mask). Without D3
 // standing the post replay binds one or two targets: the third output is dropped (the D3D11 debug layer logs it).
@@ -97,13 +97,13 @@ KhWseeOneM PSWseeOne(float4 pos : SV_Position, uint khs : SV_SampleIndex)
     KhWseeD3Store(pos, khs);   // D3's store.
     KhWseeOneM o;
     o.t = float4(1.0f, 1.0f, 1.0f, 1.0f);
-    o.z = -1.0f;   // KH_WSEE_OQ2: stored above, not here.
+    o.z = -1.0f;   // WSEE_OQ2: stored above, not here.
     return o;
 }
 // The late-opaque replay's MRT twins with Tp bound as the second target (khWsTp: pre in R, post in G, the 100 % band's
 // in B / A - all four reset, no blend state on the pass) - reset with T's particle channels, so Tp's layers stay a
 // subset of T's.
-struct KhWseeOneLM { float4 t : SV_Target0; float4 p : SV_Target1; float z : SV_Target2; };   // KH_WSEE_OQ2.
+struct KhWseeOneLM { float4 t : SV_Target0; float4 p : SV_Target1; float z : SV_Target2; };   // WSEE_OQ2.
 [earlydepthstencil]
 KhWseeOneLM PSWseeOneL(float4 pos : SV_Position, uint khs : SV_SampleIndex)
 {
@@ -111,18 +111,18 @@ KhWseeOneLM PSWseeOneL(float4 pos : SV_Position, uint khs : SV_SampleIndex)
     KhWseeOneLM o;
     o.t = float4(1.0f, 1.0f, 1.0f, 1.0f);
     o.p = float4(1.0f, 1.0f, 1.0f, 1.0f);
-    o.z = -1.0f;   // KH_WSEE_OQ2: PSWseeOne's.
+    o.z = -1.0f;   // WSEE_OQ2: PSWseeOne's.
     return o;
 }
-// KH_WSEE_OQ2 - the post twins without D3's UAV and the depth view (the KH_WSEE note's RE-ISSUES): the same T / Tp
-// writes, and the opaque's depth at sample 0 into D3m (SV_Target2), at PIXEL rate (KH_WSEE_PXZ) under
+// WSEE_OQ2 - the post twins without D3's UAV and the depth view (the WSEE note's RE-ISSUES): the same T / Tp
+// writes, and the opaque's depth at sample 0 into D3m (SV_Target2), at PIXEL rate (WSEE_PXZ) under
 // [earlydepthstencil]: EQUAL still runs per sample ahead of the shader and the one invocation's outputs go to the
 // covered samples that passed it, so T / Tp take exactly the samples the per-sample pass wrote, and D3m one value a
 // pixel. The depth the engine wrote at sample 0 is the fixed-function z there after the format's conversion (D3D11.3
 // 15.16.2 / 16.3.1: the PS's input z matches the interpolated z and carries no format quantization); D3m lies within
 // KhWseeZAtS0's delta of it (PSWseeD3Res's tolerance). A depth bias, clip off, a wireframe fill, a non-triangle
-// topology or a GS takes the store path (C++ kh_wsee_d3m_path).
-// KH_WSEE_PXZ - KhWseeZAtS0: the centre's z plus its fine derivatives times sample 0's offset
+// topology or a GS takes the store path (C++ wsee_d3m_path).
+// WSEE_PXZ - KhWseeZAtS0: the centre's z plus its fine derivatives times sample 0's offset
 // (GetRenderTargetSamplePosition: the bound targets' actual pattern). z is affine over a triangle and every lane of
 // the quad (helpers, centres off the triangle) evaluates the same interpolator, so delta <= (2 + 2 |ox| + 2 |oy|) E +
 // two float steps, E the hardware interpolator's own deviation from a plane (D3D11 fixes none). Modelled delta:
@@ -139,7 +139,7 @@ float KhWseeZAtS0(float4 pos)
 #endif
 }
 [earlydepthstencil]
-KhWseeOneM PSWseeOneZ(float4 pos : SV_Position)   // KH_WSEE_PXZ: pixel rate.
+KhWseeOneM PSWseeOneZ(float4 pos : SV_Position)   // WSEE_PXZ: pixel rate.
 {
     KhWseeOneM o;
     o.t = float4(1.0f, 1.0f, 1.0f, 1.0f);
@@ -147,7 +147,7 @@ KhWseeOneM PSWseeOneZ(float4 pos : SV_Position)   // KH_WSEE_PXZ: pixel rate.
     return o;
 }
 [earlydepthstencil]
-KhWseeOneLM PSWseeOneZL(float4 pos : SV_Position)   // KH_WSEE_OQ2: PSWseeOneZ's MRT twin (Tp reset too); PXZ.
+KhWseeOneLM PSWseeOneZL(float4 pos : SV_Position)   // WSEE_OQ2: PSWseeOneZ's MRT twin (Tp reset too); PXZ.
 {
     KhWseeOneLM o;
     o.t = float4(1.0f, 1.0f, 1.0f, 1.0f);
@@ -155,7 +155,7 @@ KhWseeOneLM PSWseeOneZL(float4 pos : SV_Position)   // KH_WSEE_OQ2: PSWseeOneZ's
     o.z = KhWseeZAtS0(pos);
     return o;
 }
-// KH_WSEE_OQ2 - D3 from D3m, once before a reader binds D3 (C++ kh_wsee_d3m_resolve; a fullscreen pass into D3's RTV,
+// WSEE_OQ2 - D3 from D3m, once before a reader binds D3 (C++ wsee_d3m_resolve; a fullscreen pass into D3's RTV,
 // sample 0). Only where sample 0's last late opaque was a post one (T's G > 0.75) and wrote D3m (z > -0.5: not the
 // store path's -1); else discarded (D3 keeps its value; where no late opaque owns sample 0 it holds none and no
 // reader takes it). There D3 = the live sample 0 r where z lies within KH_WSEE_D3_TOL of it, else z. Where nothing
@@ -179,7 +179,7 @@ float PSWseeD3Res(float4 pos : SV_Position) : SV_Target
     const float khdr_r = resolveSrc.Load(p, 0);
     return abs(khdr_z - khdr_r) <= KH_WSEE_D3_TOL ? khdr_r : khdr_z;
 #else
-    discard;   // Multisampled only (kh_wsee_ensure); the branch keeps the unit compiling at 1x.
+    discard;   // Multisampled only (wsee_ensure); the branch keeps the unit compiling at 1x.
     return 0.0f;
 #endif
 }

@@ -185,7 +185,7 @@ if !(isNull _unit) then {
 							if _disableCollision then {
 								private _collision = isNull (attachedTo _object);
 
-								if (((getPhysicsCollisionFlag _object) select 0) isNotEqualTo _collision) then {
+								if (((getPhysicsCollisionFlag _object) param [0, false]) isNotEqualTo _collision) then {
 									execute [
 										[_object, _collision],
 										{

@@ -1,25 +1,25 @@
 #pragma once
 
-// The injection half (rendering_integration_injection.hpp): the constant-buffer census (KH_CBC). Never include it on
+// The injection half (rendering_integration_injection.hpp): the constant-buffer census (CBC). Never include it on
 // its own.
 namespace RenderIntegration {
 
 inline bool shadow_live_wanted();   // Defined in rendering/mask_cast_state.hpp (the view-stage gate).
 // Keyed by the buffer object pointer, compared opaquely (never dereferenced or AddRef'd: a destroyed buffer stops
 // matching; a recycled pointer re-records only when an upload to it probes as a camera slot, and until then resolves to
-// the old pair - kh_cbc_find checks no age).
-struct KhCbCensusEntry {
+// the old pair - cbc_find checks no age).
+struct CbCensusEntry {
     void*    buf = nullptr;
     float    m22 = 0.0f;
     float    m32 = 0.0f;
     uint64_t ms = 0;   // Steady ms of the recording upload.
 };
-static constexpr int KH_CBC_N = 16;
-static KhCbCensusEntry g_cbc[KH_CBC_N];
+static constexpr int CBC_N = 16;
+static CbCensusEntry g_cbc[CBC_N];
 
 // DO NOT TRY TO NARROW THIS. It was measured, in full, and it cannot be.
 //
-// kh_cbc_on() is term 1 of kh_upload_hook_wanted's consumer list, and it is a blanket: with a lit mesh in the scene it
+// cbc_on() is term 1 of upload_hook_wanted's consumer list, and it is a blanket: with a lit mesh in the scene it
 // admits EVERY engine constant-buffer map - ~8,800 a cycle, ~3 ms of render-thread time. Narrowing it looks like an
 // obvious win (the census it feeds, g_cbc, holds 16 slots and the other locators all narrow to one buffer once they
 // lock).
@@ -45,39 +45,39 @@ static KhCbCensusEntry g_cbc[KH_CBC_N];
 //
 // The only consumer that can be locked is the census, at 10 % of the traffic. Anything else needs
 // shadow_register_upload to stop being a rolling recorder, which is a change to what it is FOR, not to this gate.
-inline bool kh_cbc_on() {
+inline bool cbc_on() {
     return shadow_live_wanted() || g_svs_mesh_wanted.load(std::memory_order_relaxed);
 }
 
-inline const KhCbCensusEntry* kh_cbc_find(void* khcb_buf) {
-    for (int khcb_i = 0; khcb_i < KH_CBC_N; ++khcb_i) {
-        if (g_cbc[khcb_i].buf == khcb_buf) return &g_cbc[khcb_i];
+inline const CbCensusEntry* cbc_find(void* buf) {
+    for (int i = 0; i < CBC_N; ++i) {
+        if (g_cbc[i].buf == buf) return &g_cbc[i];
     }
     return nullptr;
 }
 
-inline void kh_cbc_note(void* khcb_res, float khcb_m22, float khcb_m32) {
-    int khcb_slot = -1;
-    uint64_t khcb_oldest = ~0ull;
-    int khcb_oldest_i = 0;
+inline void cbc_note(void* res, float m22, float m32) {
+    int slot = -1;
+    uint64_t oldest = ~0ull;
+    int oldest_i = 0;
 
-    for (int khcb_i = 0; khcb_i < KH_CBC_N; ++khcb_i) {
-        if (g_cbc[khcb_i].buf == khcb_res) { khcb_slot = khcb_i; break; }
-        if (!g_cbc[khcb_i].buf) { if (khcb_slot < 0) khcb_slot = khcb_i; continue; }
-        if (g_cbc[khcb_i].ms < khcb_oldest) {
-            khcb_oldest = g_cbc[khcb_i].ms;
-            khcb_oldest_i = khcb_i;
+    for (int i = 0; i < CBC_N; ++i) {
+        if (g_cbc[i].buf == res) { slot = i; break; }
+        if (!g_cbc[i].buf) { if (slot < 0) slot = i; continue; }
+        if (g_cbc[i].ms < oldest) {
+            oldest = g_cbc[i].ms;
+            oldest_i = i;
         }
     }
 
-    if (khcb_slot < 0) {
-        khcb_slot = khcb_oldest_i;
-        g_cbc[khcb_slot] = KhCbCensusEntry{};
+    if (slot < 0) {
+        slot = oldest_i;
+        g_cbc[slot] = CbCensusEntry{};
     }
 
-    g_cbc[khcb_slot].buf = khcb_res;
-    g_cbc[khcb_slot].m22 = khcb_m22;
-    g_cbc[khcb_slot].m32 = khcb_m32;
-    g_cbc[khcb_slot].ms = steady_now_ms();
+    g_cbc[slot].buf = res;
+    g_cbc[slot].m22 = m22;
+    g_cbc[slot].m32 = m32;
+    g_cbc[slot].ms = steady_now_ms();
 }
 }

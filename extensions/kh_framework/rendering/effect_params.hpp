@@ -4,55 +4,52 @@
 // texture sets, set_effect_params, the per-pass effect constants. Never include it on its own.
 namespace RenderIntegration {
 
-inline void kh_fill_user_obj_cb(ConstantData& cbd, const RenderObject& o);   // KH_USER_LANES, with the fx fill.
+inline void fill_user_obj_cb(ConstantData& cbd, const RenderObject& o);   // USER_LANES, with the fx fill.
 
-// KH_FX_INTERN: resolved user-shader / LUT paths and effect texture paths (KH_FX_TEX's user0 .. user5), interned for
+// FX_INTERN: resolved user-shader / LUT paths and effect texture paths (FX_TEX's user0 .. user5), interned for
 // the process (a handful of strings; never released - a name -> pointer table only, which nothing resolves a path
 // through, so no session reads another's).
 static std::vector<std::unique_ptr<std::string>> g_fx_intern_pool;
 static std::unordered_map<std::string, const std::string*> g_fx_intern_map;
 static std::mutex g_fx_intern_mu;
 
-inline const std::string* kh_intern_str(const std::string& khis_s) {
-    if (khis_s.empty()) return nullptr;
-    std::lock_guard<std::mutex> khis_l(g_fx_intern_mu);
-    auto khis_it = g_fx_intern_map.find(khis_s);
-    if (khis_it != g_fx_intern_map.end()) return khis_it->second;
-    g_fx_intern_pool.emplace_back(new std::string(khis_s));
-    const std::string* khis_p = g_fx_intern_pool.back().get();
-    g_fx_intern_map.emplace(khis_s, khis_p);
-    return khis_p;
+inline const std::string* intern_str(const std::string& s) {
+    if (s.empty()) return nullptr;
+    std::lock_guard<std::mutex> l(g_fx_intern_mu);
+    auto it = g_fx_intern_map.find(s);
+    if (it != g_fx_intern_map.end()) return it->second;
+    g_fx_intern_pool.emplace_back(new std::string(s));
+    const std::string* p = g_fx_intern_pool.back().get();
+    g_fx_intern_map.emplace(s, p);
+    return p;
 }
-static std::unordered_map<std::string, std::unique_ptr<KhFxTexSet>> g_fx_texset_pool;   // Key: the set's bytes.
+static std::unordered_map<std::string, std::unique_ptr<FxTexSet>> g_fx_texset_pool;   // Key: the set's bytes.
 static std::mutex g_fx_texset_mu;
-inline const KhFxTexSet* kh_fx_tex_intern(const KhFxTexSet& khti_s) {
-    std::string khti_k(reinterpret_cast<const char*>(khti_s.path), sizeof(khti_s.path));
-    khti_k.push_back(static_cast<char>(khti_s.srgb));
-    std::lock_guard<std::mutex> khti_l(g_fx_texset_mu);
-    auto& khti_e = g_fx_texset_pool[khti_k];
-    if (!khti_e) khti_e.reset(new KhFxTexSet(khti_s));
-    return khti_e.get();
+inline const FxTexSet* fx_tex_intern(const FxTexSet& s) {
+    std::string k(reinterpret_cast<const char*>(s.path), sizeof(s.path));
+    k.push_back(static_cast<char>(s.srgb));
+    std::lock_guard<std::mutex> l(g_fx_texset_mu);
+    auto& e = g_fx_texset_pool[k];
+    if (!e) e.reset(new FxTexSet(s));
+    return e.get();
 }
 
-static constexpr int KH_MAX_EFFECT = 31;
-// KH_DLF: dynamicLightFog's own passes, drawn by the chain alone (above KH_MAX_EFFECT: no script reaches them).
-static constexpr int KH_DLF_GATHER = 32;
-static constexpr int KH_DLF_FILTER = 33;
-static float    g_rain_prev_cam[3] = {};
-static bool     g_rain_prev_valid = false;
-static uint64_t g_rain_prev_us = 0;
+static constexpr int MAX_EFFECT = 31;
+// DLF: dynamicLightFog's own passes, drawn by the chain alone (above MAX_EFFECT: no script reaches them).
+static constexpr int DLF_GATHER = 32;
+static constexpr int DLF_FILTER = 33;
 
-inline const std::string& kh_fx_shader_of(const RenderObject& o) {
-    static const std::string khfs_none;
-    return o.fx_shader ? *o.fx_shader : khfs_none;
+inline const std::string& fx_shader_of(const RenderObject& o) {
+    static const std::string none;
+    return o.fx_shader ? *o.fx_shader : none;
 }
 
 // Writes effect parameters into obj.fx with per-effect defaults for omitted values; Pulse's position and the sun
 // flare's direction arrive in SQF axes ([x, y, zASL] / [x, y, z]) and convert to engine space here. False, obj.fx
 // unchanged, if a provided entry is not a finite number (nil keeps the default).
 inline bool set_effect_params(RenderObject& obj, const auto_array<game_value>* params) {
-    // Every ...Px lane below is in pixels of a 1080-row picture (KH_FX_PX_REF, cb.hlsl's KhFxPx).
-    static const float defaults[KH_MAX_EFFECT + 1][12] = {
+    // Every ...Px lane below is in pixels of a 1080-row picture (FX_PX_REF, cb.hlsl's KhFxPx).
+    static const float defaults[MAX_EFFECT + 1][12] = {
         {},
         {},
         { 1.0f, 1.0f, 1.0f, 1.0f },   // 2 colorgrade: sat, contrast, brightness, gamma.
@@ -82,7 +79,7 @@ inline bool set_effect_params(RenderObject& obj, const auto_array<game_value>* p
         { 1.6f, 16.0f, 0.6f },   // 19 deband: threshold(1/255), rangePx, grain(1/255).
         { 0.6f, 1.0f, 0.35f, 1.0f },   // 20 rainlens: intensity, speed, condensation, refract
                                        // (fx[4..7] system: camera velocity xyz, rain clock w).
-        // 21 crt: lane 10 = maskSizePx. KH_CRT_BANDLIMIT: lineCount 320 - 3.4 rows a line at the centre of a
+        // 21 crt: lane 10 = maskSizePx. CRT_BANDLIMIT: lineCount 320 - 3.4 rows a line at the centre of a
         // 1080-row frame and 3.0 at its top and bottom edges at the default curvature (540 was two, which cannot be
         // drawn: the shader fades such lines out; 360 sat on the fade's start at the centre, so the warp's packing
         // faded every line off the centre row).
@@ -90,29 +87,29 @@ inline bool set_effect_params(RenderObject& obj, const auto_array<game_value>* p
         { 0.7f, 4.0f, 12.0f, 0.15f, 2.0f, 1.0f, 300.0f, 3.0f, 0.65f },
         { 0.5f, 0.0f, 12.0f },   // 23 fogscatter: intensity, radiusPx, taps.
         {}, {}, {}, {}, {}, {}, {},   // 24 - 30: internal side ids (no script's effect).
-        { 1.0f, 1.0f, 0.0f, 0.6f, 16.0f, 250.0f, 2.0f, 24.0f },   // 31 dynamicLightFog (KH_DLF): intensity,
+        { 1.0f, 1.0f, 0.0f, 0.6f, 16.0f, 250.0f, 2.0f, 24.0f },   // 31 dynamicLightFog (DLF): intensity,
                                                                   // fogScale, baseDensity, anisotropy, steps,
                                                                   // maxDistance, shadows, maxLights.
     };
 
     // LUT default row: strength = 1 (a zero default would be a silent no-op; the shader lerps by fx[0]).
-    static const float khlut_defaults[12] = { 1.0f };
-    const int e = (obj.effect >= 0 && obj.effect <= KH_MAX_EFFECT) ? obj.effect : 0;
-    // KH_FX_FINITE: a NaN / inf entry is refused like a non-number, and the row is built in a local and stored whole,
-    // so a refused call leaves obj.fx as it was. KH_ARG_EXACT: more than 12 entries is an error, not a truncation.
+    static const float lut_defaults[12] = { 1.0f };
+    const int e = (obj.effect >= 0 && obj.effect <= MAX_EFFECT) ? obj.effect : 0;
+    // FX_FINITE: a NaN / inf entry is refused like a non-number, and the row is built in a local and stored whole,
+    // so a refused call leaves obj.fx as it was. ARG_EXACT: more than 12 entries is an error, not a truncation.
     if (params && params->size() > 12) return false;
-    float khfp_fx[12];
-    memcpy(khfp_fx, obj.effect == KH_EFFECT_LUT ? khlut_defaults : defaults[e], sizeof(khfp_fx));
+    float fx[12];
+    memcpy(fx, obj.effect == EFFECT_LUT ? lut_defaults : defaults[e], sizeof(fx));
 
     if (params) {
         for (size_t i = 0; i < 12 && i < params->size(); ++i) {
             if ((*params)[i].is_nil()) continue;   // Nil keeps the default.
             if ((*params)[i].type_enum() != game_data_type::SCALAR) return false;   // Wrong type: hard error.
-            khfp_fx[i] = static_cast<float>((*params)[i]);
-            if (!std::isfinite(khfp_fx[i])) return false;
+            fx[i] = static_cast<float>((*params)[i]);
+            if (!std::isfinite(fx[i])) return false;
         }
     }
-    memcpy(obj.fx, khfp_fx, sizeof(obj.fx));
+    memcpy(obj.fx, fx, sizeof(obj.fx));
 
     if (e == static_cast<int>(EffectId::Pulse) || e == static_cast<int>(EffectId::SunFlare)) {
         // SQF [x, y, zASL] -> engine [x, zASL, y].
@@ -140,32 +137,32 @@ inline float lifetime_envelope(const RenderObject& o, float now, bool& expired) 
     return 0.0f;
 }
 
-// Colour + the twelve effect parameters, the rain lens's system lanes overriding fx1 (after KH_USER_LANES' lanes).
-inline void kh_fill_fx_params_cb(ConstantData& cbd, const RenderObject& o) {
-    kh_fill_user_obj_cb(cbd, o);   // KH_USER_LANES.
+// Colour + the twelve effect parameters, the rain lens's system lanes overriding fx1 (after USER_LANES' lanes).
+inline void fill_fx_params_cb(ConstantData& cbd, const RenderObject& o) {
+    fill_user_obj_cb(cbd, o);   // USER_LANES.
     memcpy(cbd.color, o.color, sizeof(cbd.color));
     memcpy(cbd.fx0, o.fx, sizeof(cbd.fx0));
     memcpy(cbd.fx1, o.fx + 4, sizeof(cbd.fx1));
     memcpy(cbd.fx2, o.fx + 8, sizeof(cbd.fx2));
     if (o.effect == static_cast<int>(EffectId::RainLens)) {
-        cbd.fx1[0] = g_rain_vel[0];
-        cbd.fx1[1] = g_rain_vel[1];
-        cbd.fx1[2] = g_rain_vel[2];
-        cbd.fx1[3] = static_cast<float>(g_rain_phase);   // The integrated rain clock.
+        cbd.fx1[0] = g_rain.vel[0];
+        cbd.fx1[1] = g_rain.vel[1];
+        cbd.fx1[2] = g_rain.vel[2];
+        cbd.fx1[3] = static_cast<float>(g_rain.phase);   // The integrated rain clock.
     }
 }
-// KH_NEARZ_READER - the passes that read the depth (and through LoadDepthPS the marker): the localization and band
+// NEARZ_READER - the passes that read the depth (and through LoadDepthPS the marker): the localization and band
 // masks (KhFxFinish: KhWorldPosRelFenced, LoadDepthPS), outline, pulse and distance fog (PSEffect), the sun flare (its
 // pass and its visibility side draw, 29), SSGI (gather, a-trous, resolve), fog scatter (the pass and its side draw, 28)
 // and dynamicLightFog (gather, filter, composite) with their linear-depth frames (PSFxLinZ), and a user shader, which
 // may. Every other built-in - and the fused point stages (1, 2, 3, 5), the glow / anamorphic pyramids and the LUT -
 // reads neither. The scene chain's depth predicate (flush_locked's needs_depth: the read-only depth swap, the depth
-// pair) and the marker's reader test (kh_nzm_wanted) are this one rule. A reader that appears between the injection's
+// pair) and the marker's reader test (nzm_wanted) are this one rule. A reader that appears between the injection's
 // test and the chain (a script's change landing at the flush's sync) gets its first frame without the marker (the mark
-// is gone by the chain). At SSAO strength 0 the injection reaches ensure_depth_srv only through kh_ssao_pre, so with no
-// depth reader an FSAA toggle's wipe (kh_msaa_toggle_wipe) waits for the flush's own trigger later in that frame.
-// KH_VM_SEE arms these same readers (shadowMeta2.w) with the scene's depth behind the view model's translucent planes.
-inline bool kh_fx_needs_depth(const RenderObject& o) {
+// is gone by the chain). At SSAO strength 0 the injection reaches ensure_depth_srv only through ssao_pre, so with no
+// depth reader an FSAA toggle's wipe (msaa_toggle_wipe) waits for the flush's own trigger later in that frame.
+// VM_SEE arms these same readers (shadowMeta2.w) with the scene's depth behind the view model's translucent planes.
+inline bool fx_needs_depth(const RenderObject& o) {
     return o.localized || o.banded ||
            o.effect == static_cast<int>(EffectId::Outline) ||
            o.effect == static_cast<int>(EffectId::Pulse) ||
@@ -173,18 +170,18 @@ inline bool kh_fx_needs_depth(const RenderObject& o) {
            o.effect == static_cast<int>(EffectId::SunFlare) ||
            o.effect == static_cast<int>(EffectId::Ssgi) ||   // Gather + resolve read live depth.
            o.effect == static_cast<int>(EffectId::Fogscatter) ||   // Live depth is the scatter's distance authority.
-           o.effect == static_cast<int>(EffectId::DynLightFog) ||   // KH_DLF: the march ends at the depth.
-           o.effect == KH_EFFECT_CUSTOM;   // User shaders may sample depth.
+           o.effect == static_cast<int>(EffectId::DynLightFog) ||   // DLF: the march ends at the depth.
+           o.effect == EFFECT_CUSTOM;   // User shaders may sample depth.
 }
-// KH_FX_DEPTH_DROP - the readers that stand down for a frame without the depth SRV (flush_locked's depth_fx_ready
-// false): every kh_fx_needs_depth reader but an unbanded, unlocalized outline (its depth edges go to 0; its luma edges
+// FX_DEPTH_DROP - the readers that stand down for a frame without the depth SRV (flush_locked's depth_fx_ready
+// false): every fx_needs_depth reader but an unbanded, unlocalized outline (its depth edges go to 0; its luma edges
 // and darkening still draw) or user effect (it may read no depth). One rule for the scene chain's passes (dropped:
 // effect 0) and for the effect meshes (skipped by the draw loop; a mesh caller adds effect > 0 -
 // a banded solid is a needs_depth reader by its band, which SolidMask measures without the depth). The UI lane
 // drops every reader without its depth SRV, those two included (flush_ui_locked's wants_depth).
-inline bool kh_fx_depth_drop(const RenderObject& o) {
-    const bool khfd_keep = (o.effect == KH_EFFECT_CUSTOM || o.effect == static_cast<int>(EffectId::Outline)) &&
-                           !o.localized && !o.banded;
-    return kh_fx_needs_depth(o) && !khfd_keep;
+inline bool fx_depth_drop(const RenderObject& o) {
+    const bool keep = (o.effect == EFFECT_CUSTOM || o.effect == static_cast<int>(EffectId::Outline)) &&
+                      !o.localized && !o.banded;
+    return fx_needs_depth(o) && !keep;
 }
 }

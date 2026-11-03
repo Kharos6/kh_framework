@@ -2955,7 +2955,7 @@
         "KH Melee",
         "General"
     ], 
-	true,
+	false,
 	1,
 	{},
 	false

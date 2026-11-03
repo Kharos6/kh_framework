@@ -1,7 +1,7 @@
 params [
 	["_entity", objNull, [objNull]], 
 	["_position", [0, 0, 0], [[], objNull]], 
-	["_rotation", [0, 0, 0], [[], objNull]], 
+	["_rotation", [[0, 1, 0], [0, 0, 1]], [[], objNull]], 
 	["_eject", true, [true]], 
 	["_transition", 1, [0]],
 	["_freefallHeight", -1, [0]], 

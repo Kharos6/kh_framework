@@ -1,5 +1,5 @@
 params [["_marker", "", [""]], ["_attributes", [], [[]]], ["_overrideAttributes", [], [[]]], ["_respectLocality", true, [true]]];
-(_this select [1]) params ["_side", "_channel", "_userDefined", "_savedAttributes"];
+(_attributes select [1]) params ["_side", "_channel", "_userDefined", "_savedAttributes"];
 private _continue = true;
 
 if _respectLocality then {
@@ -13,10 +13,10 @@ if _respectLocality then {
 		private _sideUnit = KH_var_allPlayerUnits findIf {(side (group _x)) isEqualTo _side;};
 
 		if ((_sideUnit isNotEqualTo -1) && (_side isNotEqualTo sideUnknown)) then {
-			[createMarker [_marker, _savedAttributes select 1, _channel, KH_var_allPlayerUnits select _sideUnit], _savedAttributes, [], false] call KH_fnc_setMarkerAttributes;
+			[createMarker [_marker, _savedAttributes select 1, _channel, KH_var_allPlayerUnits select _sideUnit], _attributes, [], false] call KH_fnc_setMarkerAttributes;
 		}
 		else {
-			KH_var_queuedMarkers pushBackUnique [_marker, _side, _channel, _savedAttributes select 1, _savedAttributes];
+			KH_var_queuedMarkers pushBackUnique [_marker, _side, _channel, _savedAttributes select 1, _attributes];
 		};
 
 		_continue = false;

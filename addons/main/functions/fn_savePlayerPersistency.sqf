@@ -17,7 +17,7 @@ private _currentEntriesVariableName = _persistencyNamespace readKhData ["playerP
 	if ((_variableName isNotEqualTo "") && !(_x getVariable ["KH_var_generatedVariableName", false])) then {
 		_currentEntriesVariableName set [_variableName, [[_x] call KH_fnc_getUnitAttributes, _scores]];
 	};
-} forEach (_players select {_x getVariable ["KH_var_allowPersistency", true];});
+} forEach (_players select {(_x getVariable ["KH_var_allowPersistency", true]) && !(isNull _x);});
 
 if _saveDisconnected then {
 	{

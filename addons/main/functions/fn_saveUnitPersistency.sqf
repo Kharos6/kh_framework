@@ -24,7 +24,7 @@ private _currentUndefinedEntries = [];
 			};
 		};
 	};
-} forEach (_units select {(_x getVariable ["KH_var_allowPersistency", true]) && !(isPlayer _x);});
+} forEach (_units select {(_x getVariable ["KH_var_allowPersistency", true]) && !(isPlayer _x) && !(isNull _x);});
 
 _persistencyNamespace writeKhData ["unitPersistency", _currentEntries];
 _persistencyNamespace writeKhData [["undefinedUnitPersistency", toLowerANSI worldName] joinString "_", _currentUndefinedEntries];

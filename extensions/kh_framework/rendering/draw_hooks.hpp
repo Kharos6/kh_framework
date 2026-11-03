@@ -5,74 +5,74 @@
 namespace RenderIntegration {
 
 // The scene resolve: our resolve-time work, then the engine's resolve, passed through with its own arguments. Ours:
-// the KH_PSB_ZB guard's trip at a resolve into the main depth (whatever the source); the depth re-adoption; the
-// slice's deferred tail where it is armed (KH_INFRONT); the late chain where it is owed (KH_FX_LATE); and on the render
+// the PSB_ZB guard's trip at a resolve into the main depth (whatever the source); the depth re-adoption; the
+// slice's deferred tail where it is armed (INFRONT); the late chain where it is owed (FX_LATE); and on the render
 // thread, once a cycle, the dynamic-light world pass and the flush. The format argument is unused: the passes key on
-// the source identity (KH_PSB_ZB on the destination's).
+// the source identity (PSB_ZB on the destination's).
 static void STDMETHODCALLTYPE hooked_resolvesubresource(ID3D11DeviceContext* self, ID3D11Resource* dst, UINT dst_sub, ID3D11Resource* src, UINT src_sub, DXGI_FORMAT fmt) {
     try {
-    KH_PROF_SCOPE(KHP_HOOK_RESOLVE);   // KH_PROF_HOOKS: the DLS world pass and the flush included.
-    kh_psb_zb_dst(self, dst);   // KH_PSB_ZB: a resolve into the main depth ends Zb.
+    KH_PROF_SCOPE(PROF_HOOK_RESOLVE);   // PROF_HOOKS: the DLS world pass and the flush included.
+    psb_zb_dst(self, dst);   // PSB_ZB: a resolve into the main depth ends Zb.
     if (self == g_reorder_target_ctx.load(std::memory_order_relaxed)) {
         if (src && reorder_on_render_thread() && !g_ro.in_injection &&
-            !g_kh_flush_active.load(std::memory_order_relaxed)) {
-            kh_main_depth_readopt(self, src);   // Before anything below keys on the identities.
+            !g_flush_active.load(std::memory_order_relaxed)) {
+            main_depth_readopt(self, src);   // Before anything below keys on the identities.
         }
         if (src && g_topo_scene_tex_id && static_cast<void*>(src) == g_topo_scene_tex_id) {
-            // KH_INFRONT: the slice's deferred tail, armed at the hands colour pass - this resolve is past it (the
+            // INFRONT: the slice's deferred tail, armed at the hands colour pass - this resolve is past it (the
             // cycle's first precedes the pass; the late chain's follows it) - drawn ahead of the chain and the
-            // flush, so the resolved picture and the chain's hold the parts. Either thread (kh_fx_late_gt's rule).
-            if (g_vm_tail_armed.load(std::memory_order_relaxed) && !g_ro.in_injection &&
-                !g_kh_flush_active.load(std::memory_order_relaxed)) {
-                kh_infront_tail_take(self);
+            // flush, so the resolved picture and the chain's hold the parts. Either thread (fx_late_gt's rule).
+            if (g_infront.tail_armed.load(std::memory_order_relaxed) && !g_ro.in_injection &&
+                !g_flush_active.load(std::memory_order_relaxed)) {
+                infront_tail_take(self);
             }
-            if (!reorder_on_render_thread() && !g_kh_flush_active.load(std::memory_order_relaxed)) {
-                kh_fx_late_gt(self);   // KH_FX_LATE: tests every frame; runs an owed chain.
+            if (!reorder_on_render_thread() && !g_flush_active.load(std::memory_order_relaxed)) {
+                fx_late_gt(self);   // FX_LATE: tests every frame; runs an owed chain.
             } else if (reorder_on_render_thread() && !g_ro.in_injection &&
-                       !g_kh_flush_active.load(std::memory_order_relaxed) &&
+                       !g_flush_active.load(std::memory_order_relaxed) &&
                        g_rtshadow_cycle.load(std::memory_order_relaxed) == g_topo_cycles) {
-                kh_fx_late_gt(self, true);   // KH_FX_LATE: a render-thread resolve after this cycle's flush.
+                fx_late_gt(self, true);   // FX_LATE: a render-thread resolve after this cycle's flush.
             }
             // The dynamic-light world pass, on the render thread once a cycle (a second resolve would multiply twice
             // and darken the frame): the cycle's first resolve, ahead of the view model, so the world multiply does
             // not reach the hands and weapon - and ahead of the flush below, so the flush's late draws and chain take
-            // this cycle's pass. KH_EA_DLS_ONE: one latch site (the flush branch carried a second copy).
+            // this cycle's pass. EA_DLS_ONE: one latch site (the flush branch carried a second copy).
             if (reorder_on_render_thread() && !g_ro.in_injection && g_dls_world_cycle != g_topo_cycles) {
                 g_dls_world_cycle = g_topo_cycles;
-                kh_dls_world_pass(self);
+                dls_world_pass(self);
             }
             // The flush, on the render thread, once a cycle and never inside our injection - and only while the game
             // thread has work, the park's own condition (flush_frame returns before it on an empty draw list), so an
             // empty list runs no housekeeping or GC.
             if (reorder_on_render_thread() && !g_ro.in_injection &&
-                g_kh_track_wanted.load(std::memory_order_relaxed) &&
+                g_track_wanted.load(std::memory_order_relaxed) &&
                 g_rtshadow_cycle.load(std::memory_order_relaxed) != g_topo_cycles) {
                 g_rtshadow_cycle.store(g_topo_cycles, std::memory_order_relaxed);
-                ID3D11Device* khsh_dev = RVExtBridge::get_d3d_device();
-                if (khsh_dev) {
+                ID3D11Device* dev = RVExtBridge::get_d3d_device();
+                if (dev) {
                     // in_injection is raised as the world pass raises it, so the flush's draws are not counted as
                     // engine draws.
-                    const bool khsh_prev = g_ro.in_injection;
+                    const bool prev = g_ro.in_injection;
                     g_ro.in_injection = true;
-                    flush_locked(khsh_dev, self, true);
-                    g_ro.in_injection = khsh_prev;
+                    flush_locked(dev, self, true);
+                    g_ro.in_injection = prev;
                 }
             }
         }
     }
 
-    } catch (...) { kh_hook_except(); }
+    } catch (...) { hook_except(); }
     g_orig_resolvesubresource(self, dst, dst_sub, src, src_sub, fmt);
 }
 
 static void STDMETHODCALLTYPE hooked_pssetshaderresources(ID3D11DeviceContext* self, UINT start, UINT n, ID3D11ShaderResourceView* const* srvs) {
     try {
-    KH_PROF_SCOPE(KHP_HOOK_PSSRV);   // KH_PROF_HOOKS.
+    KH_PROF_SCOPE(PROF_HOOK_PSSRV);   // PROF_HOOKS.
     if (self == g_reorder_target_ctx.load(std::memory_order_relaxed) &&   // Context first.
         reorder_on_render_thread() &&
         !g_ro.in_injection && g_ls.atlas_tex && srvs) {
         // The engine binds the shadow atlas at t15 (from its own resolve shader) - inspect only that slot.
-        // KH_EA_ATLAS_T15: the view's resource is read on every such bind (a view pointer alone is no identity: a
+        // EA_ATLAS_T15: the view's resource is read on every such bind (a view pointer alone is no identity: a
         // released view's address can be reused), so the verdict is that one compare - no view cache in front of it.
         if (start <= 15 && start + n > 15) {
             ID3D11ShaderResourceView* srv = srvs[15 - start];
@@ -89,243 +89,243 @@ static void STDMETHODCALLTYPE hooked_pssetshaderresources(ID3D11DeviceContext* s
         }
     }
 
-    } catch (...) { kh_hook_except(); }
+    } catch (...) { hook_except(); }
     g_orig_pssetshaderresources(self, start, n, srvs);
 }
 
 static void STDMETHODCALLTYPE hooked_draw_indexed(ID3D11DeviceContext* self, UINT ic, UINT sil, INT bvl) {
-    try { reorder_pre_draw(self); } catch (...) { kh_hook_except(); }
-    try { kh_psb_zb_draw(self); } catch (...) { kh_hook_except(); }   // KH_PSB_ZB: the guard's one call a draw.
+    try { reorder_pre_draw(self); } catch (...) { hook_except(); }
+    try { psb_zb_draw(self); } catch (...) { hook_except(); }   // PSB_ZB: the guard's one call a draw.
     {
-        KH_PROF_SCOPE(KHP_DRAW_RECORD);   // KH_PROF_HOOKS.
-        kh_rp_record(self, 1, ic, sil, 0, bvl, 0);   // KH_VOL_REPLAY: engine state after our pre-draw work.
+        KH_PROF_SCOPE(PROF_DRAW_RECORD);   // PROF_HOOKS.
+        rp_record(self, 1, ic, sil, 0, bvl, 0);   // VOL_REPLAY: engine state after our pre-draw work.
     }
     g_orig_draw_indexed(self, ic, sil, bvl);
     try {
-    KH_PROF_TSC(KHP_DRAW_POST);   // KH_PROF_HOOKS: mirror re-issue (with its driver draw), UI quad, bracket.
-    // KH_VM_SEE: the view model's translucent draw again, into the transmittance alone (the flag is set for the
+    KH_PROF_TSC(PROF_DRAW_POST);   // PROF_HOOKS: mirror re-issue (with its driver draw), UI quad, bracket.
+    // VM_SEE: the view model's translucent draw again, into the transmittance alone (the flag is set for the
     // tracked context's own draw by its pre-draw; the context test first, as the mirror's). Not one of our own draws
     // (in_injection / the flush flag - the pre-draw's own gate): the injection reorder_pre_draw may run after the
     // flag was set draws through these hooks first, and the flag is the engine draw's, whose post comes after them.
     // Ahead of the mirror's block, which may throw: nothing here does, so the flag never outlives its draw.
-    if (self == g_reorder_target_ctx.load(std::memory_order_relaxed) && g_vmsee_pending && !g_ro.in_injection &&
-        !g_kh_flush_active.load(std::memory_order_relaxed)) {
-        g_vmsee_pending = false;
-        if (kh_vmsee_t_begin(self)) {
+    if (self == g_reorder_target_ctx.load(std::memory_order_relaxed) && g_vmsee.pending && !g_ro.in_injection &&
+        !g_flush_active.load(std::memory_order_relaxed)) {
+        g_vmsee.pending = false;
+        if (vmsee_t_begin(self)) {
             g_orig_draw_indexed(self, ic, sil, bvl);
-            kh_vmsee_t_end(self);
+            vmsee_t_end(self);
         }
     }
-    // KH_WSEE: the engine's draw again, into T (and NW, for a blended draw writing no depth) or T's late-opaque flag -
-    // the kind kh_wsee_pre_draw marked (kh_wsee_post; the KH_VM_SEE block's rules: the context first, never one of
+    // WSEE: the engine's draw again, into T (and NW, for a blended draw writing no depth) or T's late-opaque flag -
+    // the kind wsee_pre_draw marked (wsee_post; the VM_SEE block's rules: the context first, never one of
     // our own draws, nothing here throws).
-    if (self == g_reorder_target_ctx.load(std::memory_order_relaxed) && g_wsee_pending != KH_WSEE_RE_NONE &&
-        !g_ro.in_injection && !g_kh_flush_active.load(std::memory_order_relaxed)) {
-        const uint8_t khwq_k = g_wsee_pending;
-        g_wsee_pending = KH_WSEE_RE_NONE;
-        KH_PROF_TSC(KHP_WSEE_POST);   // KH_WSEE: the re-issues' CPU alone (nested in drawPost).
-        kh_wsee_post(self, khwq_k, [&]() { g_orig_draw_indexed(self, ic, sil, bvl); });
+    if (self == g_reorder_target_ctx.load(std::memory_order_relaxed) && g_wsee.pending != WSEE_RE_NONE &&
+        !g_ro.in_injection && !g_flush_active.load(std::memory_order_relaxed)) {
+        const uint8_t k = g_wsee.pending;
+        g_wsee.pending = WSEE_RE_NONE;
+        KH_PROF_TSC(PROF_WSEE_POST);   // WSEE: the re-issues' CPU alone (nested in drawPost).
+        wsee_post(self, k, [&]() { g_orig_draw_indexed(self, ic, sil, bvl); });
     }
-    // Mirror re-issue; the flag is set for the tracked context's own draw. The context test first: g_vmir_pending is a
+    // Mirror re-issue; the flag is set for the tracked context's own draw. The context test first: g_vmir.pending is a
     // plain render-thread bool, and this hook runs on every thread that draws through a shared vtable. Not one of our
-    // own draws either (KH_VMIR_OWN_DRAW, the vmsee block's rule): the pre-draw that armed the flag can still issue
+    // own draws either (VMIR_OWN_DRAW, the vmsee block's rule): the pre-draw that armed the flag can still issue
     // draws of its own after the survey (the in-front seam, a mask-cast fire), whose post would take the flag for the
-    // engine's counting draw and re-issue ours in its place (kh_vmir_patch_b2 holds the flag down around its own draw
+    // engine's counting draw and re-issue ours in its place (vmir_patch_b2 holds the flag down around its own draw
     // for the same reason). The engine's draw runs with the flag down, so it is unaffected.
     if (self == g_reorder_target_ctx.load(std::memory_order_relaxed) &&
-        g_vmir_pending && !g_ro.in_injection) {
-        g_vmir_pending = false;
-        if (kh_vmir_begin(self)) {
-            KH_GPU_SCOPE(self, KHG_VMIR);   // KH_PROF: the mirror's re-issued draw and the restore.
+        g_vmir.pending && !g_ro.in_injection) {
+        g_vmir.pending = false;
+        if (vmir_begin(self)) {
+            KH_GPU_SCOPE(self, GPU_VMIR);   // PROF: the mirror's re-issued draw and the restore.
             g_orig_draw_indexed(self, ic, sil, bvl);
-            kh_vmir_end(self);
+            vmir_end(self);
         }
     }
-    kh_ui_quad_post(self);
-    kh_svs_bracket_post(self);
-    } catch (...) { kh_hook_except(); }
+    ui_quad_post(self);
+    svs_bracket_post(self);
+    } catch (...) { hook_except(); }
 }
 
 static void STDMETHODCALLTYPE hooked_draw(ID3D11DeviceContext* self, UINT vc, UINT svl) {
-    try { reorder_pre_draw(self); } catch (...) { kh_hook_except(); }
-    try { kh_psb_zb_draw(self); } catch (...) { kh_hook_except(); }   // KH_PSB_ZB: the guard's one call a draw.
+    try { reorder_pre_draw(self); } catch (...) { hook_except(); }
+    try { psb_zb_draw(self); } catch (...) { hook_except(); }   // PSB_ZB: the guard's one call a draw.
     {
-        KH_PROF_SCOPE(KHP_DRAW_RECORD);   // KH_PROF_HOOKS.
-        kh_rp_record(self, 2, vc, svl, 0, 0, 0);   // KH_VOL_REPLAY: engine state after our pre-draw work.
+        KH_PROF_SCOPE(PROF_DRAW_RECORD);   // PROF_HOOKS.
+        rp_record(self, 2, vc, svl, 0, 0, 0);   // VOL_REPLAY: engine state after our pre-draw work.
     }
     g_orig_draw(self, vc, svl);
     try {
-    KH_PROF_TSC(KHP_DRAW_POST);   // KH_PROF_HOOKS: mirror re-issue (with its driver draw), UI quad, bracket.
-    // KH_VM_SEE: hooked_draw_indexed's block and rules.
-    if (self == g_reorder_target_ctx.load(std::memory_order_relaxed) && g_vmsee_pending && !g_ro.in_injection &&
-        !g_kh_flush_active.load(std::memory_order_relaxed)) {
-        g_vmsee_pending = false;
-        if (kh_vmsee_t_begin(self)) {
+    KH_PROF_TSC(PROF_DRAW_POST);   // PROF_HOOKS: mirror re-issue (with its driver draw), UI quad, bracket.
+    // VM_SEE: hooked_draw_indexed's block and rules.
+    if (self == g_reorder_target_ctx.load(std::memory_order_relaxed) && g_vmsee.pending && !g_ro.in_injection &&
+        !g_flush_active.load(std::memory_order_relaxed)) {
+        g_vmsee.pending = false;
+        if (vmsee_t_begin(self)) {
             g_orig_draw(self, vc, svl);
-            kh_vmsee_t_end(self);
+            vmsee_t_end(self);
         }
     }
-    // KH_WSEE: hooked_draw_indexed's block and rules (kh_wsee_post).
-    if (self == g_reorder_target_ctx.load(std::memory_order_relaxed) && g_wsee_pending != KH_WSEE_RE_NONE &&
-        !g_ro.in_injection && !g_kh_flush_active.load(std::memory_order_relaxed)) {
-        const uint8_t khwq_k = g_wsee_pending;
-        g_wsee_pending = KH_WSEE_RE_NONE;
-        KH_PROF_TSC(KHP_WSEE_POST);   // KH_WSEE: the re-issues' CPU alone (nested in drawPost).
-        kh_wsee_post(self, khwq_k, [&]() { g_orig_draw(self, vc, svl); });
+    // WSEE: hooked_draw_indexed's block and rules (wsee_post).
+    if (self == g_reorder_target_ctx.load(std::memory_order_relaxed) && g_wsee.pending != WSEE_RE_NONE &&
+        !g_ro.in_injection && !g_flush_active.load(std::memory_order_relaxed)) {
+        const uint8_t k = g_wsee.pending;
+        g_wsee.pending = WSEE_RE_NONE;
+        KH_PROF_TSC(PROF_WSEE_POST);   // WSEE: the re-issues' CPU alone (nested in drawPost).
+        wsee_post(self, k, [&]() { g_orig_draw(self, vc, svl); });
     }
-    // Mirror re-issue (KH_VMIR_OWN_DRAW): hooked_draw_indexed's block and rules.
+    // Mirror re-issue (VMIR_OWN_DRAW): hooked_draw_indexed's block and rules.
     if (self == g_reorder_target_ctx.load(std::memory_order_relaxed) &&
-        g_vmir_pending && !g_ro.in_injection) {
-        g_vmir_pending = false;
-        if (kh_vmir_begin(self)) {
-            KH_GPU_SCOPE(self, KHG_VMIR);   // KH_PROF: the mirror's re-issued draw and the restore.
+        g_vmir.pending && !g_ro.in_injection) {
+        g_vmir.pending = false;
+        if (vmir_begin(self)) {
+            KH_GPU_SCOPE(self, GPU_VMIR);   // PROF: the mirror's re-issued draw and the restore.
             g_orig_draw(self, vc, svl);
-            kh_vmir_end(self);
+            vmir_end(self);
         }
     }
-    kh_ui_quad_post(self);
-    kh_svs_bracket_post(self);
-    } catch (...) { kh_hook_except(); }
+    ui_quad_post(self);
+    svs_bracket_post(self);
+    } catch (...) { hook_except(); }
 }
 
 static void STDMETHODCALLTYPE hooked_draw_indexed_instanced(ID3D11DeviceContext* self, UINT icpi, UINT ic, UINT sil, INT bvl, UINT sil2) {
-    try { reorder_pre_draw(self); } catch (...) { kh_hook_except(); }
-    try { kh_psb_zb_draw(self); } catch (...) { kh_hook_except(); }   // KH_PSB_ZB: the guard's one call a draw.
+    try { reorder_pre_draw(self); } catch (...) { hook_except(); }
+    try { psb_zb_draw(self); } catch (...) { hook_except(); }   // PSB_ZB: the guard's one call a draw.
     {
-        KH_PROF_SCOPE(KHP_DRAW_RECORD);   // KH_PROF_HOOKS.
-        kh_rp_record(self, 3, icpi, ic, sil, bvl, sil2);   // KH_VOL_REPLAY: engine state after our pre-draw work.
+        KH_PROF_SCOPE(PROF_DRAW_RECORD);   // PROF_HOOKS.
+        rp_record(self, 3, icpi, ic, sil, bvl, sil2);   // VOL_REPLAY: engine state after our pre-draw work.
     }
     g_orig_draw_indexed_instanced(self, icpi, ic, sil, bvl, sil2);
     try {
-    KH_PROF_TSC(KHP_DRAW_POST);   // KH_PROF_HOOKS: mirror re-issue (with its driver draw), UI quad, bracket.
-    // KH_VM_SEE: hooked_draw_indexed's block and rules.
-    if (self == g_reorder_target_ctx.load(std::memory_order_relaxed) && g_vmsee_pending && !g_ro.in_injection &&
-        !g_kh_flush_active.load(std::memory_order_relaxed)) {
-        g_vmsee_pending = false;
-        if (kh_vmsee_t_begin(self)) {
+    KH_PROF_TSC(PROF_DRAW_POST);   // PROF_HOOKS: mirror re-issue (with its driver draw), UI quad, bracket.
+    // VM_SEE: hooked_draw_indexed's block and rules.
+    if (self == g_reorder_target_ctx.load(std::memory_order_relaxed) && g_vmsee.pending && !g_ro.in_injection &&
+        !g_flush_active.load(std::memory_order_relaxed)) {
+        g_vmsee.pending = false;
+        if (vmsee_t_begin(self)) {
             g_orig_draw_indexed_instanced(self, icpi, ic, sil, bvl, sil2);
-            kh_vmsee_t_end(self);
+            vmsee_t_end(self);
         }
     }
-    // KH_WSEE: hooked_draw_indexed's block and rules (kh_wsee_post).
-    if (self == g_reorder_target_ctx.load(std::memory_order_relaxed) && g_wsee_pending != KH_WSEE_RE_NONE &&
-        !g_ro.in_injection && !g_kh_flush_active.load(std::memory_order_relaxed)) {
-        const uint8_t khwq_k = g_wsee_pending;
-        g_wsee_pending = KH_WSEE_RE_NONE;
-        KH_PROF_TSC(KHP_WSEE_POST);   // KH_WSEE: the re-issues' CPU alone (nested in drawPost).
-        kh_wsee_post(self, khwq_k, [&]() { g_orig_draw_indexed_instanced(self, icpi, ic, sil, bvl, sil2); });
+    // WSEE: hooked_draw_indexed's block and rules (wsee_post).
+    if (self == g_reorder_target_ctx.load(std::memory_order_relaxed) && g_wsee.pending != WSEE_RE_NONE &&
+        !g_ro.in_injection && !g_flush_active.load(std::memory_order_relaxed)) {
+        const uint8_t k = g_wsee.pending;
+        g_wsee.pending = WSEE_RE_NONE;
+        KH_PROF_TSC(PROF_WSEE_POST);   // WSEE: the re-issues' CPU alone (nested in drawPost).
+        wsee_post(self, k, [&]() { g_orig_draw_indexed_instanced(self, icpi, ic, sil, bvl, sil2); });
     }
-    // Mirror re-issue (KH_VMIR_OWN_DRAW): hooked_draw_indexed's block and rules.
+    // Mirror re-issue (VMIR_OWN_DRAW): hooked_draw_indexed's block and rules.
     if (self == g_reorder_target_ctx.load(std::memory_order_relaxed) &&
-        g_vmir_pending && !g_ro.in_injection) {
-        g_vmir_pending = false;
-        if (kh_vmir_begin(self)) {
-            KH_GPU_SCOPE(self, KHG_VMIR);   // KH_PROF: the mirror's re-issued draw and the restore.
+        g_vmir.pending && !g_ro.in_injection) {
+        g_vmir.pending = false;
+        if (vmir_begin(self)) {
+            KH_GPU_SCOPE(self, GPU_VMIR);   // PROF: the mirror's re-issued draw and the restore.
             g_orig_draw_indexed_instanced(self, icpi, ic, sil, bvl, sil2);
-            kh_vmir_end(self);
+            vmir_end(self);
         }
     }
-    kh_ui_quad_post(self);
-    kh_svs_bracket_post(self);
-    } catch (...) { kh_hook_except(); }
+    ui_quad_post(self);
+    svs_bracket_post(self);
+    } catch (...) { hook_except(); }
 }
 
 static void STDMETHODCALLTYPE hooked_draw_instanced(ID3D11DeviceContext* self, UINT vcpi, UINT ic, UINT svl, UINT sil) {
-    try { reorder_pre_draw(self); } catch (...) { kh_hook_except(); }
-    try { kh_psb_zb_draw(self); } catch (...) { kh_hook_except(); }   // KH_PSB_ZB: the guard's one call a draw.
+    try { reorder_pre_draw(self); } catch (...) { hook_except(); }
+    try { psb_zb_draw(self); } catch (...) { hook_except(); }   // PSB_ZB: the guard's one call a draw.
     {
-        KH_PROF_SCOPE(KHP_DRAW_RECORD);   // KH_PROF_HOOKS.
-        kh_rp_record(self, 4, vcpi, ic, svl, 0, sil);   // KH_VOL_REPLAY: engine state after our pre-draw work.
+        KH_PROF_SCOPE(PROF_DRAW_RECORD);   // PROF_HOOKS.
+        rp_record(self, 4, vcpi, ic, svl, 0, sil);   // VOL_REPLAY: engine state after our pre-draw work.
     }
     g_orig_draw_instanced(self, vcpi, ic, svl, sil);
     try {
-    KH_PROF_TSC(KHP_DRAW_POST);   // KH_PROF_HOOKS: mirror re-issue (with its driver draw), UI quad, bracket.
-    // KH_VM_SEE: hooked_draw_indexed's block and rules.
-    if (self == g_reorder_target_ctx.load(std::memory_order_relaxed) && g_vmsee_pending && !g_ro.in_injection &&
-        !g_kh_flush_active.load(std::memory_order_relaxed)) {
-        g_vmsee_pending = false;
-        if (kh_vmsee_t_begin(self)) {
+    KH_PROF_TSC(PROF_DRAW_POST);   // PROF_HOOKS: mirror re-issue (with its driver draw), UI quad, bracket.
+    // VM_SEE: hooked_draw_indexed's block and rules.
+    if (self == g_reorder_target_ctx.load(std::memory_order_relaxed) && g_vmsee.pending && !g_ro.in_injection &&
+        !g_flush_active.load(std::memory_order_relaxed)) {
+        g_vmsee.pending = false;
+        if (vmsee_t_begin(self)) {
             g_orig_draw_instanced(self, vcpi, ic, svl, sil);
-            kh_vmsee_t_end(self);
+            vmsee_t_end(self);
         }
     }
-    // KH_WSEE: hooked_draw_indexed's block and rules (kh_wsee_post).
-    if (self == g_reorder_target_ctx.load(std::memory_order_relaxed) && g_wsee_pending != KH_WSEE_RE_NONE &&
-        !g_ro.in_injection && !g_kh_flush_active.load(std::memory_order_relaxed)) {
-        const uint8_t khwq_k = g_wsee_pending;
-        g_wsee_pending = KH_WSEE_RE_NONE;
-        KH_PROF_TSC(KHP_WSEE_POST);   // KH_WSEE: the re-issues' CPU alone (nested in drawPost).
-        kh_wsee_post(self, khwq_k, [&]() { g_orig_draw_instanced(self, vcpi, ic, svl, sil); });
+    // WSEE: hooked_draw_indexed's block and rules (wsee_post).
+    if (self == g_reorder_target_ctx.load(std::memory_order_relaxed) && g_wsee.pending != WSEE_RE_NONE &&
+        !g_ro.in_injection && !g_flush_active.load(std::memory_order_relaxed)) {
+        const uint8_t k = g_wsee.pending;
+        g_wsee.pending = WSEE_RE_NONE;
+        KH_PROF_TSC(PROF_WSEE_POST);   // WSEE: the re-issues' CPU alone (nested in drawPost).
+        wsee_post(self, k, [&]() { g_orig_draw_instanced(self, vcpi, ic, svl, sil); });
     }
-    // Mirror re-issue (KH_VMIR_OWN_DRAW): hooked_draw_indexed's block and rules.
+    // Mirror re-issue (VMIR_OWN_DRAW): hooked_draw_indexed's block and rules.
     if (self == g_reorder_target_ctx.load(std::memory_order_relaxed) &&
-        g_vmir_pending && !g_ro.in_injection) {
-        g_vmir_pending = false;
-        if (kh_vmir_begin(self)) {
-            KH_GPU_SCOPE(self, KHG_VMIR);   // KH_PROF: the mirror's re-issued draw and the restore.
+        g_vmir.pending && !g_ro.in_injection) {
+        g_vmir.pending = false;
+        if (vmir_begin(self)) {
+            KH_GPU_SCOPE(self, GPU_VMIR);   // PROF: the mirror's re-issued draw and the restore.
             g_orig_draw_instanced(self, vcpi, ic, svl, sil);
-            kh_vmir_end(self);
+            vmir_end(self);
         }
     }
-    kh_ui_quad_post(self);
-    kh_svs_bracket_post(self);
-    } catch (...) { kh_hook_except(); }
+    ui_quad_post(self);
+    svs_bracket_post(self);
+    } catch (...) { hook_except(); }
 }
 
-// KH_HOOK_DESC_CACHE: the two OM state hooks read one bit of an immutable state object's desc on every engine bind (the
-// depth state's hook, KH_WSEE, a second: verdict2; and verdict3, the stencil test). The verdict is cached by object;
+// HOOK_DESC_CACHE: the two OM state hooks read one bit of an immutable state object's desc on every engine bind (the
+// depth state's hook, WSEE, a second: verdict2; and verdict3, the stencil test). The verdict is cached by object;
 // the object is AddRef'd while cached, so its address cannot be recycled under the key (a foreign object at the same
 // address is the one failure a pointer cache has). Render thread only; released with the device (the hooks' other weak
 // identities go in release_shadow_device_state).
-static constexpr uint32_t KH_HDC_N = 32;
-struct KhHookDescEntry { IUnknown* obj; bool verdict; bool verdict2; bool verdict3; };
-struct KhHookDescCache {
-    KhHookDescEntry e[KH_HDC_N] = {};
+static constexpr uint32_t HDC_N = 32;
+struct HookDescEntry { IUnknown* obj; bool verdict; bool verdict2; bool verdict3; };
+struct HookDescCache {
+    HookDescEntry e[HDC_N] = {};
     uint32_t n = 0;
     uint32_t next = 0;   // Round-robin victim once full.
-    bool find(IUnknown* khhd_o, bool& khhd_v, bool* khhd_v2 = nullptr, bool* khhd_v3 = nullptr) const {
-        for (uint32_t khhd_i = 0; khhd_i < n; ++khhd_i) {
-            if (e[khhd_i].obj == khhd_o) {
-                khhd_v = e[khhd_i].verdict;
-                if (khhd_v2) *khhd_v2 = e[khhd_i].verdict2;
-                if (khhd_v3) *khhd_v3 = e[khhd_i].verdict3;
+    bool find(IUnknown* o, bool& v, bool* v2 = nullptr, bool* v3 = nullptr) const {
+        for (uint32_t i = 0; i < n; ++i) {
+            if (e[i].obj == o) {
+                v = e[i].verdict;
+                if (v2) *v2 = e[i].verdict2;
+                if (v3) *v3 = e[i].verdict3;
                 return true;
             }
         }
         return false;
     }
-    void put(IUnknown* khhd_o, bool khhd_v, bool khhd_v2 = false, bool khhd_v3 = false) {
-        uint32_t khhd_i;
-        if (n < KH_HDC_N) { khhd_i = n++; }
-        else { khhd_i = next; next = (next + 1) % KH_HDC_N; if (e[khhd_i].obj) e[khhd_i].obj->Release(); }
-        khhd_o->AddRef();
-        e[khhd_i].obj = khhd_o;
-        e[khhd_i].verdict = khhd_v;
-        e[khhd_i].verdict2 = khhd_v2;
-        e[khhd_i].verdict3 = khhd_v3;
+    void put(IUnknown* o, bool v, bool v2 = false, bool v3 = false) {
+        uint32_t i;
+        if (n < HDC_N) { i = n++; }
+        else { i = next; next = (next + 1) % HDC_N; if (e[i].obj) e[i].obj->Release(); }
+        o->AddRef();
+        e[i].obj = o;
+        e[i].verdict = v;
+        e[i].verdict2 = v2;
+        e[i].verdict3 = v3;
     }
     void release() {
-        for (uint32_t khhd_i = 0; khhd_i < n; ++khhd_i) { if (e[khhd_i].obj) e[khhd_i].obj->Release(); e[khhd_i].obj = nullptr; }
+        for (uint32_t i = 0; i < n; ++i) { if (e[i].obj) e[i].obj->Release(); e[i].obj = nullptr; }
         n = 0;
         next = 0;
     }
 };
-static KhHookDescCache g_hdc_blend;
-static KhHookDescCache g_hdc_dss;
-inline void kh_hook_desc_cache_release() {
+static HookDescCache g_hdc_blend;
+static HookDescCache g_hdc_dss;
+inline void hook_desc_cache_release() {
     g_hdc_blend.release();
     g_hdc_dss.release();
 }
 
 static void STDMETHODCALLTYPE hooked_omset_blendstate(ID3D11DeviceContext* self, ID3D11BlendState* bs, const FLOAT bf[4], UINT mask) {
     try {
-    KH_PROF_SCOPE(KHP_HOOK_OMBLEND);   // KH_PROF_HOOKS.
+    KH_PROF_SCOPE(PROF_HOOK_OMBLEND);   // PROF_HOOKS.
     if (self == g_reorder_target_ctx.load(std::memory_order_relaxed) && !g_ro.in_injection &&
-        !g_kh_flush_active && !g_ui_mask_injecting &&   // own-state exclusion by flags.
+        !g_flush_active && !g_ui_mask_injecting &&   // own-state exclusion by flags.
         reorder_on_render_thread()) {
         if (!bs) {
             g_ro.blend_translucent = false;   // Default blend state: opaque.
-        } else if (!g_hdc_blend.find(bs, g_ro.blend_translucent)) {   // KH_HOOK_DESC_CACHE.
+        } else if (!g_hdc_blend.find(bs, g_ro.blend_translucent)) {   // HOOK_DESC_CACHE.
             D3D11_BLEND_DESC d = {};
             bs->GetDesc(&d);
             // Translucent = blending enabled with a destination term: covers
@@ -336,53 +336,53 @@ static void STDMETHODCALLTYPE hooked_omset_blendstate(ID3D11DeviceContext* self,
         }
     }
 
-    } catch (...) { kh_hook_except(); }
+    } catch (...) { hook_except(); }
     g_orig_omset_blendstate(self, bs, bf, mask);
 }
 
 static void STDMETHODCALLTYPE hooked_omset_depthstencil(ID3D11DeviceContext* self, ID3D11DepthStencilState* dss, UINT ref) {
     try {
-    KH_PROF_SCOPE(KHP_HOOK_OMDSS);   // KH_PROF_HOOKS.
-    kh_psb_zb_dss(self, dss);   // KH_PSB_ZB: every caller's (the draws' guard reads it).
+    KH_PROF_SCOPE(PROF_HOOK_OMDSS);   // PROF_HOOKS.
+    psb_zb_dss(self, dss);   // PSB_ZB: every caller's (the draws' guard reads it).
     if (self == g_reorder_target_ctx.load(std::memory_order_relaxed) && !g_ro.in_injection &&
-        !g_kh_flush_active && !g_ui_mask_injecting &&   // own-state exclusion by flags.
+        !g_flush_active && !g_ui_mask_injecting &&   // own-state exclusion by flags.
         reorder_on_render_thread()) {
         if (!dss) {
             g_ro.dss_nowrite = false;   // Default dss: depth test + write.
             g_ro.dss_write = true;
-            g_ro.dss_stencil = false;   // KH_WSEE: the default tests no stencil.
+            g_ro.dss_stencil = false;   // WSEE: the default tests no stencil.
         } else if (!g_hdc_dss.find(dss, g_ro.dss_nowrite, &g_ro.dss_write,
-                                   &g_ro.dss_stencil)) {   // KH_HOOK_DESC_CACHE.
+                                   &g_ro.dss_stencil)) {   // HOOK_DESC_CACHE.
             D3D11_DEPTH_STENCIL_DESC d = {};
             dss->GetDesc(&d);
             g_ro.dss_nowrite = d.DepthEnable && d.DepthWriteMask == D3D11_DEPTH_WRITE_MASK_ZERO;
-            g_ro.dss_write = d.DepthEnable && d.DepthWriteMask == D3D11_DEPTH_WRITE_MASK_ALL;   // KH_WSEE.
-            g_ro.dss_stencil = d.StencilEnable != FALSE;   // KH_WSEE: a no-write layer testing stencil is left out.
+            g_ro.dss_write = d.DepthEnable && d.DepthWriteMask == D3D11_DEPTH_WRITE_MASK_ALL;   // WSEE.
+            g_ro.dss_stencil = d.StencilEnable != FALSE;   // WSEE: a no-write layer testing stencil is left out.
             g_hdc_dss.put(dss, g_ro.dss_nowrite, g_ro.dss_write, g_ro.dss_stencil);
         }
     }
 
-    } catch (...) { kh_hook_except(); }
+    } catch (...) { hook_except(); }
     g_orig_omset_depthstencil(self, dss, ref);
 }
 
 static void STDMETHODCALLTYPE hooked_omset_rendertargets(ID3D11DeviceContext* self, UINT n, ID3D11RenderTargetView* const* rtvs, ID3D11DepthStencilView* dsv) {
     try {
-    KH_PROF_SCOPE(KHP_HOOK_OMRT);   // KH_PROF_HOOKS.
+    KH_PROF_SCOPE(PROF_HOOK_OMRT);   // PROF_HOOKS.
     // Foreign contexts fall straight through.
     if (self == g_reorder_target_ctx.load(std::memory_order_relaxed) && !g_ro.in_injection &&
-        !g_kh_flush_active && !g_ui_mask_injecting &&   // own-state exclusion by flags.
+        !g_flush_active && !g_ui_mask_injecting &&   // own-state exclusion by flags.
         reorder_on_render_thread()) {
         g_ro.dsv_main = dsv && g_main_depth_identity &&
                         reorder_dsv_identity(dsv) == g_main_depth_identity;
-        // KH_INFRONT: the bind that leaves the hands colour pass's targets (RT0 or the depth view changes; the
-        // pointers compared, kh_pip_track_targets' leave rule) draws the slice's deferred tail into them first -
+        // INFRONT: the bind that leaves the hands colour pass's targets (RT0 or the depth view changes; the
+        // pointers compared, pip_track_targets' leave rule) draws the slice's deferred tail into them first -
         // they are still bound, this hook runs ahead of the engine's call. TWIN: hooked_omset_rts_and_uavs.
-        if (g_vm_tail_armed.load(std::memory_order_relaxed) &&
-            (dsv != g_vm_tail_dsv || n < 1 || !rtvs || rtvs[0] != g_vm_tail_rtv)) {
-            kh_infront_tail_take(self);
+        if (g_infront.tail_armed.load(std::memory_order_relaxed) &&
+            (dsv != g_infront.tail_dsv || n < 1 || !rtvs || rtvs[0] != g_infront.tail_rtv)) {
+            infront_tail_take(self);
         }
-        kh_pip_track_targets(self, n, rtvs, dsv);   // KH_PIP (+ KH_PIP_FX at a leave).
+        pip_track_targets(self, n, rtvs, dsv);   // PIP (+ PIP_FX at a leave).
         const bool was_on_atlas = g_ls.phase_on_atlas;
         shadow_track_targets(self, dsv, g_ro.dsv_main, n, rtvs);
 
@@ -393,7 +393,7 @@ static void STDMETHODCALLTYPE hooked_omset_rendertargets(ID3D11DeviceContext* se
         }
 
         if (was_on_atlas && !g_ls.phase_on_atlas) {
-            if (g_ro.injected) g_fire_post_scene_cycle = g_topo_cycles;   // KH_FIRE_NEXT_MASK.
+            if (g_ro.injected) g_fire.post_scene_cycle = g_topo_cycles;   // FIRE_NEXT_MASK.
             g_ls.resolve_window = 4;
         }
 
@@ -401,114 +401,114 @@ static void STDMETHODCALLTYPE hooked_omset_rendertargets(ID3D11DeviceContext* se
 
     }
 
-    } catch (...) { kh_hook_except(); }
+    } catch (...) { hook_except(); }
     g_orig_omset_rendertargets(self, n, rtvs, dsv);
 }
 
 static void STDMETHODCALLTYPE hooked_omset_rts_and_uavs(ID3D11DeviceContext* self, UINT n, ID3D11RenderTargetView* const* rtvs, ID3D11DepthStencilView* dsv, UINT uav_start, UINT n_uavs, ID3D11UnorderedAccessView* const* uavs, const UINT* counts) {
     try {
-    KH_PROF_SCOPE(KHP_HOOK_OMRTUAV);   // KH_PROF_HOOKS.
+    KH_PROF_SCOPE(PROF_HOOK_OMRTUAV);   // PROF_HOOKS.
     if (self == g_reorder_target_ctx.load(std::memory_order_relaxed) && !g_ro.in_injection &&
-        !g_kh_flush_active && !g_ui_mask_injecting &&   // own-state exclusion by flags.
+        !g_flush_active && !g_ui_mask_injecting &&   // own-state exclusion by flags.
         reorder_on_render_thread() &&
         n != D3D11_KEEP_RENDER_TARGETS_AND_DEPTH_STENCIL) {
         // The DSV changes through this path too (n == keep leaves the current bindings alone).
         g_ro.dsv_main = dsv && g_main_depth_identity &&
                         reorder_dsv_identity(dsv) == g_main_depth_identity;
-        // KH_INFRONT: the leave of the hands colour pass's targets (TWIN: hooked_omset_rendertargets).
-        if (g_vm_tail_armed.load(std::memory_order_relaxed) &&
-            (dsv != g_vm_tail_dsv || n < 1 || !rtvs || rtvs[0] != g_vm_tail_rtv)) {
-            kh_infront_tail_take(self);
+        // INFRONT: the leave of the hands colour pass's targets (TWIN: hooked_omset_rendertargets).
+        if (g_infront.tail_armed.load(std::memory_order_relaxed) &&
+            (dsv != g_infront.tail_dsv || n < 1 || !rtvs || rtvs[0] != g_infront.tail_rtv)) {
+            infront_tail_take(self);
         }
-        kh_pip_track_targets(self, n, rtvs, dsv);   // KH_PIP (+ KH_PIP_FX at a leave).
+        pip_track_targets(self, n, rtvs, dsv);   // PIP (+ PIP_FX at a leave).
         shadow_track_targets(self, dsv, g_ro.dsv_main, n, rtvs);
 
     }
-    // KH_RP_WRITE_SPLIT: the draws after this bind can write a UAV's buffer, and a buffer bound as a UAV is no draw's
+    // RP_WRITE_SPLIT: the draws after this bind can write a UAV's buffer, and a buffer bound as a UAV is no draw's
     // vertex / index buffer meanwhile (D3D11 nulls an input bound while it is an output) - so a pixel-stage UAV write
     // into a buffer a record read follows a bind here, which splits ahead of it. One GetResource per UAV, only past
     // the gate (an open pass, a buffer listed); a call the runtime drops (past the UAV slots) writes nothing.
     if (n_uavs != D3D11_KEEP_UNORDERED_ACCESS_VIEWS && uavs && uav_start < D3D11_1_UAV_SLOT_COUNT &&
-        n_uavs <= D3D11_1_UAV_SLOT_COUNT - uav_start && kh_rp_split_armed(self) && g_rp_dynset.n != 0u) {
-        for (UINT khou_i = 0; khou_i < n_uavs; ++khou_i) {
-            if (!uavs[khou_i]) continue;
-            ID3D11Resource* khou_r = nullptr;
-            uavs[khou_i]->GetResource(&khou_r);
-            if (!khou_r) continue;
-            kh_rp_on_write(self, khou_r, false);
-            khou_r->Release();
+        n_uavs <= D3D11_1_UAV_SLOT_COUNT - uav_start && rp_split_armed(self) && g_rp_rec.dynset.n != 0u) {
+        for (UINT i = 0; i < n_uavs; ++i) {
+            if (!uavs[i]) continue;
+            ID3D11Resource* r = nullptr;
+            uavs[i]->GetResource(&r);
+            if (!r) continue;
+            rp_on_write(self, r, false);
+            r->Release();
         }
     }
 
-    } catch (...) { kh_hook_except(); }
+    } catch (...) { hook_except(); }
     g_orig_omset_rts_and_uavs(self, n, rtvs, dsv, uav_start, n_uavs, uavs, counts);
 }
 
 static void STDMETHODCALLTYPE hooked_clear_depthstencil(ID3D11DeviceContext* self, ID3D11DepthStencilView* dsv, UINT flags, FLOAT depth, UINT8 stencil) {
-    try {   // KH_VOL_REPLAY - under a try of its own (every other hook's kh_rp_foreign call is under a try too).
-        if (dsv && g_svs_vol_src_id && self == g_reorder_target_ctx.load(std::memory_order_relaxed) &&
-            reorder_dsv_identity(dsv) == g_svs_vol_src_id) {
-            kh_rp_foreign(0);   // Inside a pass: refused. Before one: this frame's buffer starts clean.
-            g_rp_vol_clear_seq = g_svs_frame_seq;
+    try {   // VOL_REPLAY - under a try of its own (every other hook's rp_foreign call is under a try too).
+        if (dsv && g_svs.vol_src_id && self == g_reorder_target_ctx.load(std::memory_order_relaxed) &&
+            reorder_dsv_identity(dsv) == g_svs.vol_src_id) {
+            rp_foreign(0);   // Inside a pass: refused. Before one: this frame's buffer starts clean.
+            g_rp_rec.vol_clear_seq = g_svs.frame_seq;
         }
-    } catch (...) { kh_hook_except(); }
-    KH_PROF_SCOPE(KHP_HOOK_CLEAR);   // KH_PROF.
+    } catch (...) { hook_except(); }
+    KH_PROF_SCOPE(PROF_HOOK_CLEAR);   // PROF.
     try {
     if (self == g_reorder_target_ctx.load(std::memory_order_relaxed) && !g_ro.in_injection &&
         // Own-state exclusion: the flush's sun / DLS clears are ours.
-        !g_kh_flush_active.load(std::memory_order_relaxed) &&
+        !g_flush_active.load(std::memory_order_relaxed) &&
         dsv && (flags & D3D11_CLEAR_DEPTH)) {
-        g_depth_clear_serial++;   // KH_SVS_SKIP: any depth clear invalidates a cached seam inject.
-        g_watch_clears.fetch_add(1u, std::memory_order_relaxed);   // KH_WATCH_STALL.
+        g_depth_clear_serial++;   // SVS_SKIP: any depth clear invalidates a cached seam inject.
+        g_watch.clears.fetch_add(1u, std::memory_order_relaxed);   // WATCH_STALL.
         // The identity is a pointer the engine may recycle (a render-resolution change recreates the scene targets with
         // no device reset): the match is confirmed against the adopted dimensions once per frame here, and a mismatch
         // drops it so the next park re-adopts in either direction at once instead of after the wrong-pass streak.
-        bool khcd_main = g_main_depth_identity && reorder_dsv_identity(dsv) == g_main_depth_identity;
-        if (khcd_main && !kh_main_depth_dims_match(dsv)) {
+        bool main = g_main_depth_identity && reorder_dsv_identity(dsv) == g_main_depth_identity;
+        if (main && !main_depth_dims_match(dsv)) {
             g_main_depth_identity = nullptr;
-            khcd_main = false;
+            main = false;
         }
-        // KH_FSAA_SWITCH: a single-sample identity (FSAA 1x) while a multisampled depth of its size is cleared - FSAA
+        // FSAA_SWITCH: a single-sample identity (FSAA 1x) while a multisampled depth of its size is cleared - FSAA
         // was turned on at runtime. The identity may still match the game thread's own clear, which keeps naming the
-        // game thread (it never resolves: no KH_DEPTH_READOPT), and only the park's wrong-pass streak would re-adopt
-        // (KH_WRONG_PASS_READOPT parks): back to the bootstrap instead, and the next park adopts at once (the MSAA
-        // mission start's path). Inert while a multisampled depth is adopted (kh_fsaa_world_standdown is false then).
-        if (!khcd_main && g_main_depth_identity && kh_fsaa_world_standdown() && kh_depth_msaa_scene(dsv)) {
+        // game thread (it never resolves: no DEPTH_READOPT), and only the park's wrong-pass streak would re-adopt
+        // (WRONG_PASS_READOPT parks): back to the bootstrap instead, and the next park adopts at once (the MSAA
+        // mission start's path). Inert while a multisampled depth is adopted (fsaa_world_standdown is false then).
+        if (!main && g_main_depth_identity && fsaa_world_standdown() && depth_msaa_scene(dsv)) {
             g_main_depth_identity = nullptr;
             g_reorder_render_tid.store(0, std::memory_order_relaxed);
         }
-        if (!khcd_main) kh_pip_on_clear();   // KH_PIP.
-        if (khcd_main) {
+        if (!main) pip_on_clear();   // PIP.
+        if (main) {
             // The thread that clears the main scene depth is named the render thread for the tracking gate: at MSAA
             // the engine's render thread; at FSAA 1x the game thread (measured), so the gate keeps the real render
-            // thread's mesh routes off there (the "By design" note at kh_fsaa_world_standdown).
+            // thread's mesh routes off there (the "By design" note at fsaa_world_standdown).
             g_reorder_render_tid.store(GetCurrentThreadId(), std::memory_order_relaxed);
-            kh_sun_size_latch();
+            sun_size_latch();
 
             g_boundary_t = effect_time_seconds();
-            kh_volume_seam_frame_reset();   // One injection per frame.
-            kh_rp_img_clear();   // KH_REPLAY_CPUCB: images are one frame's (the volume pass is at its end).
-            kh_infront_frame_reset();   // KH_INFRONT: the slice's two injections re-arm.
+            volume_seam_frame_reset();   // One injection per frame.
+            rp_img_clear();   // REPLAY_CPUCB: images are one frame's (the volume pass is at its end).
+            infront_frame_reset();   // INFRONT: the slice's two injections re-arm.
 
-            // The no-flush sentinel, re-armed per frame: kh_rescue_window_open stays shut until this frame's flush
+            // The no-flush sentinel, re-armed per frame: rescue_window_open stays shut until this frame's flush
             // stamps its opaque count (only the sentinel is tested; the count is compared nowhere).
             g_cc_flush_opaques.store(0xFFFFFFFFu, std::memory_order_relaxed);
 
             g_topo_cycles++;
-            g_topo_cycles_pub.store(g_topo_cycles, std::memory_order_relaxed);   // KH_ATTACH_CYCLE: the park's step reads it.
-            if constexpr (KH_WSEE_ON) {   // No per-clear see-through work with the system built out.
-                KH_PROF_TSC(KHP_WSEE_CLEAR);   // wseeClear, the three calls timed whole.
-                kh_wsee_cycle_note();   // KH_WSEE: whether this cycle captures.
-                kh_psv_cycle_head(self);   // KH_PSV: the queued variants made (device Create* alone).
-                kh_wsee_gput_head(self, g_topo_cycles, g_wsee_on);   // KH_WSEE_GPUT: its frame closed, read, opened.
+            g_topo_cycles_pub.store(g_topo_cycles, std::memory_order_relaxed);   // ATTACH_CYCLE: the park's step reads it.
+            if constexpr (WSEE_ON) {   // No per-clear see-through work with the system built out.
+                KH_PROF_TSC(PROF_WSEE_CLEAR);   // wseeClear, the three calls timed whole.
+                wsee_cycle_note();   // WSEE: whether this cycle captures.
+                psv_cycle_head(self);   // PSV: the queued variants made (device Create* alone).
+                wsee_gput_head(self, g_topo_cycles, g_wsee.on);   // WSEE_GPUT: its frame closed, read, opened.
             }
-            kh_mat_anim_stamp(g_topo_cycles);   // KH_UV_ANIM: the cycle's time, while a clock-driven entry exists.
-            kh_gts_clear_note(kh_gts_qpc());   // KH_ATTACH_GT_SNAP: this cycle's boundary and half the frame period.
-            kh_prof_fold(self);   // KH_PROF: the ended cycle publishes; the next GPU bracket opens.
+            mat_anim_stamp(g_topo_cycles);   // UV_ANIM: the cycle's time, while a clock-driven entry exists.
+            gts_clear_note(gts_qpc());   // ATTACH_GT_SNAP: this cycle's boundary and half the frame period.
+            prof_fold(self);   // PROF: the ended cycle publishes; the next GPU bracket opens.
 
             // A main scene depth clear marks the new frame: injection re-arms and the phase evidence resets.
-            kh_blk_owner_frame();   // KH_LIGHT_BASE: the ended frame's base lighting publishes.
-            kh_sun_raw_frame();   // KH_SUN_RAW: the ended frame's sun direction publishes.
+            blk_owner_frame();   // LIGHT_BASE: the ended frame's base lighting publishes.
+            sun_raw_frame();   // SUN_RAW: the ended frame's sun direction publishes.
             g_ro.injected = false;
             // Census: fold the ended cycle, open the next.
             g_ro.frame_cycles++;
@@ -524,7 +524,7 @@ static void STDMETHODCALLTYPE hooked_clear_depthstencil(ID3D11DeviceContext* sel
             g_ro.world_pair_valid = false;   // world-phase pair latch is per-cycle.
 
             if (g_sun_jump_pending) {
-                // A raw publish stepped past KH_SRAW_JUMP_DEG. The band seals are NOT wiped (each re-pairs at its
+                // A raw publish stepped past SRAW_JUMP_DEG. The band seals are NOT wiped (each re-pairs at its
                 // next capture).
                 g_sun_jump_pending = false;
 
@@ -532,27 +532,27 @@ static void STDMETHODCALLTYPE hooked_clear_depthstencil(ID3D11DeviceContext* sel
                 // change does not break, and the reset cost a frame of world cast (flicker). Do NOT clear map validity:
                 // the mask cast fire builds this frame's map itself ahead of its freshness gate (mask_cast_engine's
                 // once-per-frame render_sun_depth), and it has no analytic fallback to take (the AABB slab path is
-                // gone: KH_EA_SLAB_DEAD). The union's hash already carries the sun; zeroing it only makes the re-fit
+                // gone: EA_SLAB_DEAD). The union's hash already carries the sun; zeroing it only makes the re-fit
                 // unconditional.
-                g_sun_map_hash = 0;
+                g_sun_maps.sun_map_hash = 0;
             }
 
             shadow_live_frame_reset();
             shadow_view_prewarm();   // Lock can exist before the first mesh does.
-            g_sun_map_rendered_frame = false;
-            if (g_fire_lock) { g_fire_lock->Release(); g_fire_lock = nullptr; }
-            g_fire_lock_valid = false;   // New frame: first fire re-freezes.
+            g_sun_maps.sun_map_rendered_frame = false;
+            if (g_fire.lock) { g_fire.lock->Release(); g_fire.lock = nullptr; }
+            g_fire.lock_valid = false;   // New frame: first fire re-freezes.
             if (g_ls.resolve_seen_since_cast) {
                 g_ls.resolve_seen_since_cast = false;
             }
 
             // Learn unconditionally from the frame's own final count.
-            if (g_fire_count_frame > 0) {
-                g_fire_clamp_target = g_fire_count_frame;
+            if (g_fire.count_frame > 0) {
+                g_fire.clamp_target = g_fire.count_frame;
             }
 
-            g_fire_clamp_painted = 0;
-            g_fire_count_frame = 0;   // Fire census rolls per cycle (the clamp's last-fire pick).
+            g_fire.clamp_painted = 0;
+            g_fire.count_frame = 0;   // Fire census rolls per cycle (the clamp's last-fire pick).
             g_mask_cast_fired = false;   // New frame: one analytic pass allowed.
             // Do not arm at the boundary: this frame's gated capture has not run yet, so the fire would use the
             // previous frame's depth snapshot - on partitioned look-down frames near the mesh that stale close-range
@@ -564,19 +564,19 @@ static void STDMETHODCALLTYPE hooked_clear_depthstencil(ID3D11DeviceContext* sel
 
             if (RVExtBridge::get_projection_view_transform(pv)) {
                 g_boundary_pv_valid = true;
-                // Adopt the bridge PV at the clear (see KH_LATCH_JUMP_M).
-                float khc_cam[3];
-                kh_cam_of(pv.view, khc_cam);
+                // Adopt the bridge PV at the clear (see LATCH_JUMP_M).
+                float cam[3];
+                cam_of(pv.view, cam);
                 g_cam_step_m = g_latch_cam_valid
-                             ? sqrtf(latch_cam_dist_sq(khc_cam, g_latch_cam)) : 0.0f;
+                             ? sqrtf(latch_cam_dist_sq(cam, g_latch_cam)) : 0.0f;
                 g_ro.cycle_pv = pv;
                 g_ro.cycle_pv_valid = true;
                 g_ro.cycle_pv_stale = false;
-                g_latch_cam[0] = khc_cam[0];
-                g_latch_cam[1] = khc_cam[1];
-                g_latch_cam[2] = khc_cam[2];
+                g_latch_cam[0] = cam[0];
+                g_latch_cam[1] = cam[1];
+                g_latch_cam[2] = cam[2];
                 g_latch_cam_valid = true;
-                kh_simlod_publish(khc_cam, pv.projection[1][1], g_boundary_t);   // KH_SIM_LOD: the game thread's view.
+                simlod_publish(cam, pv.projection[1][1], g_boundary_t);   // SIM_LOD: the game thread's view.
 
             } else {
                 g_ro.cycle_pv_stale = true;
@@ -586,56 +586,56 @@ static void STDMETHODCALLTYPE hooked_clear_depthstencil(ID3D11DeviceContext* sel
         }
     }
 
-    } catch (...) { kh_hook_except(); }
-    // KH_PSB_ZB: after the cycle step (whatever it threw) - a clear of the main depth that starts no cycle ends Zb.
-    try { kh_psb_zb_clear(self, dsv, flags); } catch (...) { kh_hook_except(); }
+    } catch (...) { hook_except(); }
+    // PSB_ZB: after the cycle step (whatever it threw) - a clear of the main depth that starts no cycle ends Zb.
+    try { psb_zb_clear(self, dsv, flags); } catch (...) { hook_except(); }
     g_orig_clear_depthstencil(self, dsv, flags, depth, stencil);
 }
 
-inline void kh_reorder_hook_fail_round(const char* khrr_what) {
-    ++g_reorder_hook_fail_count;
+inline void reorder_hook_fail_round(const char* what) {
+    ++g_reorder_hook.fail_count;
 
-    if (g_reorder_hook_fail_count == 1) {
-        g_reorder_hook_retry_ms = steady_now_ms() + 1000;
+    if (g_reorder_hook.fail_count == 1) {
+        g_reorder_hook.retry_ms = steady_now_ms() + 1000;
         return;
     }
 
-    if (g_reorder_hook_fail_count == 2) {
-        g_reorder_hook_retry_ms = steady_now_ms() + 10000;
+    if (g_reorder_hook.fail_count == 2) {
+        g_reorder_hook.retry_ms = steady_now_ms() + 10000;
         return;
     }
 
-    g_reorder_hook_failed = true;
-    report_error(std::string("KH RenderIntegration: context hooks: ") + khrr_what + " (phase "
-                 + std::to_string(g_reorder_hook_fail_phase) + ", spec "
-                 + std::to_string(g_reorder_hook_fail_slot) + ", MH status "
-                 + std::to_string(g_reorder_hook_mh_status) + ", attempt "
-                 + std::to_string(g_reorder_hook_fail_count)
+    g_reorder_hook.failed = true;
+    report_error(std::string("KH RenderIntegration: context hooks: ") + what + " (phase "
+                 + std::to_string(g_reorder_hook.fail_phase) + ", spec "
+                 + std::to_string(g_reorder_hook.fail_slot) + ", MH status "
+                 + std::to_string(g_reorder_hook.mh_status) + ", attempt "
+                 + std::to_string(g_reorder_hook.fail_count)
                  + "); composited rendering disabled");
 }
 
 inline void ensure_reorder_hook() {
     ID3D11DeviceContext* ctx = RVExtBridge::get_d3d_device_context();
     if (ctx) g_reorder_target_ctx.store(static_cast<void*>(ctx), std::memory_order_relaxed);
-    if (ctx && g_reorder_hook_active.load(std::memory_order_acquire) &&
-        g_reorder_hook_vt && *reinterpret_cast<void***>(ctx) != g_reorder_hook_vt) {
-        if (g_reorder_hook_vt_drift++ == 0) {
-            // KH_EA_ERR_CLASS: another overlay re-hooked the context - a warning (game thread: a plain log line).
+    if (ctx && g_reorder_hook.active.load(std::memory_order_acquire) &&
+        g_reorder_hook.vt && *reinterpret_cast<void***>(ctx) != g_reorder_hook.vt) {
+        if (g_reorder_hook.vt_drift++ == 0) {
+            // EA_ERR_CLASS: another overlay re-hooked the context - a warning (game thread: a plain log line).
             sqf::diag_log("KH RenderIntegration: context hooks: context vtable changed under installed hooks; "
                           "composited draws miss the hooks if it points at other code "
                           "(reported once per process)");
         }
     }
-    if (g_reorder_hook_active.load(std::memory_order_acquire) || g_reorder_hook_failed) return;
+    if (g_reorder_hook.active.load(std::memory_order_acquire) || g_reorder_hook.failed) return;
     if (!ctx) return;   // Bridge not ready: retry next flush.
-    if (g_reorder_hook_retry_ms != 0 &&
-        steady_now_ms() < g_reorder_hook_retry_ms) return;
+    if (g_reorder_hook.retry_ms != 0 &&
+        steady_now_ms() < g_reorder_hook.retry_ms) return;
 
     if (!ensure_minhook()) {
-        g_reorder_hook_fail_phase = 1;
-        g_reorder_hook_fail_slot = -1;
-        g_reorder_hook_mh_status = -1;   // Framework ensure_minhook is bool-only.
-        kh_reorder_hook_fail_round("MinHook init failed");
+        g_reorder_hook.fail_phase = 1;
+        g_reorder_hook.fail_slot = -1;
+        g_reorder_hook.mh_status = -1;   // Framework ensure_minhook is bool-only.
+        reorder_hook_fail_round("MinHook init failed");
         return;
     }
 
@@ -643,29 +643,29 @@ inline void ensure_reorder_hook() {
     struct HookSpec { int slot; void* detour; void** original; };
 
     const HookSpec specs[] = {
-        { KH_VT_PSSETSHADERRESOURCES, reinterpret_cast<void*>(&hooked_pssetshaderresources),  reinterpret_cast<void**>(&g_orig_pssetshaderresources) },
-        { KH_VT_DRAWINDEXED,          reinterpret_cast<void*>(&hooked_draw_indexed),           reinterpret_cast<void**>(&g_orig_draw_indexed) },
-        { KH_VT_DRAW,                 reinterpret_cast<void*>(&hooked_draw),                   reinterpret_cast<void**>(&g_orig_draw) },
-        { KH_VT_DRAWINDEXEDINSTANCED, reinterpret_cast<void*>(&hooked_draw_indexed_instanced), reinterpret_cast<void**>(&g_orig_draw_indexed_instanced) },
-        { KH_VT_DRAWINSTANCED,        reinterpret_cast<void*>(&hooked_draw_instanced),         reinterpret_cast<void**>(&g_orig_draw_instanced) },
-        { KH_VT_OMSETRENDERTARGETS,   reinterpret_cast<void*>(&hooked_omset_rendertargets),    reinterpret_cast<void**>(&g_orig_omset_rendertargets) },
-        { KH_VT_OMSETRTS_AND_UAVS,    reinterpret_cast<void*>(&hooked_omset_rts_and_uavs),     reinterpret_cast<void**>(&g_orig_omset_rts_and_uavs) },
-        { KH_VT_OMSETBLENDSTATE,      reinterpret_cast<void*>(&hooked_omset_blendstate),       reinterpret_cast<void**>(&g_orig_omset_blendstate) },
-        { KH_VT_OMSETDEPTHSTENCIL,    reinterpret_cast<void*>(&hooked_omset_depthstencil),     reinterpret_cast<void**>(&g_orig_omset_depthstencil) },
-        { KH_VT_CLEARDEPTHSTENCIL,    reinterpret_cast<void*>(&hooked_clear_depthstencil),     reinterpret_cast<void**>(&g_orig_clear_depthstencil) },
-        { KH_VT_MAP,                  reinterpret_cast<void*>(&hooked_map),                     reinterpret_cast<void**>(&g_orig_map) },
-        { KH_VT_UNMAP,                reinterpret_cast<void*>(&hooked_unmap),                   reinterpret_cast<void**>(&g_orig_unmap) },
-        { KH_VT_UPDATESUBRESOURCE,    reinterpret_cast<void*>(&hooked_updatesubresource),      reinterpret_cast<void**>(&g_orig_updatesubresource) },
-        { KH_VT_COPYRESOURCE,         reinterpret_cast<void*>(&hooked_copyresource),           reinterpret_cast<void**>(&g_orig_copyresource) },   // KH_PIP_FX_COPY.
-        { KH_VT_RESOLVESUBRESOURCE,   reinterpret_cast<void*>(&hooked_resolvesubresource),     reinterpret_cast<void**>(&g_orig_resolvesubresource) },
+        { VT_PSSETSHADERRESOURCES, reinterpret_cast<void*>(&hooked_pssetshaderresources),  reinterpret_cast<void**>(&g_orig_pssetshaderresources) },
+        { VT_DRAWINDEXED,          reinterpret_cast<void*>(&hooked_draw_indexed),           reinterpret_cast<void**>(&g_orig_draw_indexed) },
+        { VT_DRAW,                 reinterpret_cast<void*>(&hooked_draw),                   reinterpret_cast<void**>(&g_orig_draw) },
+        { VT_DRAWINDEXEDINSTANCED, reinterpret_cast<void*>(&hooked_draw_indexed_instanced), reinterpret_cast<void**>(&g_orig_draw_indexed_instanced) },
+        { VT_DRAWINSTANCED,        reinterpret_cast<void*>(&hooked_draw_instanced),         reinterpret_cast<void**>(&g_orig_draw_instanced) },
+        { VT_OMSETRENDERTARGETS,   reinterpret_cast<void*>(&hooked_omset_rendertargets),    reinterpret_cast<void**>(&g_orig_omset_rendertargets) },
+        { VT_OMSETRTS_AND_UAVS,    reinterpret_cast<void*>(&hooked_omset_rts_and_uavs),     reinterpret_cast<void**>(&g_orig_omset_rts_and_uavs) },
+        { VT_OMSETBLENDSTATE,      reinterpret_cast<void*>(&hooked_omset_blendstate),       reinterpret_cast<void**>(&g_orig_omset_blendstate) },
+        { VT_OMSETDEPTHSTENCIL,    reinterpret_cast<void*>(&hooked_omset_depthstencil),     reinterpret_cast<void**>(&g_orig_omset_depthstencil) },
+        { VT_CLEARDEPTHSTENCIL,    reinterpret_cast<void*>(&hooked_clear_depthstencil),     reinterpret_cast<void**>(&g_orig_clear_depthstencil) },
+        { VT_MAP,                  reinterpret_cast<void*>(&hooked_map),                     reinterpret_cast<void**>(&g_orig_map) },
+        { VT_UNMAP,                reinterpret_cast<void*>(&hooked_unmap),                   reinterpret_cast<void**>(&g_orig_unmap) },
+        { VT_UPDATESUBRESOURCE,    reinterpret_cast<void*>(&hooked_updatesubresource),      reinterpret_cast<void**>(&g_orig_updatesubresource) },
+        { VT_COPYRESOURCE,         reinterpret_cast<void*>(&hooked_copyresource),           reinterpret_cast<void**>(&g_orig_copyresource) },   // PIP_FX_COPY.
+        { VT_RESOLVESUBRESOURCE,   reinterpret_cast<void*>(&hooked_resolvesubresource),     reinterpret_cast<void**>(&g_orig_resolvesubresource) },
     };
 
     size_t created = 0;
-    MH_STATUS khh_st = MH_OK;   // The failing call's status, published.
+    MH_STATUS st = MH_OK;   // The failing call's status, published.
 
     for (const auto& s : specs) {
-        khh_st = MH_CreateHook(vt[s.slot], s.detour, s.original);
-        if (khh_st != MH_OK) break;
+        st = MH_CreateHook(vt[s.slot], s.detour, s.original);
+        if (st != MH_OK) break;
         ++created;
     }
 
@@ -673,53 +673,53 @@ inline void ensure_reorder_hook() {
         size_t enabled = 0;
 
         for (const auto& s : specs) {
-            khh_st = MH_EnableHook(vt[s.slot]);
-            if (khh_st != MH_OK) break;
+            st = MH_EnableHook(vt[s.slot]);
+            if (st != MH_OK) break;
             ++enabled;
         }
 
         if (enabled == created) {
-            g_reorder_hook_vt = static_cast<void*>(vt);
-            g_reorder_hook_fail_count = 0;   // A success clears the ladder.
-            g_reorder_hook_retry_ms = 0;
-            g_reorder_hook_active.store(true, std::memory_order_release);
-            kh_rp_extra_hooks(ctx, vt);   // KH_VOL_REPLAY: optional, after the core hooks.
+            g_reorder_hook.vt = static_cast<void*>(vt);
+            g_reorder_hook.fail_count = 0;   // A success clears the ladder.
+            g_reorder_hook.retry_ms = 0;
+            g_reorder_hook.active.store(true, std::memory_order_release);
+            rp_extra_hooks(ctx, vt);   // VOL_REPLAY: optional, after the core hooks.
             return;
         }
 
-        g_reorder_hook_fail_phase = 3;
-        g_reorder_hook_fail_slot = static_cast<int32_t>(enabled);
+        g_reorder_hook.fail_phase = 3;
+        g_reorder_hook.fail_slot = static_cast<int32_t>(enabled);
         for (size_t i = 0; i < enabled; ++i) MH_DisableHook(vt[specs[i].slot]);
     } else {
-        g_reorder_hook_fail_phase = 2;
-        g_reorder_hook_fail_slot = static_cast<int32_t>(created);
+        g_reorder_hook.fail_phase = 2;
+        g_reorder_hook.fail_slot = static_cast<int32_t>(created);
     }
 
-    g_reorder_hook_mh_status = static_cast<int32_t>(khh_st);
-    // KH_EA_HOOK_ORIG_NULL: MH_CreateHook stored each created hook's trampoline in its g_orig_* and MH_RemoveHook frees
-    // it - nulled with it, as kh_rp_extra_hooks does, so the direct callers' null tests (the skin / user-VS SO draws'
-    // g_orig_draw, KH_WSEE's g_orig_resolvesubresource) take the plain call instead of a freed trampoline.
+    g_reorder_hook.mh_status = static_cast<int32_t>(st);
+    // EA_HOOK_ORIG_NULL: MH_CreateHook stored each created hook's trampoline in its g_orig_* and MH_RemoveHook frees
+    // it - nulled with it, as rp_extra_hooks does, so the direct callers' null tests (the skin / user-VS SO draws'
+    // g_orig_draw, WSEE's g_orig_resolvesubresource) take the plain call instead of a freed trampoline.
     for (size_t i = 0; i < created; ++i) {
         MH_RemoveHook(vt[specs[i].slot]);
         *specs[i].original = nullptr;
     }
-    kh_reorder_hook_fail_round("draw hook install failed");
+    reorder_hook_fail_round("draw hook install failed");
 }
 
-// KH_RENDER_FLUSH: the flush's per-pass frame template (view / inverse / fxCam, the rebase verdict, the lighting frame
+// RENDER_FLUSH: the flush's per-pass frame template (view / inverse / fxCam, the rebase verdict, the lighting frame
 // lanes, the band table, the sun and fog lanes, the heightfield lanes, the bucket pass lanes); returns the rebase
-// verdict (khf_rebase_on). The PIP template publish and the upload stay at the call site; the injection builds its
-// twin (khr_cbf) inline.
-inline bool kh_fx_frame_template(ConstantData& khf_cbf, const RVExtBridge::ProjectionViewTransform& pv,
-                                 const float view_proj[4][4], const float inv_view_proj[4][4],
-                                 const float khf_fx_cam[4], bool khf_engcam, const float cam[3]) {
-    memcpy(khf_cbf.view_proj, view_proj, sizeof(khf_cbf.view_proj));
-    memcpy(khf_cbf.inv_view_proj, inv_view_proj, sizeof(khf_cbf.inv_view_proj));
-    memcpy(khf_cbf.fx_cam, khf_fx_cam, sizeof(khf_cbf.fx_cam));   // KH_FX_CAM_REL.
-    const bool khf_rebase_on = khf_engcam
-                             ? kh_rebase_vp_engcam(khf_cbf, pv.view, pv.projection)
-                             : kh_rebase_vp(khf_cbf, cam);   // KH_DDX_REBASE.
-    fill_lighting_frame_cb(khf_cbf);
+// verdict (rebase_on). The PIP template publish and the upload stay at the call site; the injection builds its
+// twin (cbf) inline.
+inline bool fx_frame_template(ConstantData& cbf, const RVExtBridge::ProjectionViewTransform& pv,
+                              const float view_proj[4][4], const float inv_view_proj[4][4],
+                              const float fx_cam[4], bool engcam, const float cam[3]) {
+    memcpy(cbf.view_proj, view_proj, sizeof(cbf.view_proj));
+    memcpy(cbf.inv_view_proj, inv_view_proj, sizeof(cbf.inv_view_proj));
+    memcpy(cbf.fx_cam, fx_cam, sizeof(cbf.fx_cam));   // FX_CAM_REL.
+    const bool rebase_on = engcam
+                         ? rebase_vp_engcam(cbf, pv.view, pv.projection)
+                         : rebase_vp(cbf, cam);   // DDX_REBASE.
+    fill_lighting_frame_cb(cbf);
     {
         bool band_any = false;
         // Finest-first: order slots by near edge ascending, so the shader's first containing band holds the finest
@@ -743,19 +743,19 @@ inline bool kh_fx_frame_template(ConstantData& khf_cbf, const RVExtBridge::Proje
 
         for (int b = 0; b < 8; ++b) {
             const auto& bs = g_ls.band[order[b]];
-            khf_cbf.band_border[b][3] = 0.0f;
+            cbf.band_border[b][3] = 0.0f;
             if (!bs.valid || !bs.srv) { continue; }
 
-            // Absent beats offset: the receive term stands down for KH_RECEIVE_WARMUP_S after the first capture.
+            // Absent beats offset: the receive term stands down for RECEIVE_WARMUP_S after the first capture.
             if (!g_ls.receive_warmed) {
                 if (g_ls.first_capture_time < 0.0f ||
-                    effect_time_seconds() - g_ls.first_capture_time < KH_RECEIVE_WARMUP_S) {
+                    effect_time_seconds() - g_ls.first_capture_time < RECEIVE_WARMUP_S) {
                     continue;
                 }
                 g_ls.receive_warmed = true;
             }
 
-            if (!kh_recv_health()) { continue; }
+            if (!recv_health()) { continue; }
 
             // Spawn-window guard: a pending band whose provisional view is the bridge fallback pairs cross-convention;
             // the band re-enters the moment its seal completes.
@@ -779,31 +779,31 @@ inline bool kh_fx_frame_template(ConstantData& khf_cbf, const RVExtBridge::Proje
             if (bs.border[0] < prev_far - 0.5f && bs.border[1] < prev_far * 1.25f + 1.0f) { continue; }
             prev_far = bs.border[1];
 
-            memcpy(khf_cbf.band_mat[b * 3 + 0], bs.sm + 0, 16);
-            memcpy(khf_cbf.band_mat[b * 3 + 1], bs.sm + 4, 16);
-            memcpy(khf_cbf.band_mat[b * 3 + 2], bs.sm + 8, 16);
-            memcpy(khf_cbf.band_view[b * 3 + 0], bs.vcol + 0, 16);
-            memcpy(khf_cbf.band_view[b * 3 + 1], bs.vcol + 4, 16);
-            memcpy(khf_cbf.band_view[b * 3 + 2], bs.vcol + 8, 16);
-            khf_cbf.band_border[b][0] = bs.border[0];
-            khf_cbf.band_border[b][1] = bs.border[1];
-            khf_cbf.band_border[b][2] = bs.border[2];
-            khf_cbf.band_border[b][3] = 1.0f + static_cast<float>(order[b]);
+            memcpy(cbf.band_mat[b * 3 + 0], bs.sm + 0, 16);
+            memcpy(cbf.band_mat[b * 3 + 1], bs.sm + 4, 16);
+            memcpy(cbf.band_mat[b * 3 + 2], bs.sm + 8, 16);
+            memcpy(cbf.band_view[b * 3 + 0], bs.vcol + 0, 16);
+            memcpy(cbf.band_view[b * 3 + 1], bs.vcol + 4, 16);
+            memcpy(cbf.band_view[b * 3 + 2], bs.vcol + 8, 16);
+            cbf.band_border[b][0] = bs.border[0];
+            cbf.band_border[b][1] = bs.border[1];
+            cbf.band_border[b][2] = bs.border[2];
+            cbf.band_border[b][3] = 1.0f + static_cast<float>(order[b]);
             band_any = true;
         }
 
         if (band_any && g_sun_valid &&
             (g_atlas_frame_cur || g_atlas_frame_prev)) {   // Published sun + live atlas.
-            khf_cbf.mask_meta[0] = 1.0f;   // Stream liveness: the receive.
+            cbf.mask_meta[0] = 1.0f;   // Stream liveness: the receive.
         }   // Stands down before the first publish or while the cascade stream is dead.
-        khf_cbf.mask_meta[3] = kh_svs_unit_on() ? 1.0f : 0.0f;
+        cbf.mask_meta[3] = svs_unit_on() ? 1.0f : 0.0f;
         // The volume transport arm and the copy's dimensions, flush twin.
-        kh_fill_sten_reproj(khf_cbf, pv.projection);
+        fill_sten_reproj(cbf, pv.projection);
 
         // Below the fog layer the shaders split the ray at the layer (fogBelow.y = 1, armed by every mesh fill) and
         // take the below-layer part through fogBelow.x (and the fogUw colour where fogUw.w arms it); KhHazeT's
         // below-layer stand-down (fogBelow.y < 0.5) is never selected from this fill.
-        const float khf_cam_y =
+        const float cam_y =
             (g_ls.cam[0] * g_ls.cam[0] + g_ls.cam[1] * g_ls.cam[1] +
              g_ls.cam[2] * g_ls.cam[2] >= 1.0f) ? g_ls.cam[1]
           : (cam[0] * cam[0] + cam[1] * cam[1] + cam[2] * cam[2] >= 1.0f)
@@ -811,90 +811,90 @@ inline bool kh_fx_frame_template(ConstantData& khf_cbf, const RVExtBridge::Proje
         // The TRUE camera altitude, unclamped. The shaders arm their below-layer branch on camY < fogSkyCol.w
         // (static.hlsl, composite.hlsl), so a lane clamped at the layer would arm that branch nowhere: the ray is
         // split shader-side, not here.
-        const float khf_fog_cam_y = khf_cam_y;
+        const float fog_cam_y = cam_y;
         // fogBelow: x = the engine's below-layer extinction (block nb[51]), y = armed. z is written 0 here: it is the
-        // cast fire's lane (KH_CAST_SNAP_FACING, read by PSMaskCast alone), which the mesh shaders never read; w is
+        // cast fire's lane (CAST_SNAP_FACING, read by PSMaskCast alone), which the mesh shaders never read; w is
         // never written.
-        khf_cbf.fog_below[0] = (g_light_probe.hits > 0 && g_light_probe.meta == 40)   // KH_PROBE_META40.
-                             ? g_light_probe.nb[51] : 0.0f;
-        khf_cbf.fog_below[1] = 1.0f;
-        khf_cbf.fog_below[2] = 0.0f;
-        const bool khf_fog_on = g_fog_valid && g_fog[0] > 1e-4f;
-        const bool khf_eng_ok = g_light_probe.hits > 0 && g_light_probe.meta == 40;
-        kh_fill_haze(khf_cbf);
+        cbf.fog_below[0] = (g_light_probe.hits > 0 && g_light_probe.meta == 40)   // PROBE_META40.
+                         ? g_light_probe.nb[51] : 0.0f;
+        cbf.fog_below[1] = 1.0f;
+        cbf.fog_below[2] = 0.0f;
+        const bool fog_on = g_fog_valid && g_fog[0] > 1e-4f;
+        const bool eng_ok = g_light_probe.hits > 0 && g_light_probe.meta == 40;
+        fill_haze(cbf);
 
-        if (khf_fog_on || khf_cbf.haze_pars[3] >= 0.5f || khf_eng_ok) {
-            khf_cbf.fog_params[0] = khf_fog_on ? g_fog[0] : 0.0f;
-            khf_cbf.fog_params[1] = g_fog[1];
-            khf_cbf.fog_params[2] = g_fog[2];
-            khf_cbf.fog_params[3] = khf_fog_on ? 1.0f : 0.0f;
+        if (fog_on || cbf.haze_pars[3] >= 0.5f || eng_ok) {
+            cbf.fog_params[0] = fog_on ? g_fog[0] : 0.0f;
+            cbf.fog_params[1] = g_fog[1];
+            cbf.fog_params[2] = g_fog[2];
+            cbf.fog_params[3] = fog_on ? 1.0f : 0.0f;
 
             // Fog is decoupled from the block lock, so a degenerate staged decay or the pre-lock cold window does not
             // leave the mesh unfogged in a fogged world.
             if (g_light_probe.hits > 0 && g_light_probe.meta == 40) {
                 const float* e = g_light_probe.nb + 36;
 
-                for (int c = 0; c < 3; ++c) khf_cbf.fog_color[c] = e[c];
+                for (int c = 0; c < 3; ++c) cbf.fog_color[c] = e[c];
 
                 // Engine transmittance terms from the block mirror: the density
                 // scale, the linear ramp's end + inverse range.
-                khf_cbf.fog_engine[0] = g_light_probe.nb[41];
-                khf_cbf.fog_engine[1] = g_light_probe.nb[48];
-                khf_cbf.fog_engine[2] = g_light_probe.nb[49];
-                const bool khf_dec_fresh =
+                cbf.fog_engine[0] = g_light_probe.nb[41];
+                cbf.fog_engine[1] = g_light_probe.nb[48];
+                cbf.fog_engine[2] = g_light_probe.nb[49];
+                const bool dec_fresh =
                     g_light_probe.hits > 0 &&
-                    (effect_time_seconds() - g_light_probe.mirror_confirm) < 0.5f;   // KH_DEC_MIRROR_CLOCK.
-                const bool khf_dec_eng = khf_dec_fresh && g_light_probe.nb[40] >= 0.0f && g_light_probe.nb[40] < 1.0f;
-                if (khf_dec_eng) {
-                    khf_cbf.fog_params[1] = g_light_probe.nb[40];
+                    (effect_time_seconds() - g_light_probe.mirror_confirm) < 0.5f;   // DEC_MIRROR_CLOCK.
+                const bool dec_eng = dec_fresh && g_light_probe.nb[40] >= 0.0f && g_light_probe.nb[40] < 1.0f;
+                if (dec_eng) {
+                    cbf.fog_params[1] = g_light_probe.nb[40];
                 }
-                const bool khf_terms = g_light_probe.nb[48] > 1.0f &&
-                                       g_light_probe.nb[49] > 0.0f &&
-                                       g_light_probe.nb[41] >= 0.0f;
-                const float khf_rp_end = g_light_probe.nb[48];
-                const float khf_rp_inv = g_light_probe.nb[49];
-                const float khf_rp_prod = khf_rp_end * khf_rp_inv;
-                const bool khf_rp_incoh = khf_terms && khf_rp_prod < 1.0f;
-                const bool khf_ramp_off = khf_rp_incoh;
-                khf_cbf.fog_engine[3] = !khf_terms ? 0.0f : (khf_ramp_off ? 2.0f : 1.0f);
+                const bool terms = g_light_probe.nb[48] > 1.0f &&
+                                   g_light_probe.nb[49] > 0.0f &&
+                                   g_light_probe.nb[41] >= 0.0f;
+                const float rp_end = g_light_probe.nb[48];
+                const float rp_inv = g_light_probe.nb[49];
+                const float rp_prod = rp_end * rp_inv;
+                const bool rp_incoh = terms && rp_prod < 1.0f;
+                const bool ramp_off = rp_incoh;
+                cbf.fog_engine[3] = !terms ? 0.0f : (ramp_off ? 2.0f : 1.0f);
             } else {
-                khf_cbf.fog_color[0] = 1.0f;
-                khf_cbf.fog_color[1] = 1.0f;
-                khf_cbf.fog_color[2] = 1.0f;
+                cbf.fog_color[0] = 1.0f;
+                cbf.fog_color[1] = 1.0f;
+                cbf.fog_color[2] = 1.0f;
             }
 
             if (g_sky_probe.hits > 0) {
-                khf_cbf.fog_sky[0] = 1.0f;
-                khf_cbf.fog_sky[1] = 1.0f;
-                khf_cbf.fog_sky[2] = 1.0f;
-                khf_cbf.fog_sky[3] = 1.0f;
-                khf_cbf.fog_sky_col[0] = g_sky_probe.nb[4];
-                khf_cbf.fog_sky_col[1] = g_sky_probe.nb[5];
-                khf_cbf.fog_sky_col[2] = g_sky_probe.nb[6];
+                cbf.fog_sky[0] = 1.0f;
+                cbf.fog_sky[1] = 1.0f;
+                cbf.fog_sky[2] = 1.0f;
+                cbf.fog_sky[3] = 1.0f;
+                cbf.fog_sky_col[0] = g_sky_probe.nb[4];
+                cbf.fog_sky_col[1] = g_sky_probe.nb[5];
+                cbf.fog_sky_col[2] = g_sky_probe.nb[6];
                 // The below-layer convergence colour: nb[28..30] = the sky fog colour, nb[68..70] = its elevation
                 // gradient. Pure captures, inert unless the shader is below the layer.
-                khf_cbf.fog_uw[0] = g_sky_probe.nb[28];
-                khf_cbf.fog_uw[1] = g_sky_probe.nb[29];
-                khf_cbf.fog_uw[2] = g_sky_probe.nb[30];
-                khf_cbf.fog_uw[3] =
+                cbf.fog_uw[0] = g_sky_probe.nb[28];
+                cbf.fog_uw[1] = g_sky_probe.nb[29];
+                cbf.fog_uw[2] = g_sky_probe.nb[30];
+                cbf.fog_uw[3] =
                     1.0f;
-                khf_cbf.fog_uw_grad[0] = g_sky_probe.nb[68];
-                khf_cbf.fog_uw_grad[1] = g_sky_probe.nb[69];
-                khf_cbf.fog_uw_grad[2] = g_sky_probe.nb[70];
+                cbf.fog_uw_grad[0] = g_sky_probe.nb[68];
+                cbf.fog_uw_grad[1] = g_sky_probe.nb[69];
+                cbf.fog_uw_grad[2] = g_sky_probe.nb[70];
             }
 
-            // Twin at the injection fill and in kh_dlsw_fog_lanes (KH_DLSW_FOG_FILL). Camera altitude (engine Y-up),
-            // unclamped - see khf_fog_cam_y.
-            khf_cbf.fog_color[3] = khf_fog_cam_y;
+            // Twin at the injection fill and in dlsw_fog_lanes (DLSW_FOG_FILL). Camera altitude (engine Y-up),
+            // unclamped - see fog_cam_y.
+            cbf.fog_color[3] = fog_cam_y;
         }
     }
     // Heightfield lanes, both arms: solids always carry them; effect meshes read them only behind the local1.z arb arm,
     // so the always-live fill is inert for unarmed effects; chain passes never arm.
-    kh_fill_occ(khf_cbf);
-    // KH_OBJBUF pass lanes (twin of the injection's).
-    khf_cbf.kh_pass[0] = cam[0]; khf_cbf.kh_pass[1] = cam[1]; khf_cbf.kh_pass[2] = cam[2];
-    khf_cbf.kh_pass[3] = khf_rebase_on ? 1.0f : 0.0f;
-    khf_cbf.kh_pass_obj[0] = g_obj_vis.load(std::memory_order_relaxed);
-    return khf_rebase_on;
+    fill_occ(cbf);
+    // OBJBUF pass lanes (twin of the injection's).
+    cbf.pass_cam[0] = cam[0]; cbf.pass_cam[1] = cam[1]; cbf.pass_cam[2] = cam[2];
+    cbf.pass_cam[3] = rebase_on ? 1.0f : 0.0f;
+    cbf.pass_obj[0] = g_obj_vis.load(std::memory_order_relaxed);
+    return rebase_on;
 }
 }

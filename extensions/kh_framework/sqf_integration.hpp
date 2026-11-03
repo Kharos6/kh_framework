@@ -380,11 +380,11 @@ static std::string kh_command_arity_description(const kh_command_entry& entry) {
 }
 
 // A script number a handler needs as an int: a SCALAR, finite, above INT_MIN and below 2^31
-// (RenderIntegration::kh_gv_int; fractions truncate). A float -> int conversion of NaN / inf / an out-of-range value
+// (RenderIntegration::gv_int; fractions truncate). A float -> int conversion of NaN / inf / an out-of-range value
 // is UB, so every such argument goes through here; on false the handler reports and fails (out is left as it was).
 static bool kh_sqf_int(const game_value& value, int& out) {
     if (value.type_enum() != game_data_type::SCALAR) return false;
-    return RenderIntegration::kh_gv_int(value, out);
+    return RenderIntegration::gv_int(value, out);
 }
 
 // kh_sqf_int for the client ids inside an ARRAY target (khNetworkMessageSend, khSetVariable): false when a
@@ -2468,7 +2468,7 @@ static game_value stt_stop_capture_sqf() {
     }
 }
 
-// The HTML UI (html*) and the renderer (KH_PLAYER_ONLY in rendering_integration.hpp's SQF COMMAND NOTES) exist only
+// The HTML UI (html*) and the renderer (PLAYER_ONLY in rendering_integration.hpp's SQF COMMAND NOTES) exist only
 // where there is an interface - framework.hpp's g_is_player (hasInterface). On a dedicated server or a headless client
 // each of their commands returns its empty value at once - no parse, no report, nothing started: '' for a STRING, false
 // for a BOOL, [] for an ARRAY, nil for htmlGetJsVariable.
@@ -5748,7 +5748,7 @@ static void update_unit_states() {
 // 1. Every in-array argument fault is REPORTED through report_error (the convention of every sqf_integration command
 //    family) and the command then returns its failure value: "" from a creator, false from an updater. A
 //    plain-sentence return is invisible unless the caller reads it; report_error is not. One exception: an object to
-//    follow that is null or cannot be read fails the call unreported (KH_NULL_SILENT, rendering/attachments.hpp).
+//    follow that is null or cannot be read fails the call unreported (NULL_SILENT, rendering/attachments.hpp).
 // 2. Creators take EXACTLY their documented shape (an extra element is an error, not ignored), so a script written
 //    against an older shape fails loudly on its first call instead of silently rendering the wrong thing.
 // 3. addRender3D is [pos, rotation, mesh] and nothing else; every other mesh property has an updateRender3D twin and
@@ -5759,7 +5759,7 @@ static void update_unit_states() {
 //    own with its index.
 //
 // Rotation argument: nil = identity, a bare number = heading (yaw), or [pitch, yaw, roll] degrees (ARMA sense - see
-// kh_set_rotation). The euler reader under kh_rotation_m_from_gv (below), which every typed rotation goes through.
+// set_rotation). The euler reader under kh_rotation_m_from_gv (below), which every typed rotation goes through.
 // Returns false on a malformed value.
 static bool kh_rotation_from_gv(const game_value& khrg_v, float& khrg_p, float& khrg_y, float& khrg_r) {
     khrg_p = 0.0f; khrg_y = 0.0f; khrg_r = 0.0f;
@@ -5781,8 +5781,8 @@ static bool kh_rotation_from_gv(const game_value& khrg_v, float& khrg_p, float& 
 }
 
 // Every typed rotation - addRender3D's slot, updateRender3D "rotation" and "attachRotation", a chain's "endRotation" -
-// as its matrix (engine axes, rows aside / up / dir): the euler forms above through kh_rotation_matrix, or [vectorDir,
-// vectorUp] (setVectorDirAndUp's pair, two arrays of three numbers) through kh_rotation_from_vectors. vec: the vector
+// as its matrix (engine axes, rows aside / up / dir): the euler forms above through rotation_matrix, or [vectorDir,
+// vectorUp] (setVectorDirAndUp's pair, two arrays of three numbers) through rotation_from_vectors. vec: the vector
 // form was given (p / y / r come back zero); id: no rotation (an all-zero euler or nil, or a pair that is exactly the
 // identity). False on a malformed value.
 static bool kh_rotation_m_from_gv(const game_value& v, float m[9], float& p, float& y, float& r, bool& vec, bool& id) {
@@ -5801,7 +5801,7 @@ static bool kh_rotation_m_from_gv(const game_value& v, float m[9], float& p, flo
                     (khrm_i == 0 ? khrm_dir : khrm_up)[k] = static_cast<float>(khrm_v[k]);
                 }
             }
-            if (!RenderIntegration::kh_rotation_from_vectors(m, khrm_dir, khrm_up)) return false;
+            if (!RenderIntegration::rotation_from_vectors(m, khrm_dir, khrm_up)) return false;
             static const float khrm_id[9] = { 1.0f, 0.0f, 0.0f, 0.0f, 1.0f, 0.0f, 0.0f, 0.0f, 1.0f };
             vec = true;
             id = memcmp(m, khrm_id, sizeof(khrm_id)) == 0;
@@ -5809,7 +5809,7 @@ static bool kh_rotation_m_from_gv(const game_value& v, float m[9], float& p, flo
         }
     }
     if (!kh_rotation_from_gv(v, p, y, r)) return false;
-    RenderIntegration::kh_rotation_matrix(m, p, y, r);
+    RenderIntegration::rotation_matrix(m, p, y, r);
     id = p == 0.0f && y == 0.0f && r == 0.0f;
     return true;
 }
@@ -5818,9 +5818,9 @@ static bool kh_rotation_m_from_gv(const game_value& v, float m[9], float& p, flo
 // is true (NaN is refused, nil is not a boolean). ONE reader, so no slot can take the number form in one command and
 // refuse it in its twin. Three slots keep a bare number as a YAW, because they read one that way before their boolean
 // form existed and a number cannot mean both: addRender3D's rotation slot while position follows a plain object
-// (KH_ATTACH_PLAIN_ROT), updateRender3D "rotation", and chainSimulation "endRotation"; those three take true / false
+// (ATTACH_PLAIN_ROT), updateRender3D "rotation", and chainSimulation "endRotation"; those three take true / false
 // only, and the comment at each says so. Two more do not come here: allowDynamicShadows takes a real BOOL only, and
-// the material key vertexStatic a number only. Nor does a generated mesh's shading (KH_MESH_GEN, kh_gen_parse): true
+// the material key vertexStatic a number only. Nor does a generated mesh's shading (KH_MESH_GEN, gen_parse): true
 // or false, or a number that is a crease angle in degrees.
 static bool kh_gv_bool(const game_value& v, bool& out) {
     if (v.is_nil()) return false;
@@ -5887,12 +5887,12 @@ static bool kh_rv_color(const game_value& v, RenderIntegration::RenderObject& ob
     for (size_t i = 0; i < col.size(); ++i) {
         if (col[i].type_enum() != game_data_type::SCALAR) { err = "color must be [r, g, b, a] numbers"; return false; }
         // KH_EA_COLOR_NAN: a NaN is refused as every other parser refuses one (it was read as 1); an infinity is
-        // clamped by kh_sanitize_color (the RANGE RULE).
+        // clamped by sanitize_color (the RANGE RULE).
         const float khrc_c = static_cast<float>(col[i]);
         if (khrc_c != khrc_c) { err = "color must be [r, g, b, a] numbers, not NaN"; return false; }
     }
     for (size_t i = 0; i < 4 && i < col.size(); ++i) obj.color[i] = static_cast<float>(col[i]);
-    RenderIntegration::kh_sanitize_color(obj.color);
+    RenderIntegration::sanitize_color(obj.color);
     return true;
 }
 
@@ -5934,7 +5934,7 @@ static bool kh_rv_params(const game_value& v, RenderIntegration::RenderObject& o
     if (v.is_nil()) return RenderIntegration::set_effect_params(obj, nullptr);
     if (v.type_enum() != game_data_type::ARRAY) { err = "params must be an array of numbers (nil entries keep the default)"; return false; }
     if (!RenderIntegration::set_effect_params(obj, &v.to_array())) {
-        err = "params must be at most 12 finite numbers (or nil to keep the default)";   // KH_FX_FINITE.
+        err = "params must be at most 12 finite numbers (or nil to keep the default)";   // FX_FINITE.
         return false;
     }
     return true;
@@ -5944,18 +5944,18 @@ static bool kh_rv_params(const game_value& v, RenderIntegration::RenderObject& o
 // (KH_MESH_GEN, rendering/mesh_generate.hpp: built, or shared with a live object's made from the same spec).
 static bool kh_rv_mesh(const game_value& v, int& mid, std::string& err) {
     if (v.type_enum() == game_data_type::ARRAY) {   // KH_MESH_GEN.
-        mid = RenderIntegration::kh_mesh_gen_from_gv(v, err);
+        mid = RenderIntegration::mesh_gen_from_gv(v, err);
         return mid >= 0;
     }
     if (v.type_enum() == game_data_type::STRING &&
-        RenderIntegration::kh_ends_with_ci(static_cast<std::string>(v), ".fbx")) {
-        // KH_GC_RECHECK: a fresh idle window for the mesh it now carries; released meanwhile, the path resolves again
-        // (kh_mesh_take_ref).
+        RenderIntegration::ends_with_ci(static_cast<std::string>(v), ".fbx")) {
+        // GC_RECHECK: a fresh idle window for the mesh it now carries; released meanwhile, the path resolves again
+        // (mesh_take_ref).
         for (int khfb_try = 0; ; ++khfb_try) {
             std::string khfb_err;
-            mid = RenderIntegration::kh_fbx_mesh_id(static_cast<std::string>(v), khfb_err);
+            mid = RenderIntegration::fbx_mesh_id(static_cast<std::string>(v), khfb_err);
             if (mid < 0) { err = "fbx: " + khfb_err; return false; }
-            if (RenderIntegration::kh_mesh_take_ref(mid) || khfb_try == 1) return true;
+            if (RenderIntegration::mesh_take_ref(mid) || khfb_try == 1) return true;
         }
     }
     for (int khmr_try = 0; ; ++khmr_try) {
@@ -5965,18 +5965,18 @@ static bool kh_rv_mesh(const game_value& v, int& mid, std::string& err) {
                   "path ending .fbx, or [shading, faces] (a generated mesh)";
             return false;
         }
-        if (RenderIntegration::kh_mesh_take_ref(mid) || khmr_try == 1) return true;   // KH_GC_RECHECK, as above.
+        if (RenderIntegration::mesh_take_ref(mid) || khmr_try == 1) return true;   // GC_RECHECK, as above.
     }
 }
 
 // Effect name / id /.hlsl /.cube. want_fullscreen rejects 'solid' (0), which a fullscreen pass cannot draw.
 static bool kh_rv_effect(const game_value& v, RenderIntegration::RenderObject& obj, bool want_fullscreen, std::string& err) {
     std::string khfx_path, khfx_err;
-    const int e = RenderIntegration::kh_effect_from_gv(v, khfx_path, khfx_err);
+    const int e = RenderIntegration::effect_from_gv(v, khfx_path, khfx_err);
     if (e < 0) { err = khfx_err.empty() ? std::string("unknown effect (a builtin effect name / id, a .hlsl path, or a .cube path)") : khfx_err; return false; }
     if (want_fullscreen && e == 0) { err = "a fullscreen pass needs an effect other than 'solid'"; return false; }
     obj.effect = e;
-    obj.fx_shader = RenderIntegration::kh_intern_str(khfx_path);
+    obj.fx_shader = RenderIntegration::intern_str(khfx_path);
     RenderIntegration::set_effect_params(obj, nullptr);   // New effect, its defaults.
     return true;
 }
@@ -6015,7 +6015,7 @@ static void kh_rv_report(const char* cmd, const std::string& msg) {
     report_error(std::string(cmd) + ": " + msg);
 }
 
-// KH_ATTACH_BONE - is this position slot the [object, "memoryPoint"] form, or (KH_SKEL) the [object, true/false] one?
+// ATTACH_BONE - is this position slot the [object, "memoryPoint"] form, or (SKEL) the [object, true/false] one?
 // Unambiguous against every other thing a position slot accepts: a plain position is three SCALARS, and an object to
 // follow is an OBJECT, not an ARRAY; only [OBJECT, STRING] and [OBJECT, BOOL] (or [OBJECT, 1 / 0], KH_BOOL_SCALAR)
 // land here, and a caller who wrote one meant this. out_skel is true for [object, true] (the skeletal binding);
@@ -6056,7 +6056,7 @@ static bool kh_rv_bone_pair(const game_value& v, game_value& out_obj,
     return true;
 }
 
-// KH_ATTACH: the position and the rotation slots of addRender3D, and the "position" / "rotation" properties of
+// ATTACH: the position and the rotation slots of addRender3D, and the "position" / "rotation" properties of
 // updateRender3D, take a game OBJECT in place of their value. The mesh then follows that object's transform every
 // frame, read straight off the engine's own object record - no script call, and no write at all on a frame where the
 // object has not moved. The two slots are independent: either, both, or neither, and they may name different
@@ -6082,13 +6082,13 @@ static game_value kh_add_render3d(game_value_parameter args, const char* khar_cm
             return game_value("");
         }
         RenderIntegration::RenderObject obj;
-        // KH_ATTACH: the objects to follow, registered once the handle exists.
+        // ATTACH: the objects to follow, registered once the handle exists.
         game_value khr_apos, khr_arot;
         float khr_ap[3], khr_ar[9];
-        // KH_ATTACH_BONE: the proxy and its parent, likewise registered after
-        // the handle. khr_bone (and khr_skel, KH_SKEL) is what makes the rotation slot a boolean.
-        RenderIntegration::KhProxyOwn khr_bown;   // KH_ATTACH_BONE: owns the proxy until it is installed.
-        RenderIntegration::KhSkelOwn khr_sown;    // KH_SKEL: owns the proxies until they are installed.
+        // ATTACH_BONE: the proxy and its parent, likewise registered after
+        // the handle. khr_bone (and khr_skel, SKEL) is what makes the rotation slot a boolean.
+        RenderIntegration::ProxyOwn khr_bown;   // ATTACH_BONE: owns the proxy until it is installed.
+        RenderIntegration::SkelOwn khr_sown;    // SKEL: owns the proxies until they are installed.
         std::vector<std::string> khr_smem;
         game_value khr_bparent;
         std::string khr_bmem;
@@ -6096,7 +6096,7 @@ static game_value kh_add_render3d(game_value_parameter args, const char* khar_cm
         bool khr_skel = false, khr_splain = false;
         const bool khr_pair = kh_rv_bone_pair(arr[0], khr_bparent, khr_bmem, khr_bbad, khr_skel, khr_splain, err);
         if (khr_pair && khr_skel) {
-            // KH_SKEL: the rotation slot is the root's follow-the-parent boolean here, true when nil. The proxies
+            // SKEL: the rotation slot is the root's follow-the-parent boolean here, true when nil. The proxies
             // wait for the mesh below: only the memory points its bones name get one.
             khr_brot = true;
             if (!arr[1].is_nil() && !kh_gv_bool(arr[1], khr_brot)) {   // KH_BOOL_SCALAR.
@@ -6104,9 +6104,9 @@ static game_value kh_add_render3d(game_value_parameter args, const char* khar_cm
                 return game_value("");
             }
         } else if (khr_pair && khr_splain) {
-            // KH_SKEL: [object, false] is the plain attach an OBJECT asks for.
-            if (!RenderIntegration::kh_attach_read(khr_bparent, khr_ap, khr_ar)) {
-                return game_value("");   // KH_NULL_SILENT.
+            // SKEL: [object, false] is the plain attach an OBJECT asks for.
+            if (!RenderIntegration::attach_read(khr_bparent, khr_ap, khr_ar)) {
+                return game_value("");   // NULL_SILENT.
             }
             obj.pos[0] = khr_ap[0]; obj.pos[1] = khr_ap[1]; obj.pos[2] = khr_ap[2];
             khr_apos = khr_bparent;
@@ -6118,29 +6118,29 @@ static game_value kh_add_render3d(game_value_parameter args, const char* khar_cm
                 kh_rv_report(khar_cmd, "rotation must be true or false (1 / 0) when position is [object, memoryPoint] (true = follow the bone's rotation)");
                 return game_value("");
             }
-            if (!RenderIntegration::kh_attach_bone_make(khr_bparent, khr_bmem, khr_bown.proxy, err)) {
-                if (!RenderIntegration::kh_err_silent(err)) kh_rv_report(khar_cmd, err);   // KH_NULL_SILENT.
+            if (!RenderIntegration::attach_bone_make(khr_bparent, khr_bmem, khr_bown.proxy, err)) {
+                if (!RenderIntegration::err_silent(err)) kh_rv_report(khar_cmd, err);   // NULL_SILENT.
                 return game_value("");
             }
             // Frame one is seeded from the PARENT, not the proxy: attachTo has not been simulated yet, so the proxy
             // still sits where createVehicleLocal put it and reading it would put the mesh at the map origin for one
-            // frame. kh_attach_step moves the mesh onto the memory point on the next frame it runs.
+            // frame. attach_step moves the mesh onto the memory point on the next frame it runs.
             // A live parent whose transform cannot be read yet is no fault here (unlike a plain object, [object,
-            // false] and [object, true], which fail unreported - KH_NULL_SILENT): the mesh is made and follows the
+            // false] and [object, true], which fail unreported - NULL_SILENT): the mesh is made and follows the
             // point once it can be read.
-            if (RenderIntegration::kh_attach_read(khr_bparent, khr_ap, khr_ar)) {
+            if (RenderIntegration::attach_read(khr_bparent, khr_ap, khr_ar)) {
                 obj.pos[0] = khr_ap[0]; obj.pos[1] = khr_ap[1]; obj.pos[2] = khr_ap[2];
                 if (khr_brot) {
                     memcpy(obj.rot_m, khr_ar, sizeof(obj.rot_m));
-                    obj.rotated = RenderIntegration::kh_attach_rotated(khr_ar);
+                    obj.rotated = RenderIntegration::attach_rotated(khr_ar);
                 }
             }
         } else if (khr_bbad) {
             kh_rv_report(khar_cmd, err);
             return game_value("");
-        } else if (RenderIntegration::kh_attach_is_obj(arr[0])) {
-            if (!RenderIntegration::kh_attach_read(arr[0], khr_ap, khr_ar)) {
-                return game_value("");   // KH_NULL_SILENT.
+        } else if (RenderIntegration::attach_is_obj(arr[0])) {
+            if (!RenderIntegration::attach_read(arr[0], khr_ap, khr_ar)) {
+                return game_value("");   // NULL_SILENT.
             }
             obj.pos[0] = khr_ap[0]; obj.pos[1] = khr_ap[1]; obj.pos[2] = khr_ap[2];
             khr_apos = arr[0];
@@ -6150,12 +6150,12 @@ static game_value kh_add_render3d(game_value_parameter args, const char* khar_cm
             return game_value("");
         }
 
-        // KH_ATTACH_BONE / KH_SKEL consumed the rotation slot above (the follow boolean), so the ordinary rotation
+        // ATTACH_BONE / SKEL consumed the rotation slot above (the follow boolean), so the ordinary rotation
         // parse is skipped: a bare true/false is not a yaw and must not be read as one.
         if (khr_bone || khr_skel) {
             // Nothing to do: the boolean was applied when the proxy was built.
         } else if (!khr_apos.is_nil() && !arr[1].is_nil() && arr[1].type_enum() == game_data_type::BOOL) {
-            // KH_ATTACH_PLAIN_ROT - the position slot took a plain object ([object, false], or a bare one), so the
+            // ATTACH_PLAIN_ROT - the position slot took a plain object ([object, false], or a bare one), so the
             // rotation slot's boolean names THAT object, as it names the bone under [object, memoryPoint]: true turns
             // the mesh with it, false leaves the rotation where an unset slot leaves it. khr_ar is already that
             // object's basis (the position seed above read it). A nil slot is NOT this branch's: it keeps meaning
@@ -6164,15 +6164,15 @@ static game_value kh_add_render3d(game_value_parameter args, const char* khar_cm
             // boolean form existed, so only a real BOOL reaches this branch.
             if (static_cast<bool>(arr[1])) {
                 memcpy(obj.rot_m, khr_ar, sizeof(obj.rot_m));
-                obj.rotated = RenderIntegration::kh_attach_rotated(khr_ar);
+                obj.rotated = RenderIntegration::attach_rotated(khr_ar);
                 khr_arot = khr_apos;
             }
-        } else if (RenderIntegration::kh_attach_is_obj(arr[1])) {
-            if (!RenderIntegration::kh_attach_read(arr[1], khr_ap, khr_ar)) {
-                return game_value("");   // KH_NULL_SILENT.
+        } else if (RenderIntegration::attach_is_obj(arr[1])) {
+            if (!RenderIntegration::attach_read(arr[1], khr_ap, khr_ar)) {
+                return game_value("");   // NULL_SILENT.
             }
             memcpy(obj.rot_m, khr_ar, sizeof(obj.rot_m));
-            obj.rotated = RenderIntegration::kh_attach_rotated(khr_ar);
+            obj.rotated = RenderIntegration::attach_rotated(khr_ar);
             khr_arot = arr[1];
         } else {
             float khr_p = 0.0f, khr_y = 0.0f, khr_r = 0.0f, khr_m[9];
@@ -6181,8 +6181,8 @@ static game_value kh_add_render3d(game_value_parameter args, const char* khar_cm
                 kh_rv_report(khar_cmd, "rotation must be nil, a number (yaw), [pitch, yaw, roll] degrees, [vectorDir, vectorUp] (non-zero, not parallel), an object to follow, or true/false when the position follows an object (true = turn with it)");
                 return game_value("");
             }
-            if (khr_vec) RenderIntegration::kh_set_rotation_rows(obj, khr_m);
-            else RenderIntegration::kh_set_rotation(obj, khr_p, khr_y, khr_r);
+            if (khr_vec) RenderIntegration::set_rotation_rows(obj, khr_m);
+            else RenderIntegration::set_rotation(obj, khr_p, khr_y, khr_r);
         }
 
         if (!arr[2].is_nil()) {   // Nil = mesh 0 (box).
@@ -6191,7 +6191,7 @@ static game_value kh_add_render3d(game_value_parameter args, const char* khar_cm
             obj.mesh = mid;
         }
 
-        // The spawn defaults (see the header note). size_mul is 1 by construction; kh_apply_native_size turns it
+        // The spawn defaults (see the header note). size_mul is 1 by construction; apply_native_size turns it
         // into metres for the chosen mesh. Everything not listed keeps the RenderObject default.
         obj.mode = RenderIntegration::DepthMode::TestWrite;
         obj.lit = true;
@@ -6199,42 +6199,42 @@ static game_value kh_add_render3d(game_value_parameter args, const char* khar_cm
         obj.effect = 0;
         obj.fx_shader = nullptr;
         RenderIntegration::set_effect_params(obj, nullptr);
-        RenderIntegration::kh_apply_native_size(obj);
+        RenderIntegration::apply_native_size(obj);
         if (khr_skel) {
-            // KH_SKEL: the proxies, now the mesh's bones are known, and frame one seeded from the parent (the
+            // SKEL: the proxies, now the mesh's bones are known, and frame one seeded from the parent (the
             // proxies have not been simulated yet; the skin holds the rest pose until they have). The mesh starts in
-            // its rest box; lodLock stays the script's (every LOD level carries bone weights: KH_LOD_SKIN). A parent
-            // that cannot be read is refused (without a report, KH_NULL_SILENT), as [object, false] refuses it,
+            // its rest box; lodLock stays the script's (every LOD level carries bone weights: LOD_SKIN). A parent
+            // that cannot be read is refused (without a report, NULL_SILENT), as [object, false] refuses it,
             // rather than leaving the mesh at the map origin.
-            if (!RenderIntegration::kh_attach_read(khr_bparent, khr_ap, khr_ar)) {
-                return game_value("");   // KH_NULL_SILENT.
+            if (!RenderIntegration::attach_read(khr_bparent, khr_ap, khr_ar)) {
+                return game_value("");   // NULL_SILENT.
             }
-            if (!RenderIntegration::kh_skel_make(khr_bparent, RenderIntegration::kh_skel_bone_names(obj.mesh),
-                                                 khr_sown.proxies, khr_smem, err)) {
-                if (!RenderIntegration::kh_err_silent(err)) kh_rv_report(khar_cmd, err);   // KH_NULL_SILENT.
+            if (!RenderIntegration::skel_make(khr_bparent, RenderIntegration::skel_bone_names(obj.mesh),
+                                              khr_sown.proxies, khr_smem, err)) {
+                if (!RenderIntegration::err_silent(err)) kh_rv_report(khar_cmd, err);   // NULL_SILENT.
                 return game_value("");
             }
             obj.skel = true;
-            RenderIntegration::kh_skel_rest_box(obj);
+            RenderIntegration::skel_rest_box(obj);
             if (khr_brot) {
                 memcpy(obj.rot_m, khr_ar, sizeof(obj.rot_m));
-                obj.rotated = RenderIntegration::kh_attach_rotated(khr_ar);
+                obj.rotated = RenderIntegration::attach_rotated(khr_ar);
             }
-            RenderIntegration::kh_skel_centre(obj, khr_ap);
+            RenderIntegration::skel_centre(obj, khr_ap);
             obj.pos[0] = khr_ap[0]; obj.pos[1] = khr_ap[1]; obj.pos[2] = khr_ap[2];
         }
 
         const std::string khr_h = RenderIntegration::add_render_object(obj);
-        // KH_ATTACH: after the handle, so the table is keyed by the entry that now exists; the transforms above are
-        // already in place for frame one. KH_ATTACH_BONE takes both lanes in one call (they name one proxy); the
+        // ATTACH: after the handle, so the table is keyed by the entry that now exists; the transforms above are
+        // already in place for frame one. ATTACH_BONE takes both lanes in one call (they name one proxy); the
         // plain lanes are independent and take one each.
         if (khr_skel) {
-            RenderIntegration::kh_attach_skel_set(khr_h, khr_sown.release(), khr_smem, khr_bparent, khr_brot);
+            RenderIntegration::attach_skel_set(khr_h, khr_sown.release(), khr_smem, khr_bparent, khr_brot);
         } else if (khr_bone) {
-            RenderIntegration::kh_attach_bone_set(khr_h, khr_bown.release(), khr_bparent, khr_brot);
+            RenderIntegration::attach_bone_set(khr_h, khr_bown.release(), khr_bparent, khr_brot);
         } else {
-            if (!khr_apos.is_nil()) RenderIntegration::kh_attach_set(khr_h, khr_apos, false);
-            if (!khr_arot.is_nil()) RenderIntegration::kh_attach_set(khr_h, khr_arot, true);
+            if (!khr_apos.is_nil()) RenderIntegration::attach_set(khr_h, khr_apos, false);
+            if (!khr_arot.is_nil()) RenderIntegration::attach_set(khr_h, khr_arot, true);
         }
         return game_value(khr_h);
     } catch (const std::exception& e) {
@@ -6247,7 +6247,7 @@ static game_value kh_add_render3d(game_value_parameter args, const char* khar_cm
 }
 
 static game_value add_render3d_sqf(game_value_parameter args) {
-    if (kh_gfx_off()) return game_value("");   // KH_PLAYER_ONLY.
+    if (kh_gfx_off()) return game_value("");   // PLAYER_ONLY.
     return kh_add_render3d(args, "addRender3D");
 }
 
@@ -6257,7 +6257,7 @@ static game_value add_render3d_sqf(game_value_parameter args) {
 // the handle is an ordinary addRender3D one: every updateRender3D property applies, "mesh" taking a new
 // [shading, faces] to rebuild the geometry. The object's position is the mesh's origin.
 static game_value generate_mesh_sqf(game_value_parameter args) {
-    if (kh_gfx_off()) return game_value("");   // KH_PLAYER_ONLY.
+    if (kh_gfx_off()) return game_value("");   // PLAYER_ONLY.
     try {
         auto& khgm_a = args.to_array();
         if (khgm_a.size() != 4) {
@@ -6287,14 +6287,14 @@ static game_value generate_mesh_sqf(game_value_parameter args) {
 // properties, but their non-shared properties must not overlap: each command owns exactly its kind, rejects the
 // other's handles, and the common set lives in one helper so the two cannot drift. Prop arrives lower-cased.
 
-// KH_FX_TEX: an effect's own textures - [[path, "user0" .. "user5", "srgb" | "linear"?], ...], the whole set
+// FX_TEX: an effect's own textures - [[path, "user0" .. "user5", "srgb" | "linear"?], ...], the whole set
 // (a slot the array does not name is cleared; [] clears them all). Checked in full before anything is set.
 static bool kh_rv_fx_textures(const game_value& v, RenderIntegration::RenderObject& obj, std::string& err) {
     static const char* const khft_form = "textures must be an array of [path, \"user0\" .. \"user5\", "
                                          "\"srgb\" | \"linear\"?] entries ([] = none)";
     if (v.type_enum() != game_data_type::ARRAY) { err = khft_form; return false; }
     auto& khft_a = v.to_array();
-    RenderIntegration::KhFxTexSet khft_set;
+    RenderIntegration::FxTexSet khft_set;
     bool khft_any = false;
     for (size_t khft_i = 0; khft_i < khft_a.size(); ++khft_i) {
         if (khft_a[khft_i].type_enum() != game_data_type::ARRAY) { err = khft_form; return false; }
@@ -6304,16 +6304,16 @@ static bool kh_rv_fx_textures(const game_value& v, RenderIntegration::RenderObje
         std::string khft_n = static_cast<std::string>(khft_e[1]);
         khft_n = kh_lower_copy(std::move(khft_n));
         if (!(khft_n.size() == 5 && khft_n.compare(0, 4, "user") == 0 && khft_n[4] >= '0' &&
-              khft_n[4] < '0' + RenderIntegration::KH_MAT_USER_MAPS)) {
+              khft_n[4] < '0' + RenderIntegration::MAT_USER_MAPS)) {
             err = "texture slot '" + static_cast<std::string>(khft_e[1]) + "' must be user0 .. user5";
             return false;
         }
         const int khft_k = khft_n[4] - '0';
         if (khft_set.path[khft_k]) { err = "texture slot '" + khft_n + "' is given twice"; return false; }
         const std::string khft_path = static_cast<std::string>(khft_e[0]);
-        auto khft_ext = [&](const char* khft_x) { return RenderIntegration::kh_ends_with_ci(khft_path, khft_x); };
+        auto khft_ext = [&](const char* khft_x) { return RenderIntegration::ends_with_ci(khft_path, khft_x); };
         if (!(khft_ext(".png") || khft_ext(".jpg") || khft_ext(".jpeg") || khft_ext(".tga") ||
-              khft_ext(".bmp") || khft_ext(".dds") || RenderIntegration::kh_paa_ext(khft_path))) {   // KH_PAA.
+              khft_ext(".bmp") || khft_ext(".dds") || RenderIntegration::paa_ext(khft_path))) {   // PAA.
             err = "texture '" + khft_path + "': unsupported extension (png|jpg|jpeg|tga|bmp|dds|paa|pac)";
             return false;
         }
@@ -6334,11 +6334,11 @@ static bool kh_rv_fx_textures(const game_value& v, RenderIntegration::RenderObje
                   RenderIntegration::RenderAssetDiscovery::searched(khft_path);
             return false;
         }
-        khft_set.path[khft_k] = RenderIntegration::kh_intern_str(khft_res);
+        khft_set.path[khft_k] = RenderIntegration::intern_str(khft_res);
         if (khft_srgb) khft_set.srgb = static_cast<uint8_t>(khft_set.srgb | (1u << khft_k));
         khft_any = true;
     }
-    obj.fx_tex = khft_any ? RenderIntegration::kh_fx_tex_intern(khft_set) : nullptr;
+    obj.fx_tex = khft_any ? RenderIntegration::fx_tex_intern(khft_set) : nullptr;
     return true;
 }
 
@@ -6351,7 +6351,7 @@ static int kh_apply_shared_prop(RenderIntegration::RenderObject& obj,
     if (prop == "params" || prop == "fxparams") return kh_rv_params(val, obj, err) ? 1 : 0;
     if (prop == "blend")   return kh_rv_blend(val, obj, err) ? 1 : 0;
     if (prop == "band")    return kh_rv_band(val, obj, err) ? 1 : 0;
-    if (prop == "textures") return kh_rv_fx_textures(val, obj, err) ? 1 : 0;   // KH_FX_TEX.
+    if (prop == "textures") return kh_rv_fx_textures(val, obj, err) ? 1 : 0;   // FX_TEX.
     if (prop == "duration") {
         if (!kh_rv_duration(val, obj, err)) return 0;
         obj.birth_time = RenderIntegration::effect_time_seconds();   // Re-arm from now.
@@ -6360,27 +6360,27 @@ static int kh_apply_shared_prop(RenderIntegration::RenderObject& obj,
     return -1;
 }
 
-// KH_PLAIN_ROT_CARRY - updateRender3D "position" to a plain object (an object, or [object, false]). A plain
-// "rotation true" lane follows the position's object (KH_ATTACH_PLAIN_ROT), so it moves to the new one - as a new
-// memory-point or skeletal binding takes it over (KH_SKEL_ROT_OWN) - rather than staying on the old object, where
+// PLAIN_ROT_CARRY - updateRender3D "position" to a plain object (an object, or [object, false]). A plain
+// "rotation true" lane follows the position's object (ATTACH_PLAIN_ROT), so it moves to the new one - as a new
+// memory-point or skeletal binding takes it over (SKEL_ROT_OWN) - rather than staying on the old object, where
 // "rotation false" could no longer clear it. Carried as "rotation <object>" sets it (this frame's rotation
 // too); a read that fails at that point leaves the lane to the next step. A rotation that follows an object of
-// the script's own, or a binding's, is not the plain lane (the latter ends with the binding, kh_attach_set). A
-// detach ends the plain lane (the "position" handler's triple, kh_attach_set's khas_end_plain).
+// the script's own, or a binding's, is not the plain lane (the latter ends with the binding, attach_set). A
+// detach ends the plain lane (the "position" handler's triple, attach_set's end_plain).
 static bool kh_rv_attach_plain(const std::string& khrp_h, const game_value& khrp_gv,
                                RenderIntegration::RenderObject& obj, std::string& err) {
-    const bool khrp_carry = RenderIntegration::kh_attach_rot_plain(khrp_h);   // Before the position moves.
-    if (!RenderIntegration::kh_attach_apply(khrp_h, khrp_gv, false, obj, err)) return false;
+    const bool khrp_carry = RenderIntegration::attach_rot_plain(khrp_h);   // Before the position moves.
+    if (!RenderIntegration::attach_apply(khrp_h, khrp_gv, false, obj, err)) return false;
     if (khrp_carry) {
         std::string khrp_err;
-        if (!RenderIntegration::kh_attach_apply(khrp_h, khrp_gv, true, obj, khrp_err)) {
-            RenderIntegration::kh_attach_bone_rot(khrp_h, true);
+        if (!RenderIntegration::attach_apply(khrp_h, khrp_gv, true, obj, khrp_err)) {
+            RenderIntegration::attach_bone_rot(khrp_h, true);
         }
     }
     return true;
 }
 
-// KH_CLOTH. The four properties that read it (clothSimulation, chainSimulation, physicsCollider, simulationLod) take
+// CLOTH. The four properties that read it (clothSimulation, chainSimulation, physicsCollider, simulationLod) take
 // one shape: false or [] turns the role off, true turns it on with the object's current settings (the defaults until
 // a key was set), and an array of [key, value] pairs turns it on and sets those keys. Named rather than positional:
 // cloth has twenty-two keys, and a positional array at that width is unreadable and unextendable.
@@ -6437,8 +6437,8 @@ static bool kh_rv_cloth_num(const game_value& val, const char* khcn_key, float k
     return kh_rv_key_num(val, "cloth", khcn_key, khcn_lo, khcn_hi, khcn_dst, err);
 }
 
-// KH_SIM_LOD - "simulationLod": the cloth / chain solver's level of detail (RenderObject::sim_lod; the kernel is
-// kh_simlod_share). On by default at the defaults; false or [] turns it off (the solver runs the object's own
+// SIM_LOD - "simulationLod": the cloth / chain solver's level of detail (RenderObject::sim_lod; the kernel is
+// simlod_share). On by default at the defaults; false or [] turns it off (the solver runs the object's own
 // iterations / substeps whole wherever it is); true turns it on keeping the dials as they stand; [key, value] pairs
 // turn it on and set those keys: floor (0.05..1, the least share; 1 reads as off), fullDistance and minDistance (m),
 // fullScreenShare and minScreenShare (of the screen height). The pairs must order: fullDistance < minDistance,
@@ -6479,11 +6479,11 @@ static bool kh_rv_cloth_sim(const game_value& val, RenderIntegration::RenderObje
     std::vector<std::pair<std::string, game_value>> khcs_p;
     bool khcs_on = false;
     if (!kh_rv_cloth_pairs(val, "clothSimulation", khcs_p, khcs_on, err)) return false;
-    if (khcs_on && obj.chain_sim) {   // KH_CHAIN: exclusive.
+    if (khcs_on && obj.chain_sim) {   // CHAIN: exclusive.
         err = "clothSimulation cannot be on while chainSimulation is - switch chainSimulation off first";
         return false;
     }
-    RenderIntegration::KhClothParams khcs_c = obj.cloth;
+    RenderIntegration::ClothParams khcs_c = obj.cloth;
     float khcs_f = 0.0f;
     for (size_t khcs_i = 0; khcs_i < khcs_p.size(); ++khcs_i) {
         const std::string& k = khcs_p[khcs_i].first;
@@ -6491,7 +6491,7 @@ static bool kh_rv_cloth_sim(const game_value& val, RenderIntegration::RenderObje
         if      (k == "stiffness" || k == "stretch") { if (!kh_rv_cloth_num(v, "stiffness", 0.0f, 1.0f, khcs_c.stretch, err)) return false; }
         else if (k == "bend")        { if (!kh_rv_cloth_num(v, "bend", 0.0f, 1.0f, khcs_c.bend, err)) return false; }
         else if (k == "damping")     { if (!kh_rv_cloth_num(v, "damping", 0.0f, 1.0f, khcs_c.damping, err)) return false; }
-        // KH_CLOTH_DRAG: drag and waterDrag are forces per point (kg/s), not fractions.
+        // CLOTH_DRAG: drag and waterDrag are forces per point (kg/s), not fractions.
         else if (k == "drag")        { if (!kh_rv_cloth_num(v, "drag", 0.0f, 1000.0f, khcs_c.drag, err)) return false; }
         else if (k == "mass")        { if (!kh_rv_cloth_num(v, "mass", 0.001f, 100.0f, khcs_c.mass, err)) return false; }
         else if (k == "gravity")     { if (!kh_rv_cloth_num(v, "gravity", -10.0f, 10.0f, khcs_c.gravity, err)) return false; }
@@ -6504,7 +6504,7 @@ static bool kh_rv_cloth_sim(const game_value& val, RenderIntegration::RenderObje
         else if (k == "sleep")       { if (!kh_rv_cloth_num(v, "sleep", 0.0f, 10.0f, khcs_c.sleep, err)) return false; }
         else if (k == "shell")       { if (!kh_rv_cloth_num(v, "shell", 0.0f, 1.0f, khcs_c.shell, err)) return false; }
         else if (k == "wind")        { if (!kh_rv_cloth_num(v, "wind", 0.0f, 10.0f, khcs_c.wind, err)) return false; }
-        // KH_BUOY_RANGE: up to gravity's own magnitude - buoyancy g is neutral at gravity g (KhClothParams::buoyancy).
+        // KH_BUOY_RANGE: up to gravity's own magnitude - buoyancy g is neutral at gravity g (ClothParams::buoyancy).
         else if (k == "buoyancy")    { if (!kh_rv_cloth_num(v, "buoyancy", 0.0f, 10.0f, khcs_c.buoyancy, err))
                                            return false; }
         else if (k == "waterdrag")   { if (!kh_rv_cloth_num(v, "waterDrag", 0.0f, 1000.0f, khcs_c.water_drag, err))
@@ -6529,8 +6529,8 @@ static bool kh_rv_cloth_sim(const game_value& val, RenderIntegration::RenderObje
     // its own (quadric-placed, or carrying other attributes), which the simulation does not move - a cloth that
     // dropped a level would tear mid-swing, its own vertices at rest. The lodLock setter refuses to clear it.
     if (khcs_on) obj.lod_lock = true;
-    // KH_SKEL: a skeletal mesh that simulates is drawn by the cloth, its bones guiding what kh_cloth_pin holds
-    // (kh_cloth_guide_prep), until cloth is off. The box is left to the next park: kh_skin_upload hands the object the
+    // SKEL: a skeletal mesh that simulates is drawn by the cloth, its bones guiding what kh_cloth_pin holds
+    // (cloth_guide_prep), until cloth is off. The box is left to the next park: skin_upload hands the object the
     // box of whichever buffer its slot then draws, so a box set here would mismatch the buffer still installed.
     return true;
 }
@@ -6541,7 +6541,7 @@ static bool kh_rv_physics_collider(const game_value& val, RenderIntegration::Ren
     if (!kh_rv_cloth_pairs(val, "physicsCollider", khcc_p, khcc_on, err)) return false;
     float khcc_margin = obj.physics_col_margin, khcc_friction = obj.physics_col_friction;
     bool khcc_inside = obj.physics_col_inside;
-    bool khcc_convex = obj.physics_col_convex;   // KH_COL_CONVEX.
+    bool khcc_convex = obj.physics_col_convex;   // COL_CONVEX.
     for (size_t khcc_i = 0; khcc_i < khcc_p.size(); ++khcc_i) {
         const std::string& k = khcc_p[khcc_i].first;
         const game_value& v = khcc_p[khcc_i].second;
@@ -6550,7 +6550,7 @@ static bool kh_rv_physics_collider(const game_value& val, RenderIntegration::Ren
         if      (k == "margin")   khcc_ok = kh_rv_key_num(v, khcc_w, "margin", 0.0f, 10.0f, khcc_margin, err);
         else if (k == "friction") khcc_ok = kh_rv_key_num(v, khcc_w, "friction", 0.0f, 1.0f, khcc_friction, err);
         else if (k == "inside")   khcc_ok = kh_rv_bool(v, khcc_inside, "physicsCollider parameter 'inside'", err);
-        // KH_COL_CONVEX.
+        // COL_CONVEX.
         else if (k == "convex")   khcc_ok = kh_rv_bool(v, khcc_convex, "physicsCollider parameter 'convex'", err);
         else {
             err = "unknown physics collider parameter '" + k + "' (margin | friction | inside | convex)";
@@ -6561,13 +6561,13 @@ static bool kh_rv_physics_collider(const game_value& val, RenderIntegration::Ren
     obj.physics_col_margin = khcc_margin;
     obj.physics_col_friction = khcc_friction;
     obj.physics_col_inside = khcc_inside;
-    obj.physics_col_convex = khcc_convex;   // KH_COL_CONVEX.
+    obj.physics_col_convex = khcc_convex;   // COL_CONVEX.
     obj.physics_collider = khcc_on;
     return true;
 }
 
-// KH_CHAIN - "chainSimulation": false or [] off, true on with what was set before (or the defaults), an array of
-// [key, value] pairs on and those keys set. The settings live game-side by handle (RenderIntegration::KhChainCfg: the
+// CHAIN - "chainSimulation": false or [] off, true on with what was set before (or the defaults), an array of
+// [key, value] pairs on and those keys set. The settings live game-side by handle (RenderIntegration::ChainCfg: the
 // end may follow game objects, which a RenderObject cannot hold) and outlive the switch, as the cloth's do;
 // RenderObject::chain_sim is the switch. Nothing is written until every key has parsed: a fault leaves the settings,
 // the end and its proxy exactly as they were, and a memory-point proxy made for the failed update is deleted by its
@@ -6588,7 +6588,7 @@ static bool kh_rv_chain_bone(const game_value& val, const char* khcb_key, std::s
     return true;
 }
 
-// KH_CHAIN_POINT - "head" or "tail", case-insensitive. khcp_set names the one that raises the flag, because the two
+// CHAIN_POINT - "head" or "tail", case-insensitive. khcp_set names the one that raises the flag, because the two
 // keys default opposite ways: startPoint defaults to "tail" and endPoint to "head". Nil restores that default.
 static bool kh_rv_chain_point(const game_value& val, const char* khcp_key, const char* khcp_set,
                               bool& khcp_dst, std::string& err) {
@@ -6619,7 +6619,7 @@ static bool kh_rv_chain_sim(const game_value& val, RenderIntegration::RenderObje
     }
     // The settings this object had, or the defaults for a new one (an entry
     // left by another object on a reused handle is not this object's).
-    R::KhChainCfg khch_c;
+    R::ChainCfg khch_c;
     game_value khch_old_proxy;
     {
         const auto khch_it = R::g_chain_cfg.find(handle);
@@ -6629,10 +6629,10 @@ static bool kh_rv_chain_sim(const game_value& val, RenderIntegration::RenderObje
         }
     }
     khch_c.seq = obj.seq;
-    R::KhProxyOwn khch_own;   // A new memory-point proxy, until it is installed.
+    R::ProxyOwn khch_own;   // A new memory-point proxy, until it is installed.
     bool khch_pos_set = false;
     float khch_f = 0.0f;
-    R::KhChainParams& P = khch_c.par;
+    R::ChainParams& P = khch_c.par;
     for (size_t khch_i = 0; khch_i < khch_p.size(); ++khch_i) {
         const std::string& k = khch_p[khch_i].first;
         const game_value& v = khch_p[khch_i].second;
@@ -6643,32 +6643,32 @@ static bool kh_rv_chain_sim(const game_value& val, RenderIntegration::RenderObje
         else if (k == "endposition") {
             khch_pos_set = true;
             khch_c.pos_obj = game_value();
-            khch_c.rd_pos = R::KhChainRead();
-            khch_c.rd_par = R::KhChainRead();
+            khch_c.rd_pos = R::ChainRead();
+            khch_c.rd_par = R::ChainRead();
             khch_c.read_p = false;   // Re-pointed: the held transform is another thing's.
-            R::kh_attach_proxy_orphan(khch_own.proxy);   // A key given twice: the first one's proxy goes.
+            R::attach_proxy_orphan(khch_own.proxy);   // A key given twice: the first one's proxy goes.
             game_value khch_par;
             std::string khch_mem;
             bool khch_bad = false, khch_skel = false, khch_plain = false;
             bool khch_b = false;
             if (v.is_nil()) {
-                khch_c.pos = R::KH_CHE_FREE;
+                khch_c.pos = R::CHE_FREE;
             } else if (kh_gv_bool(v, khch_b)) {   // KH_BOOL_SCALAR.
-                khch_c.pos = khch_b ? R::KH_CHE_BONE : R::KH_CHE_HOLD;
-            } else if (R::kh_attach_is_obj(v)) {
-                if (R::kh_attach_obj_dead(v)) { err = R::KH_ERR_SILENT; return false; }   // KH_NULL_SILENT.
-                khch_c.pos = R::KH_CHE_OBJ;
+                khch_c.pos = khch_b ? R::CHE_BONE : R::CHE_HOLD;
+            } else if (R::attach_is_obj(v)) {
+                if (R::attach_obj_dead(v)) { err = R::ERR_SILENT; return false; }   // NULL_SILENT.
+                khch_c.pos = R::CHE_OBJ;
                 khch_c.pos_obj = v;
             } else if (kh_rv_bone_pair(v, khch_par, khch_mem, khch_bad, khch_skel, khch_plain, err)) {
                 if (khch_skel || khch_plain) {
                     err = "chain parameter 'endPosition' takes [object, memoryPoint], not [object, true/false]";
                     return false;
                 }
-                if (!R::kh_attach_bone_make(khch_par, khch_mem, khch_own.proxy, err)) {
-                    if (!R::kh_err_silent(err)) err = "chain parameter 'endPosition': " + err;   // KH_NULL_SILENT: kept whole.
+                if (!R::attach_bone_make(khch_par, khch_mem, khch_own.proxy, err)) {
+                    if (!R::err_silent(err)) err = "chain parameter 'endPosition': " + err;   // NULL_SILENT: kept whole.
                     return false;
                 }
-                khch_c.pos = R::KH_CHE_MEM;
+                khch_c.pos = R::CHE_MEM;
                 khch_c.pos_obj = khch_par;
             } else if (khch_bad) {
                 err = "chain parameter 'endPosition': " + err;
@@ -6679,23 +6679,23 @@ static bool kh_rv_chain_sim(const game_value& val, RenderIntegration::RenderObje
                     err = "chain parameter 'endPosition' must be nil, true, false (1 / 0), [x, y, zASL], an object, or [object, memoryPoint]";
                     return false;
                 }
-                khch_c.pos = R::KH_CHE_WORLD;
+                khch_c.pos = R::CHE_WORLD;
                 memcpy(khch_c.pos_w, khch_w, sizeof(khch_w));
             }
         }
         else if (k == "endrotation") {
             khch_c.rot_true = false;
             khch_c.rot_obj = game_value();
-            khch_c.rd_rot = R::KhChainRead();
+            khch_c.rd_rot = R::ChainRead();
             khch_c.read_r = false;
             if (v.is_nil()) {
-                khch_c.rot = R::KH_CHE_FREE;
+                khch_c.rot = R::CHE_FREE;
             } else if (v.type_enum() == game_data_type::BOOL) {   // Not KH_BOOL_SCALAR: a bare number is a yaw below.
                 if (static_cast<bool>(v)) khch_c.rot_true = true;   // Resolved against the position below.
-                else khch_c.rot = R::KH_CHE_HOLD;
-            } else if (R::kh_attach_is_obj(v)) {
-                if (R::kh_attach_obj_dead(v)) { err = R::KH_ERR_SILENT; return false; }   // KH_NULL_SILENT.
-                khch_c.rot = R::KH_CHE_OBJ;
+                else khch_c.rot = R::CHE_HOLD;
+            } else if (R::attach_is_obj(v)) {
+                if (R::attach_obj_dead(v)) { err = R::ERR_SILENT; return false; }   // NULL_SILENT.
+                khch_c.rot = R::CHE_OBJ;
                 khch_c.rot_obj = v;
             } else {
                 float khch_pi = 0.0f, khch_ya = 0.0f, khch_ro = 0.0f;
@@ -6704,7 +6704,7 @@ static bool kh_rv_chain_sim(const game_value& val, RenderIntegration::RenderObje
                     err = "chain parameter 'endRotation' must be nil, true, false, a number (yaw), [pitch, yaw, roll] degrees, [vectorDir, vectorUp] (non-zero, not parallel), or an object";
                     return false;
                 }
-                khch_c.rot = R::KH_CHE_WORLD;
+                khch_c.rot = R::CHE_WORLD;
             }
         }
         else if (k == "stiffness" || k == "stretch") { if (!kh_rv_chain_num(v, "stiffness", 0.0f, 1.0f, P.stretch, err)) return false; }
@@ -6713,7 +6713,7 @@ static bool kh_rv_chain_sim(const game_value& val, RenderIntegration::RenderObje
         else if (k == "damping")     { if (!kh_rv_chain_num(v, "damping", 0.0f, 1.0f, P.damping, err)) return false; }
         else if (k == "lineardamping")  { if (!kh_rv_chain_num(v, "linearDamping", 0.0f, 1.0f, P.lin_damping, err)) return false; }
         else if (k == "angulardamping") { if (!kh_rv_chain_num(v, "angularDamping", 0.0f, 1.0f, P.ang_damping, err)) return false; }
-        // KH_CLOTH_DRAG: drag and waterDrag are the whole chain's forces (kg/s), not fractions.
+        // CLOTH_DRAG: drag and waterDrag are the whole chain's forces (kg/s), not fractions.
         else if (k == "drag")        { if (!kh_rv_chain_num(v, "drag", 0.0f, 1000.0f, P.drag, err)) return false; }
         else if (k == "mass")        { if (!kh_rv_chain_num(v, "mass", 0.001f, 1000.0f, P.mass, err)) return false; }
         else if (k == "gravity")     { if (!kh_rv_chain_num(v, "gravity", -10.0f, 10.0f, P.gravity, err)) return false; }
@@ -6746,10 +6746,10 @@ static bool kh_rv_chain_sim(const game_value& val, RenderIntegration::RenderObje
     }
     // Everything parsed: install. A new end position takes its proxy (or none) and the one it replaces goes to the
     // delete queue; a rotation of true follows whatever the position now follows.
-    if (khch_pos_set) khch_c.proxy = khch_c.pos == R::KH_CHE_MEM ? khch_own.release() : game_value();
-    R::kh_chain_cfg_resolve(khch_c);
+    if (khch_pos_set) khch_c.proxy = khch_c.pos == R::CHE_MEM ? khch_own.release() : game_value();
+    R::chain_cfg_resolve(khch_c);
     game_value khch_drop;
-    // KH_PXY_POOL: a position set this call holds its own reference (a pooled make can return the same proxy), so the
+    // PXY_POOL: a position set this call holds its own reference (a pooled make can return the same proxy), so the
     // old reference goes whenever the position was set; otherwise only when the config no longer names it.
     if (!khch_old_proxy.is_nil() && (khch_pos_set || khch_old_proxy.data.get() != khch_c.proxy.data.get())) khch_drop = khch_old_proxy;
     // KH_CHAIN_COMMIT_LAST: the rebind below reads the new settings (the start and end bones name the kept proxies),
@@ -6757,35 +6757,35 @@ static bool kh_rv_chain_sim(const game_value& val, RenderIntegration::RenderObje
     // this call's own proxy reference goes and the old proxy is kept, as the note above promises for any fault.
     const auto khch_prev_it = R::g_chain_cfg.find(handle);
     const bool khch_had = khch_prev_it != R::g_chain_cfg.end();
-    R::KhChainCfg khch_prev;
+    R::ChainCfg khch_prev;
     if (khch_had) khch_prev = khch_prev_it->second;
     R::g_chain_cfg[handle] = khch_c;
-    // KH_SKEL_PROXY_CULL: a bound skeleton's proxies follow the chain's start
+    // SKEL_PROXY_CULL: a bound skeleton's proxies follow the chain's start
     // and end bones; re-made only when the kept set changed.
-    if (!R::kh_skel_chain_rebind(handle, obj, err)) {
+    if (!R::skel_chain_rebind(handle, obj, err)) {
         if (khch_had) R::g_chain_cfg[handle] = khch_prev;
         else R::g_chain_cfg.erase(handle);
-        if (khch_pos_set) R::kh_attach_proxy_orphan(khch_c.proxy);
+        if (khch_pos_set) R::attach_proxy_orphan(khch_c.proxy);
         return false;
     }
-    R::kh_attach_proxy_orphan(khch_drop);
+    R::attach_proxy_orphan(khch_drop);
     const bool khch_was = obj.chain_sim;
     obj.chain_sim = khch_on;
     // LOD-locked: the chain's box is level 0's (the writeback's box rule), so a
     // coarser level's own vertices could stand outside the box it is culled by.
     if (khch_on) obj.lod_lock = true;
     // A plain object is drawn at its authored size while it simulates (the chain's box follows its shape -
-    // kh_cloth_upload); the script's size is kept in size_mul and comes back when it stops. Under a skeletal binding
+    // cloth_upload); the script's size is kept in size_mul and comes back when it stops. Under a skeletal binding
     // the skin owns the size either way.
     if (!obj.skel) {
-        if (khch_on) R::kh_chain_rest_size(obj);
-        else if (khch_was) R::kh_apply_native_size(obj);
+        if (khch_on) R::chain_rest_size(obj);
+        else if (khch_was) R::apply_native_size(obj);
     }
     return true;
 }
 
 // UpdateRender3D's own set (the object is a mesh). Returns false with err. Takes the handle because "position" and
-// "rotation" may attach to a game object (KH_ATTACH), and an attachment is keyed by handle, not by the staged copy
+// "rotation" may attach to a game object (ATTACH), and an attachment is keyed by handle, not by the staged copy
 // this writes into.
 static bool kh_apply_render3d_prop(RenderIntegration::RenderObject& obj, const std::string& handle,
                                    const std::string& prop, const game_value& val, std::string& err) {
@@ -6793,105 +6793,105 @@ static bool kh_apply_render3d_prop(RenderIntegration::RenderObject& obj, const s
     if (shared >= 0) return shared == 1;
 
     if (prop == "position") {
-        // KH_ATTACH_BONE. The rotation-follow state is NOT set here: re-pointing an existing bone attachment at a new
+        // ATTACH_BONE. The rotation-follow state is NOT set here: re-pointing an existing bone attachment at a new
         // object or memory point keeps whatever the "rotation" property last said, and a fresh one starts not following
         // (the script sets "rotation" to true if it wants that) - unless the rotation followed the position's own
         // object (rotation true on a plain attach), which any new position that follows an object takes over
-        // (KH_SKEL_ROT_OWN, KH_PLAIN_ROT_CARRY; a skeletal binding's root follows its parent by default, below). A
+        // (SKEL_ROT_OWN, PLAIN_ROT_CARRY; a skeletal binding's root follows its parent by default, below). A
         // rotation that follows an object of the script's own is never changed here; a detach (below) ends the plain
         // one.
         game_value khb_parent;
-        RenderIntegration::KhProxyOwn khb_own;   // KH_ATTACH_BONE: owns the proxy until it is installed.
-        RenderIntegration::KhSkelOwn khs_own;    // KH_SKEL: owns the proxies until they are installed.
+        RenderIntegration::ProxyOwn khb_own;   // ATTACH_BONE: owns the proxy until it is installed.
+        RenderIntegration::SkelOwn khs_own;    // SKEL: owns the proxies until they are installed.
         std::string khb_mem;
         bool khb_bad = false, khb_skel = false, khb_plain = false;
-        // KH_SKEL: while the binding held, the skin owned size; any position
+        // SKEL: while the binding held, the skin owned size; any position
         // that ends it hands size back to the script's multiplier.
         const bool khs_was = obj.skel;
         auto khs_leave = [&]() {
             if (!khs_was) return;
             obj.skel = false;
-            // KH_CHAIN: a simulating chain stays at its authored size.
-            if (obj.chain_sim) RenderIntegration::kh_chain_rest_size(obj);
-            else RenderIntegration::kh_apply_native_size(obj);
+            // CHAIN: a simulating chain stays at its authored size.
+            if (obj.chain_sim) RenderIntegration::chain_rest_size(obj);
+            else RenderIntegration::apply_native_size(obj);
         };
         if (kh_rv_bone_pair(val, khb_parent, khb_mem, khb_bad, khb_skel, khb_plain, err)) {
             if (khb_plain) {   // [object, false]: the plain attach.
                 khs_leave();
-                return kh_rv_attach_plain(handle, khb_parent, obj, err);   // KH_PLAIN_ROT_CARRY.
+                return kh_rv_attach_plain(handle, khb_parent, obj, err);   // PLAIN_ROT_CARRY.
             }
             if (khb_skel) {
                 // A new binding's root follows the parent's rotation; one that replaces a binding keeps that binding's
-                // rotation state, as re-pointing a bone does. KH_SKEL_ROT_OWN: a rotation that follows an object of the
+                // rotation state, as re-pointing a bone does. SKEL_ROT_OWN: a rotation that follows an object of the
                 // script's own is kept (the lanes are independent): the root does not take the parent's then. A parent
-                // that cannot be read is refused without a report, as [object, false] (kh_attach_apply) refuses it
-                // (KH_NULL_SILENT).
+                // that cannot be read is refused without a report, as [object, false] (attach_apply) refuses it
+                // (NULL_SILENT).
                 float khs_p[3], khs_r[9];
-                if (!RenderIntegration::kh_attach_read(khb_parent, khs_p, khs_r)) {
-                    err = RenderIntegration::KH_ERR_SILENT;
+                if (!RenderIntegration::attach_read(khb_parent, khs_p, khs_r)) {
+                    err = RenderIntegration::ERR_SILENT;
                     return false;
                 }
                 std::vector<std::string> khs_mem;
-                if (!RenderIntegration::kh_skel_make(khb_parent, RenderIntegration::kh_skel_bone_names(obj.mesh, handle, obj.seq),
-                                                     khs_own.proxies, khs_mem, err)) return false;
-                const bool khs_rot = RenderIntegration::kh_attach_has_binding(handle)
-                                   ? RenderIntegration::kh_attach_bone_rot_state(handle)
-                                   : !RenderIntegration::kh_attach_rot_own(handle);   // KH_SKEL_ROT_OWN.
-                RenderIntegration::kh_attach_skel_set(handle, khs_own.release(), khs_mem, khb_parent, khs_rot);
+                if (!RenderIntegration::skel_make(khb_parent, RenderIntegration::skel_bone_names(obj.mesh, handle, obj.seq),
+                                                  khs_own.proxies, khs_mem, err)) return false;
+                const bool khs_rot = RenderIntegration::attach_has_binding(handle)
+                                   ? RenderIntegration::attach_bone_rot_state(handle)
+                                   : !RenderIntegration::attach_rot_own(handle);   // SKEL_ROT_OWN.
+                RenderIntegration::attach_skel_set(handle, khs_own.release(), khs_mem, khb_parent, khs_rot);
                 obj.skel = true;
-                RenderIntegration::kh_skel_rest_box(obj);
-                RenderIntegration::kh_attach_offset_pos(obj, khs_r, khs_p);   // The root, then its centre.
+                RenderIntegration::skel_rest_box(obj);
+                RenderIntegration::attach_offset_pos(obj, khs_r, khs_p);   // The root, then its centre.
                 if (khs_rot) {
-                    RenderIntegration::kh_attach_offset_rot(obj, khs_r);
+                    RenderIntegration::attach_offset_rot(obj, khs_r);
                     memcpy(obj.rot_m, khs_r, sizeof(obj.rot_m));
-                    obj.rotated = RenderIntegration::kh_attach_rotated(khs_r);
+                    obj.rotated = RenderIntegration::attach_rotated(khs_r);
                 }
-                RenderIntegration::kh_skel_centre(obj, khs_p);
+                RenderIntegration::skel_centre(obj, khs_p);
                 obj.pos[0] = khs_p[0]; obj.pos[1] = khs_p[1]; obj.pos[2] = khs_p[2];
                 return true;
             }
             khs_leave();
-            if (!RenderIntegration::kh_attach_bone_make(khb_parent, khb_mem, khb_own.proxy, err)) return false;
-            // KH_SKEL_ROT_OWN: a plain "rotation true" lane (it follows the position's object) carries over as
+            if (!RenderIntegration::attach_bone_make(khb_parent, khb_mem, khb_own.proxy, err)) return false;
+            // SKEL_ROT_OWN: a plain "rotation true" lane (it follows the position's object) carries over as
             // following the new proxy, as on the skeletal route; an object of the script's own is kept.
-            const bool khb_rot = RenderIntegration::kh_attach_bone_rot_state(handle) ||
-                                 RenderIntegration::kh_attach_rot_plain(handle);
-            RenderIntegration::kh_attach_bone_set(handle, khb_own.release(), khb_parent, khb_rot);
+            const bool khb_rot = RenderIntegration::attach_bone_rot_state(handle) ||
+                                 RenderIntegration::attach_rot_plain(handle);
+            RenderIntegration::attach_bone_set(handle, khb_own.release(), khb_parent, khb_rot);
             // Seeded from the parent for the same reason addRender3D is: the attach has not been simulated yet.
             float khb_p[3], khb_r[9];
-            if (RenderIntegration::kh_attach_read(khb_parent, khb_p, khb_r)) {
-                // KH_ATTACH_OFFSET rides the seed too, in the PARENT's frame for this one frame because the parent is
+            if (RenderIntegration::attach_read(khb_parent, khb_p, khb_r)) {
+                // ATTACH_OFFSET rides the seed too, in the PARENT's frame for this one frame because the parent is
                 // what the seed reads (see the note above it). The position compose runs first: the rotation one
                 // overwrites khb_r.
-                RenderIntegration::kh_attach_offset_pos(obj, khb_r, khb_p);
+                RenderIntegration::attach_offset_pos(obj, khb_r, khb_p);
                 obj.pos[0] = khb_p[0]; obj.pos[1] = khb_p[1]; obj.pos[2] = khb_p[2];
                 if (khb_rot) {
-                    RenderIntegration::kh_attach_offset_rot(obj, khb_r);
+                    RenderIntegration::attach_offset_rot(obj, khb_r);
                     memcpy(obj.rot_m, khb_r, sizeof(obj.rot_m));
-                    obj.rotated = RenderIntegration::kh_attach_rotated(khb_r);
+                    obj.rotated = RenderIntegration::attach_rotated(khb_r);
                 }
             }
             return true;
         }
         if (khb_bad) return false;
-        if (RenderIntegration::kh_attach_is_obj(val)) {
+        if (RenderIntegration::attach_is_obj(val)) {
             khs_leave();
-            return kh_rv_attach_plain(handle, val, obj, err);   // KH_PLAIN_ROT_CARRY.
+            return kh_rv_attach_plain(handle, val, obj, err);   // PLAIN_ROT_CARRY.
         }
         // Any other value detaches - once it has parsed. The detach writes the live attachment table at once, which
         // no discarded staged copy undoes, so a triple that fails must change nothing before it fails.
         float khp_pos[3];
         if (!kh_rv_pos(val, khp_pos, err)) { err = "position must be [x, y, zASL], [object, memoryPoint], [object, true/false], or an object to follow"; return false; }
-        // KH_PLAIN_ROT_CARRY: a plain "rotation true" lane follows the position's object, so the detach ends it
-        // too (as a binding's lane ends, kh_attach_set) and the mesh keeps the rotation it holds - left on the old
+        // PLAIN_ROT_CARRY: a plain "rotation true" lane follows the position's object, so the detach ends it
+        // too (as a binding's lane ends, attach_set) and the mesh keeps the rotation it holds - left on the old
         // object, "rotation false" was refused (no position to name) and only an explicit rotation cleared it.
         khs_leave();
-        RenderIntegration::kh_attach_set(handle, game_value(), false, true);   // khs_leave changes no lane.
+        RenderIntegration::attach_set(handle, game_value(), false, true);   // khs_leave changes no lane.
         memcpy(obj.pos, khp_pos, sizeof(khp_pos));
         return true;
     }
     if (prop == "attachposition") {
-        // KH_ATTACH_OFFSET: where the mesh sits inside the frame it follows, in the FOLLOWED OBJECT's own axes
+        // ATTACH_OFFSET: where the mesh sits inside the frame it follows, in the FOLLOWED OBJECT's own axes
         // ([x right, y forward, z up] at its identity) - not world axes, and not the mesh's own rotation. nil clears
         // it. It is stored whether or not anything is attached (a mesh property, not part of the attachment): a
         // script may set it first and attach after, or detach and re-attach, and find it still there. With the
@@ -6911,13 +6911,13 @@ static bool kh_apply_render3d_prop(RenderIntegration::RenderObject& obj, const s
             obj.attach_pos[2] = khao_p[2];
             obj.attach_pos_on = khao_p[0] != 0.0f || khao_p[1] != 0.0f || khao_p[2] != 0.0f;
         }
-        // Land it on THIS frame rather than the next step's, for the same reason kh_attach_apply reads at command time.
+        // Land it on THIS frame rather than the next step's, for the same reason attach_apply reads at command time.
         // A handle with nothing attached comes back from this untouched.
-        RenderIntegration::kh_attach_reseed(handle, obj);
+        RenderIntegration::attach_reseed(handle, obj);
         return true;
     }
     if (prop == "attachrotation") {
-        // KH_ATTACH_OFFSET, the rotation twin: the SAME parser (kh_rotation_m_from_gv) and matrix builders the
+        // ATTACH_OFFSET, the rotation twin: the SAME parser (kh_rotation_m_from_gv) and matrix builders the
         // "rotation" property uses, applied inside the followed object's frame instead of in world axes. nil - and
         // equally an explicit all-zero triple - clears it.
         //
@@ -6931,7 +6931,7 @@ static bool kh_apply_render3d_prop(RenderIntegration::RenderObject& obj, const s
             return false;
         }
         obj.attach_rot_on = !khao_id;
-        RenderIntegration::kh_attach_reseed(handle, obj);
+        RenderIntegration::attach_reseed(handle, obj);
         return true;
     }
     if (prop == "size" || prop == "scale") {
@@ -6940,21 +6940,21 @@ static bool kh_apply_render3d_prop(RenderIntegration::RenderObject& obj, const s
             err = "size must be a number or [x, y, z] multipliers of the mesh's own size";
             return false;
         }
-        // KH_SIZE_FINITE: an infinite size reached every reach test (a cloth copied the whole terrain grid each
+        // SIZE_FINITE: an infinite size reached every reach test (a cloth copied the whole terrain grid each
         // frame); a NaN one was taken as 1. Both are refused, and the object keeps its size.
         if (!std::isfinite(khsz_m[0]) || !std::isfinite(khsz_m[1]) || !std::isfinite(khsz_m[2])) {
             err = "size must be finite";
             return false;
         }
         memcpy(obj.size_mul, khsz_m, sizeof(khsz_m));
-        // KH_SKEL: a skeletal mesh is drawn at its authored scale and its box belongs to the skin (RenderObject::skel);
+        // SKEL: a skeletal mesh is drawn at its authored scale and its box belongs to the skin (RenderObject::skel);
         // the multiplier is kept and applies when the binding ends.
-        // KH_CHAIN: likewise a simulating chain, drawn at its authored size.
-        if (!obj.skel && !obj.chain_sim) RenderIntegration::kh_apply_native_size(obj);   // Multiplier -> metres.
+        // CHAIN: likewise a simulating chain, drawn at its authored size.
+        if (!obj.skel && !obj.chain_sim) RenderIntegration::apply_native_size(obj);   // Multiplier -> metres.
         return true;
     }
     if (prop == "rotation") {
-        // KH_ATTACH_BONE / KH_ATTACH_PLAIN_ROT: a BOOLEAN rotation is the follow toggle - of the bone under
+        // ATTACH_BONE / ATTACH_PLAIN_ROT: a BOOLEAN rotation is the follow toggle - of the bone under
         // [object, memoryPoint], of the root under [object, true], of the followed object under a plain attach - and
         // means nothing while the position lane follows nothing, so it is refused then rather than silently ignored.
         // The toggle is a lane assignment only - a memory-point proxy stays attached follow-bone either way, so
@@ -6962,7 +6962,7 @@ static bool kh_apply_render3d_prop(RenderIntegration::RenderObject& obj, const s
         // below).
         if (!val.is_nil() && val.type_enum() == game_data_type::BOOL) {
             const bool khb_on = static_cast<bool>(val);
-            if (!RenderIntegration::kh_attach_bone_rot(handle, khb_on)) {
+            if (!RenderIntegration::attach_bone_rot(handle, khb_on)) {
                 err = "rotation takes true or false only while position follows an object, [object, memoryPoint] or [object, true]";
                 return false;
             }
@@ -6971,49 +6971,49 @@ static bool kh_apply_render3d_prop(RenderIntegration::RenderObject& obj, const s
             // script sets an explicit rotation if it wants another.
             return true;
         }
-        if (RenderIntegration::kh_attach_is_obj(val))
-            return RenderIntegration::kh_attach_apply(handle, val, true, obj, err);
+        if (RenderIntegration::attach_is_obj(val))
+            return RenderIntegration::attach_apply(handle, val, true, obj, err);
         float khr_p = 0.0f, khr_y = 0.0f, khr_r = 0.0f, khr_m[9];
         bool khr_vec = false, khr_id = true;
         // Any other value detaches (below) - once it has parsed, as position's.
         if (!kh_rotation_m_from_gv(val, khr_m, khr_p, khr_y, khr_r, khr_vec, khr_id)) { err = "rotation must be nil, a number (yaw), [pitch, yaw, roll] degrees, [vectorDir, vectorUp] (non-zero, not parallel), an object to follow, or true/false while the position follows an object, a memory point or a skeletal binding"; return false; }
-        RenderIntegration::kh_attach_set(handle, game_value(), true);
-        if (khr_vec) RenderIntegration::kh_set_rotation_rows(obj, khr_m);
-        else RenderIntegration::kh_set_rotation(obj, khr_p, khr_y, khr_r);
+        RenderIntegration::attach_set(handle, game_value(), true);
+        if (khr_vec) RenderIntegration::set_rotation_rows(obj, khr_m);
+        else RenderIntegration::set_rotation(obj, khr_p, khr_y, khr_r);
         return true;
     }
     if (prop == "mesh") {
         int mid = 0;
         if (!kh_rv_mesh(val, mid, err)) return false;
-        if (obj.skel && mid == obj.mesh) return true;   // KH_SKEL: nothing to rebuild, and the box is the skin's.
+        if (obj.skel && mid == obj.mesh) return true;   // SKEL: nothing to rebuild, and the box is the skin's.
         if (obj.skel) {
-            // KH_SKEL: the proxies are the memory points the OLD skeleton named. Rebuilt for the new one, keeping the
+            // SKEL: the proxies are the memory points the OLD skeleton named. Rebuilt for the new one, keeping the
             // parent and the rotation state; the new mesh starts in its rest box.
             game_value khm_parent, khm_rot;
-            RenderIntegration::kh_attach_lanes(handle, khm_parent, khm_rot);
-            if (RenderIntegration::kh_attach_is_obj(khm_parent)) {
-                RenderIntegration::KhSkelOwn khm_own;
+            RenderIntegration::attach_lanes(handle, khm_parent, khm_rot);
+            if (RenderIntegration::attach_is_obj(khm_parent)) {
+                RenderIntegration::SkelOwn khm_own;
                 std::vector<std::string> khm_mem;
-                if (!RenderIntegration::kh_skel_make(khm_parent, RenderIntegration::kh_skel_bone_names(mid, handle, obj.seq),
-                                                     khm_own.proxies, khm_mem, err)) return false;
-                const bool khm_rotf = RenderIntegration::kh_attach_bone_rot_state(handle);
-                RenderIntegration::kh_attach_skel_set(handle, khm_own.release(), khm_mem, khm_parent, khm_rotf);
+                if (!RenderIntegration::skel_make(khm_parent, RenderIntegration::skel_bone_names(mid, handle, obj.seq),
+                                                  khm_own.proxies, khm_mem, err)) return false;
+                const bool khm_rotf = RenderIntegration::attach_bone_rot_state(handle);
+                RenderIntegration::attach_skel_set(handle, khm_own.release(), khm_mem, khm_parent, khm_rotf);
             }
             obj.mesh = mid;
-            RenderIntegration::kh_skel_rest_box(obj);
-            RenderIntegration::kh_attach_reseed(handle, obj);   // The new centre, this frame.
+            RenderIntegration::skel_rest_box(obj);
+            RenderIntegration::attach_reseed(handle, obj);   // The new centre, this frame.
             return true;
         }
         obj.mesh = mid;
-        RenderIntegration::kh_apply_native_size(obj);
-        if (obj.chain_sim) RenderIntegration::kh_chain_rest_size(obj);   // KH_CHAIN: the new mesh's rest box.
+        RenderIntegration::apply_native_size(obj);
+        if (obj.chain_sim) RenderIntegration::chain_rest_size(obj);   // CHAIN: the new mesh's rest box.
         return true;
     }
-    if (prop == "material") return RenderIntegration::kh_apply_material_update(obj, val, err);
+    if (prop == "material") return RenderIntegration::apply_material_update(obj, val, err);
     if (prop == "mode") {
         if (val.type_enum() != game_data_type::SCALAR) { err = "mode must be 0 (depth test), 1 (test + write) or 2 (overlay)"; return false; }
         int m = -1;
-        if (!RenderIntegration::kh_gv_int(val, m)) m = -1;   // Not finite / past int: refused; fractions truncate.
+        if (!RenderIntegration::gv_int(val, m)) m = -1;   // Not finite / past int: refused; fractions truncate.
         if (m < 0 || m > 2) { err = "mode must be 0 (depth test), 1 (test + write) or 2 (overlay)"; return false; }
         obj.mode = static_cast<RenderIntegration::DepthMode>(m);
         return true;
@@ -7034,7 +7034,7 @@ static bool kh_apply_render3d_prop(RenderIntegration::RenderObject& obj, const s
         if (!kh_rv_bool(val, b, "lodLock", err)) return false;
         // KH_LOD_FORCED: a cloth and a chain draw level 0 alone - a cloth leaves a decimated level's own vertices
         // at rest, and a chain's box is level 0's - so the lock they set is not the script's to clear.
-        // A skeletal binding sets none: every level skins (KH_LOD_SKIN).
+        // A skeletal binding sets none: every level skins (LOD_SKIN).
         if (!b && (obj.cloth_sim || obj.chain_sim)) {
             err = "lodLock stays on while clothSimulation or chainSimulation is on";
             return false;
@@ -7042,19 +7042,19 @@ static bool kh_apply_render3d_prop(RenderIntegration::RenderObject& obj, const s
         obj.lod_lock = b;
         return true;
     }
-    if (prop == "infront") return kh_rv_bool(val, obj.in_front, "inFront", err);   // KH_INFRONT.
-    // KH_SHOW_INFRONT: a mesh's alone, as inFront.
+    if (prop == "infront") return kh_rv_bool(val, obj.in_front, "inFront", err);   // INFRONT.
+    // SHOW_INFRONT: a mesh's alone, as inFront.
     if (prop == "showinfront") return kh_rv_bool(val, obj.show_in_front, "showInFront", err);
     // A mesh's alone: updatePostFX refuses it (a pass casts nothing; every caster test excludes passes).
     if (prop == "casteronly") return kh_rv_bool(val, obj.caster_only, "casterOnly", err);
-    // KH_SHADOW_SWITCH.
+    // SHADOW_SWITCH.
     if (prop == "castshadow") return kh_rv_bool(val, obj.cast_shadow, "castShadow", err);
     if (prop == "receiveshadow") return kh_rv_bool(val, obj.receive_shadow, "receiveShadow", err);
-    if (prop == "occluder") return kh_rv_bool(val, obj.occluder, "occluder", err);   // KH_OCC_FORCE.
+    if (prop == "occluder") return kh_rv_bool(val, obj.occluder, "occluder", err);   // OCC_FORCE.
     if (prop == "clothsimulation") return kh_rv_cloth_sim(val, obj, err);
     if (prop == "physicscollider")   return kh_rv_physics_collider(val, obj, err);
     if (prop == "chainsimulation") return kh_rv_chain_sim(val, obj, handle, err);
-    if (prop == "simulationlod") return kh_rv_sim_lod(val, obj, err);   // KH_SIM_LOD.
+    if (prop == "simulationlod") return kh_rv_sim_lod(val, obj, err);   // SIM_LOD.
     err = "unknown property (position | attachPosition | size | rotation | attachRotation | mesh | material | mode | "
           "sceneRead | effect | params | lit | twoSided | lodLock | inFront | showInFront | casterOnly | castShadow | "
           "receiveShadow | occluder | clothSimulation | physicsCollider | chainSimulation | simulationLod | textures | "
@@ -7177,11 +7177,11 @@ static bool kh_update_one(const char* cmd, bool want_fullscreen,
     auto& t = triple.to_array();
 
     // Parse OUTSIDE the draw-list lock: the value parsers may touch the disk (a first-seen .fbx runs the whole import
-    // - its publish is left to the render thread, KH_EA_FBX_NO_PARK; .hlsl / .cube / material paths walk the mod
+    // - its publish is left to the render thread, EA_FBX_NO_PARK; .hlsl / .cube / material paths walk the mod
     // folders), and the render thread takes g_draw_list_mutex at several sites, so parsing under it would stall the
     // frame. Sound because the write-back merges: the fields other writers keep writing meanwhile (the attachment
-    // pose - kh_attach_step runs on the render thread too - and the skinned / chain box) are taken from the live
-    // entry unless this property changed them (update_render_object, KH_UPDATE_MERGE).
+    // pose - attach_step runs on the render thread too - and the skinned / chain box) are taken from the live
+    // entry unless this property changed them (update_render_object, UPDATE_MERGE).
     RenderIntegration::RenderObject staged;
     std::string khuo_miss;   // KH_REPORT_UNLOCKED: report_error is an SQF call, made after the lock is released.
     {
@@ -7201,13 +7201,13 @@ static bool kh_update_one(const char* cmd, bool want_fullscreen,
         kh_rv_report(cmd, khuo_miss);
         return false;
     }
-    const RenderIntegration::RenderObject base = staged;   // KH_UPDATE_MERGE: what the property starts from.
+    const RenderIntegration::RenderObject base = staged;   // UPDATE_MERGE: what the property starts from.
 
     std::string err;
     const bool ok = want_fullscreen ? kh_apply_postfx_prop(staged, prop, t[2], err)
                                     : kh_apply_render3d_prop(staged, handle, prop, t[2], err);
     if (!ok) {
-        if (RenderIntegration::kh_err_silent(err)) return false;   // KH_NULL_SILENT: the triple fails unreported.
+        if (RenderIntegration::err_silent(err)) return false;   // NULL_SILENT: the triple fails unreported.
         kh_rv_report(cmd, "property '" + static_cast<std::string>(t[1]) + "'" + where + ": " + err);
         return false;
     }
@@ -7215,12 +7215,12 @@ static bool kh_update_one(const char* cmd, bool want_fullscreen,
     // KH_UI_REHOIST_LAST: updatePostFX "ui" demanding the UI phase hoists the driver only once applied.
     const bool khuo_rehoist = want_fullscreen && prop == "ui" && staged.affect_ui;
 
-    // KH_SCENE: the write-back marks the slot dirty for the live scene.
+    // SCENE: the write-back marks the slot dirty for the live scene.
     if (!RenderIntegration::update_render_object(handle, std::move(staged), base)) {
         kh_rv_report(cmd, "render object '" + handle + "'" + where + " was removed while the update was being applied");
         return false;
     }
-    if (khuo_rehoist) RenderIntegration::kh_ui_driver_rehoist();
+    if (khuo_rehoist) RenderIntegration::ui_driver_rehoist();
     return true;
 }
 
@@ -7231,7 +7231,7 @@ static game_value kh_update_many(const char* cmd, bool want_fullscreen, const ga
 }
 
 static game_value update_render3d_sqf(game_value_parameter args) {
-    if (kh_gfx_off()) return game_value(false);   // KH_PLAYER_ONLY.
+    if (kh_gfx_off()) return game_value(false);   // PLAYER_ONLY.
     try {
         return kh_update_many("updateRender3D", false, args);
     } catch (const std::exception& e) {
@@ -7244,7 +7244,7 @@ static game_value update_render3d_sqf(game_value_parameter args) {
 }
 
 static game_value update_post_fx_sqf(game_value_parameter args) {
-    if (kh_gfx_off()) return game_value(false);   // KH_PLAYER_ONLY.
+    if (kh_gfx_off()) return game_value(false);   // PLAYER_ONLY.
     try {
         return kh_update_many("updatePostFX", true, args);
     } catch (const std::exception& e) {
@@ -7261,7 +7261,7 @@ static game_value update_post_fx_sqf(game_value_parameter args) {
 // nothing owns returns false without a report - a script removing what it may already have removed is ordinary, not a
 // fault. The type check stays reported: a non-string is a wrong call, not a missing handle.
 static game_value remove_render_handler_sqf(game_value_parameter arg) {
-    if (kh_gfx_off()) return game_value(false);   // KH_PLAYER_ONLY.
+    if (kh_gfx_off()) return game_value(false);   // PLAYER_ONLY.
     try {
         if (arg.type_enum() != game_data_type::STRING) {
             kh_rv_report("removeRenderHandler", "handle must be a string (removeAllRenderHandlers clears every object)");
@@ -7271,10 +7271,10 @@ static game_value remove_render_handler_sqf(game_value_parameter arg) {
         if (handle.empty()) return game_value(false);
 
         if (RenderIntegration::remove_render_object(handle)) return game_value(true);
-        // KH_AFFECTOR: reaped first, so a handle past its lifetime reads as
+        // AFFECTOR: reaped first, so a handle past its lifetime reads as
         // gone here exactly as it does to updatePhysicsAffector.
-        RenderIntegration::kh_aff_reap(RenderIntegration::effect_time_seconds_d());
-        return game_value(RenderIntegration::kh_aff_remove(handle));
+        RenderIntegration::aff_reap(RenderIntegration::effect_time_seconds_d());
+        return game_value(RenderIntegration::aff_remove(handle));
     } catch (const std::exception& e) {
         report_error(std::string("removeRenderHandler: ") + e.what());
         return game_value(false);
@@ -7287,10 +7287,10 @@ static game_value remove_render_handler_sqf(game_value_parameter arg) {
 // KH_REMOVE_ALL - removes every retained render object (mesh and post-processing pass) and every physics affector.
 // Nullary, so it cannot be reached by an unset variable. Returns true.
 static game_value remove_all_render_handlers_sqf() {
-    if (kh_gfx_off()) return game_value(false);   // KH_PLAYER_ONLY.
+    if (kh_gfx_off()) return game_value(false);   // PLAYER_ONLY.
     try {
         RenderIntegration::clear_render_objects();
-        RenderIntegration::kh_aff_clear();   // KH_AFFECTOR: every handle removeRenderHandler takes.
+        RenderIntegration::aff_clear();   // AFFECTOR: every handle removeRenderHandler takes.
         return game_value(true);
     } catch (const std::exception& e) {
         report_error(std::string("removeAllRenderHandlers: ") + e.what());
@@ -7301,15 +7301,15 @@ static game_value remove_all_render_handlers_sqf() {
     }
 }
 
-// KH_ALL_HANDLES - every handle removeRenderHandler would accept right now: the khr_ handles (meshes and passes) in
+// ALL_HANDLES - every handle removeRenderHandler would accept right now: the khr_ handles (meshes and passes) in
 // creation order, then the khpa_ handles (physics affectors, expired ones reaped first) in creation order.
 static game_value all_render_handlers_sqf() {
-    if (kh_gfx_off()) return game_value(auto_array<game_value>());   // KH_PLAYER_ONLY.
+    if (kh_gfx_off()) return game_value(auto_array<game_value>());   // PLAYER_ONLY.
     try {
         std::vector<std::string> khah_h;
         RenderIntegration::render_object_handles(khah_h);
-        RenderIntegration::kh_aff_reap(RenderIntegration::effect_time_seconds_d());
-        RenderIntegration::kh_aff_handles(khah_h);
+        RenderIntegration::aff_reap(RenderIntegration::effect_time_seconds_d());
+        RenderIntegration::aff_handles(khah_h);
         auto_array<game_value> khah_out;
         khah_out.reserve(khah_h.size());
         for (const std::string& khah_s : khah_h) khah_out.push_back(game_value(khah_s));
@@ -7323,8 +7323,8 @@ static game_value all_render_handlers_sqf() {
     }
 }
 
-// KH_AFFECTOR - addPhysicsAffector [type, [lifetime, position, vectorDir, scale, ...]] and updatePhysicsAffector. What
-// each type does to the cloth, and why the air types and the force types act differently, is at KhClothAffView in
+// AFFECTOR - addPhysicsAffector [type, [lifetime, position, vectorDir, scale, ...]] and updatePhysicsAffector. What
+// each type does to the cloth, and why the air types and the force types act differently, is at ClothAffView in
 // rendering/physics_types.hpp.
 //
 // The second array is laid out by type (KH_AFF_SCHEMA): lifetime, position, then vectorDir for the types that have a
@@ -7340,29 +7340,29 @@ struct KhAffSchema {
     KhAffParam  prm[5];       // key = updatePhysicsAffector's lower-case property.
 };
 static const KhAffSchema KH_AFF_SCHEMA[] = {
-    { "wind", RenderIntegration::KH_AFF_WIND, { 0.0f, 1.0f, 0.0f }, 2,
+    { "wind", RenderIntegration::AFF_WIND, { 0.0f, 1.0f, 0.0f }, 2,
       { { "speed", "speed", 10.0f, -200.0f, 200.0f },
         { "falloff", "falloff", 0.25f, 0.0f, 1.0f } } },
-    { "turbulence", RenderIntegration::KH_AFF_TURBULENCE, { 0.0f, 1.0f, 0.0f }, 4,
+    { "turbulence", RenderIntegration::AFF_TURBULENCE, { 0.0f, 1.0f, 0.0f }, 4,
       { { "strength", "strength", 5.0f, 0.0f, 200.0f },
         { "eddysize", "eddySize", 2.0f, 0.01f, 1000.0f },
         { "rate", "rate", 0.5f, 0.0f, 50.0f },
         { "falloff", "falloff", 0.25f, 0.0f, 1.0f } } },
-    { "vortex", RenderIntegration::KH_AFF_VORTEX, { 0.0f, 0.0f, 1.0f }, 5,
+    { "vortex", RenderIntegration::AFF_VORTEX, { 0.0f, 0.0f, 1.0f }, 5,
       { { "swirl", "swirl", 10.0f, -200.0f, 200.0f },
         { "inflow", "inflow", 0.0f, -200.0f, 200.0f },
         { "updraft", "updraft", 0.0f, -200.0f, 200.0f },
         { "core", "core", 0.0f, 0.0f, 1000.0f },
         { "falloff", "falloff", 0.25f, 0.0f, 1.0f } } },
-    { "force", RenderIntegration::KH_AFF_FORCE, { 0.0f, 1.0f, 0.0f }, 2,
+    { "force", RenderIntegration::AFF_FORCE, { 0.0f, 1.0f, 0.0f }, 2,
       { { "strength", "strength", 9.80665f, -1000.0f, 1000.0f },
         { "falloff", "falloff", 0.25f, 0.0f, 1.0f } } },
-    { "radial", RenderIntegration::KH_AFF_RADIAL, { 0.0f, 1.0f, 0.0f }, 2,
+    { "radial", RenderIntegration::AFF_RADIAL, { 0.0f, 1.0f, 0.0f }, 2,
       { { "strength", "strength", 20.0f, -1000.0f, 1000.0f },
         { "falloff", "falloff", 1.0f, 0.0f, 1.0f } } },
-    // KH_CLOTH_DRAG: the air's density times 1 + strength (RenderIntegration::KH_AFF_DRAG_MAX at most).
-    { "drag", RenderIntegration::KH_AFF_DRAG, { 0.0f, 1.0f, 0.0f }, 2,
-      { { "strength", "strength", 10.0f, 0.0f, RenderIntegration::KH_AFF_DRAG_MAX },
+    // CLOTH_DRAG: the air's density times 1 + strength (RenderIntegration::AFF_DRAG_MAX at most).
+    { "drag", RenderIntegration::AFF_DRAG, { 0.0f, 1.0f, 0.0f }, 2,
+      { { "strength", "strength", 10.0f, 0.0f, RenderIntegration::AFF_DRAG_MAX },
         { "falloff", "falloff", 0.25f, 0.0f, 1.0f } } },
 };
 static const char* const KH_AFF_TYPES = "wind | turbulence | vortex | force | radial | drag";
@@ -7380,7 +7380,7 @@ static const KhAffSchema* kh_aff_schema_of(uint8_t khas_t) {
 // "wind [lifetime, position, vectorDir, scale, speed, falloff]" - every fault names the layout it was checked against.
 static std::string kh_aff_layout(const KhAffSchema& khal_s) {
     std::string khal_o = std::string(khal_s.name) + " [lifetime, position, ";
-    if (RenderIntegration::kh_aff_rotated(khal_s.type)) khal_o += "vectorDir, ";
+    if (RenderIntegration::aff_rotated(khal_s.type)) khal_o += "vectorDir, ";
     khal_o += "scale";
     for (int khal_i = 0; khal_i < khal_s.np; ++khal_i) khal_o += std::string(", ") + khal_s.prm[khal_i].shown;
     return khal_o + "]";
@@ -7389,7 +7389,7 @@ static bool kh_aff_finite(float khaf_v) { return khaf_v == khaf_v && fabsf(khaf_
 
 // nil, [] or 0 = permanent; seconds; or [fadeIn, hold, fadeOut] - the
 // renderer's duration shape (parse_duration_gv), negatives read as 0.
-static bool kh_aff_lifetime(const game_value& khal_v, RenderIntegration::KhAffector& khal_a, std::string& err) {
+static bool kh_aff_lifetime(const game_value& khal_v, RenderIntegration::Affector& khal_a, std::string& err) {
     float khal_t[3] = { 0.0f, 0.0f, 0.0f };   // fadeIn, hold, fadeOut.
     const char* khal_msg = "lifetime must be seconds or [fadeIn, hold, fadeOut], each finite and under 1e30 in size "
                            "(nil, [] or 0 = permanent)";
@@ -7471,7 +7471,7 @@ static bool kh_aff_scale(const game_value& khas_v, float* khas_out, std::string&
 
 // One of the type's own numbers into its lane; nil = its default.
 static bool kh_aff_param(const game_value& khap_v, const KhAffSchema& khap_s, int khap_i,
-                         RenderIntegration::KhAffector& khap_a, std::string& err) {
+                         RenderIntegration::Affector& khap_a, std::string& err) {
     const KhAffParam& khap_p = khap_s.prm[khap_i];
     float khap_x = khap_p.def;
     if (!khap_v.is_nil()) {
@@ -7492,10 +7492,10 @@ static bool kh_aff_param(const game_value& khap_v, const KhAffSchema& khap_s, in
 // The whole parameter array (addPhysicsAffector's second element, and updatePhysicsAffector's "params"). Writes every
 // field it owns, so an omitted slot really does take its default; seq and the clocks are the caller's.
 static bool kh_aff_parse(const KhAffSchema& khap_s, const game_value& khap_v,
-                         RenderIntegration::KhAffector& khap_a, std::string& err) {
+                         RenderIntegration::Affector& khap_a, std::string& err) {
     if (khap_v.type_enum() != game_data_type::ARRAY) { err = "parameters must be an array: " + kh_aff_layout(khap_s); return false; }
     auto& khap_arr = khap_v.to_array();
-    const bool khap_rot = RenderIntegration::kh_aff_rotated(khap_s.type);
+    const bool khap_rot = RenderIntegration::aff_rotated(khap_s.type);
     const size_t khap_max = 3u + (khap_rot ? 1u : 0u) + static_cast<size_t>(khap_s.np);
     if (khap_arr.size() > khap_max) {
         err = "takes at most " + std::to_string(khap_max) + " parameters (" + std::to_string(khap_arr.size()) +
@@ -7523,7 +7523,7 @@ static bool kh_aff_parse(const KhAffSchema& khap_s, const game_value& khap_v,
 }
 
 static game_value add_physics_affector_sqf(game_value_parameter args) {
-    if (kh_gfx_off()) return game_value("");   // KH_PLAYER_ONLY.
+    if (kh_gfx_off()) return game_value("");   // PLAYER_ONLY.
     try {
         auto& arr = args.to_array();
         if (arr.size() != 2 || arr[0].type_enum() != game_data_type::STRING) {
@@ -7536,14 +7536,14 @@ static game_value add_physics_affector_sqf(game_value_parameter args) {
             kh_rv_report("addPhysicsAffector", "unknown type '" + static_cast<std::string>(arr[0]) + "' (" + KH_AFF_TYPES + ")");
             return game_value("");
         }
-        RenderIntegration::KhAffector khpa_a;
+        RenderIntegration::Affector khpa_a;
         std::string err;
         if (!kh_aff_parse(*khpa_s, arr[1], khpa_a, err)) {
             kh_rv_report("addPhysicsAffector", std::string(khpa_s->name) + ": " + err);
             return game_value("");
         }
-        RenderIntegration::kh_aff_reap(RenderIntegration::effect_time_seconds_d());
-        return game_value(RenderIntegration::kh_aff_add(khpa_a));
+        RenderIntegration::aff_reap(RenderIntegration::effect_time_seconds_d());
+        return game_value(RenderIntegration::aff_add(khpa_a));
     } catch (const std::exception& e) {
         report_error(std::string("addPhysicsAffector: ") + e.what());
         return game_value("");
@@ -7554,7 +7554,7 @@ static game_value add_physics_affector_sqf(game_value_parameter args) {
 }
 
 // One [handle, property, value]. The affector table is the game thread's own
-// (see KhAffector), so the staged copy is written straight back.
+// (see Affector), so the staged copy is written straight back.
 static bool kh_aff_update_one(const game_value& triple, int index) {
     const char* cmd = "updatePhysicsAffector";
     const std::string where = index < 0 ? std::string() : (" [" + std::to_string(index) + "]");
@@ -7563,7 +7563,7 @@ static bool kh_aff_update_one(const game_value& triple, int index) {
     auto& t = triple.to_array();
 
     const double khpu_now = RenderIntegration::effect_time_seconds_d();
-    RenderIntegration::kh_aff_reap(khpu_now);
+    RenderIntegration::aff_reap(khpu_now);
     auto it = RenderIntegration::g_affectors.find(handle);
     if (it == RenderIntegration::g_affectors.end()) {
         kh_rv_report(cmd, "no physics affector with handle '" + handle + "'" + where);
@@ -7571,7 +7571,7 @@ static bool kh_aff_update_one(const game_value& triple, int index) {
     }
     const KhAffSchema* khpu_s = kh_aff_schema_of(it->second.type);
     if (!khpu_s) { kh_rv_report(cmd, "affector '" + handle + "'" + where + " has no known type"); return false; }
-    RenderIntegration::KhAffector staged = it->second;
+    RenderIntegration::Affector staged = it->second;
     const game_value& val = t[2];
     std::string err;
     bool ok = false;
@@ -7582,7 +7582,7 @@ static bool kh_aff_update_one(const game_value& triple, int index) {
     } else if (prop == "position") {
         ok = kh_aff_position(val, staged.pos, err);
     } else if (prop == "rotation") {
-        if (!RenderIntegration::kh_aff_rotated(staged.type)) {
+        if (!RenderIntegration::aff_rotated(staged.type)) {
             err = std::string("a ") + khpu_s->name + " affector has no rotation";
         } else if (val.is_nil()) {
             for (int k = 0; k < 3; ++k) staged.dir[k] = khpu_s->dir_def[k];
@@ -7604,7 +7604,7 @@ static bool kh_aff_update_one(const game_value& triple, int index) {
             ok = kh_aff_param(val, *khpu_s, khpu_i, staged, err);
         } else {
             err = std::string("unknown property for a ") + khpu_s->name + " affector (lifetime | position | " +
-                  (RenderIntegration::kh_aff_rotated(staged.type) ? "rotation | " : "") + "scale | params";
+                  (RenderIntegration::aff_rotated(staged.type) ? "rotation | " : "") + "scale | params";
             for (int khpu_j = 0; khpu_j < khpu_s->np; ++khpu_j) err += std::string(" | ") + khpu_s->prm[khpu_j].shown;
             err += ")";
         }
@@ -7619,7 +7619,7 @@ static bool kh_aff_update_one(const game_value& triple, int index) {
 }
 
 static game_value update_physics_affector_sqf(game_value_parameter args) {
-    if (kh_gfx_off()) return game_value(false);   // KH_PLAYER_ONLY.
+    if (kh_gfx_off()) return game_value(false);   // PLAYER_ONLY.
     try {
         return kh_rv_batch("updatePhysicsAffector", args, kh_aff_update_one);
     } catch (const std::exception& e) {
@@ -7634,7 +7634,7 @@ static game_value update_physics_affector_sqf(game_value_parameter args) {
 // addPostFX [effect, params?, [r,g,b,a]?, band?, blend?, affectUI?, duration?]
 // Optional slots skip on nil ("" for blend / affectUI).
 static game_value add_postfx_sqf(game_value_parameter args) {
-    if (kh_gfx_off()) return game_value("");   // KH_PLAYER_ONLY.
+    if (kh_gfx_off()) return game_value("");   // PLAYER_ONLY.
     try {
         auto& arr = args.to_array();
         std::string err;
@@ -7671,7 +7671,7 @@ static game_value add_postfx_sqf(game_value_parameter args) {
             !kh_rv_duration(arr[6], obj, err)) { kh_rv_report("addPostFX", err); return game_value(""); }
 
         // KH_UI_REHOIST_LAST: after the last validation, so a refused call starts nothing.
-        if (obj.affect_ui) RenderIntegration::kh_ui_driver_rehoist();
+        if (obj.affect_ui) RenderIntegration::ui_driver_rehoist();
 
         return game_value(RenderIntegration::add_render_object(obj));
     } catch (const std::exception& e) {
@@ -7683,10 +7683,10 @@ static game_value add_postfx_sqf(game_value_parameter args) {
     }
 }
 
-// KH_DLS_ALLOW: allowDynamicShadows true / false. Global; off by default and at every mission start. The dynamic lights
+// DLS_ALLOW: allowDynamicShadows true / false. Global; off by default and at every mission start. The dynamic lights
 // still light the meshes either way; only the shadows they cast (onto our meshes and onto the world) follow.
 static game_value allow_dynamic_shadows_sqf(game_value_parameter arg) {
-    if (kh_gfx_off()) return game_value(false);   // KH_PLAYER_ONLY.
+    if (kh_gfx_off()) return game_value(false);   // PLAYER_ONLY.
     try {
         if (arg.type_enum() != game_data_type::BOOL) {
             kh_rv_report("allowDynamicShadows", "expected true or false");
@@ -7704,7 +7704,7 @@ static game_value allow_dynamic_shadows_sqf(game_value_parameter arg) {
 }
 
 static game_value set_ssgi_scale_sqf(game_value_parameter arg) {
-    if (kh_gfx_off()) return game_value(false);   // KH_PLAYER_ONLY.
+    if (kh_gfx_off()) return game_value(false);   // PLAYER_ONLY.
     try {
         if (arg.type_enum() != game_data_type::SCALAR) {
             kh_rv_report("setSsgiScale", "scale must be a number (0.25 .. 2)");
@@ -7717,7 +7717,7 @@ static game_value set_ssgi_scale_sqf(game_value_parameter arg) {
         }
         if (khss < 0.25f) khss = 0.25f;
         if (khss > 2.0f)  khss = 2.0f;
-        RenderIntegration::g_khsg_scale.store(khss, std::memory_order_relaxed);   // KH_XTHREAD_ATOMIC.
+        RenderIntegration::g_ssgi_scale.store(khss, std::memory_order_relaxed);   // XTHREAD_ATOMIC.
         return game_value(true);
     } catch (const std::exception& e) {
         report_error(std::string("setSsgiScale: ") + e.what());
@@ -7728,11 +7728,11 @@ static game_value set_ssgi_scale_sqf(game_value_parameter arg) {
     }
 }
 
-// KH_SSAO: [strength] or [strength, radius]. Strength is the term's exponent (0 = off, 1 = as measured, above 1
+// SSAO: [strength] or [strength, radius]. Strength is the term's exponent (0 = off, 1 = as measured, above 1
 // deeper), clamped 0..4; the sample radius in metres, clamped 0.05..5 (omitted = unchanged; default 0.5). Global;
 // applies from the next injected frame.
 static game_value set_render_ao_sqf(game_value_parameter arg) {
-    if (kh_gfx_off()) return game_value(false);   // KH_PLAYER_ONLY.
+    if (kh_gfx_off()) return game_value(false);   // PLAYER_ONLY.
     try {
         float khao_s = 1.0f, khao_d = 0.5f;
         bool khao_has_d = false;
@@ -7794,7 +7794,7 @@ static game_value set_render_ao_sqf(game_value_parameter arg) {
 // under the graphics lock (the render thread parked); the counters are read live after release (plain words - a count
 // may be a few increments behind).
 static game_value reset_render_stats_sqf() {
-    if (kh_gfx_off()) return game_value(false);   // KH_PLAYER_ONLY.
+    if (kh_gfx_off()) return game_value(false);   // PLAYER_ONLY.
     try {
         // Best effort park so the zeroing cannot race a render-thread increment; a lock that never comes still resets
         // (the counters are plain uint64_t or relaxed atomics: an increment racing the zeroing can be lost or survive
@@ -7817,7 +7817,7 @@ static game_value reset_render_stats_sqf() {
 }
 
 static game_value get_render_stats_sqf() {
-    if (kh_gfx_off()) return game_value(auto_array<game_value>());   // KH_PLAYER_ONLY.
+    if (kh_gfx_off()) return game_value(auto_array<game_value>());   // PLAYER_ONLY.
     try {
         auto kv = [](const char* k, float v) {
             auto_array<game_value> pair;
@@ -7844,7 +7844,7 @@ static game_value get_render_stats_sqf() {
                 if (o.fullscreen) ++khrs_fullscreen; else ++khrs_meshes;
                 if (o.materials) ++khrs_textured;
                 if (o.lit) ++khrs_lit;
-                if (RenderIntegration::kh_shadow_active(o)) ++khrs_casters;
+                if (RenderIntegration::shadow_active(o)) ++khrs_casters;
             }
         }
 
@@ -7892,7 +7892,7 @@ static game_value get_render_stats_sqf() {
             khd_pool_n = khd.pool_n < khd.pool.size() ? khd.pool_n : static_cast<uint32_t>(khd.pool.size());
             for (int i = 0; i < 3; ++i) khd_cam[i] = khd.cam[i];
             uint32_t khd_n = khd_point_n + khd_spot_n;
-            if (khd_n > RenderIntegration::KH_DL_MAX_LIGHTS) khd_n = RenderIntegration::KH_DL_MAX_LIGHTS;
+            if (khd_n > RenderIntegration::DL_MAX_LIGHTS) khd_n = RenderIntegration::DL_MAX_LIGHTS;
             khd_lights.assign(khd.lights, khd.lights + static_cast<size_t>(khd_n) * 24u);
             khd_blk[0] = RenderIntegration::g_pub_block_valid ? 1.0f : 0.0f;   // KH_DLSW_REF.
             for (int k = 0; k < 3; ++k) {
@@ -7902,11 +7902,11 @@ static game_value get_render_stats_sqf() {
             }
             khd_ref[0] = khd.main_ref_valid ? 1.0f : 0.0f;
             khd_ref[4] = khd.main_scale;
-            for (uint32_t s = 0; s < RenderIntegration::KH_DLS_MAX; ++s) {
-                const RenderIntegration::KhDlsSlot& khd_sl = RenderIntegration::g_dls[s];
+            for (uint32_t s = 0; s < RenderIntegration::DLS_MAX; ++s) {
+                const RenderIntegration::DlsSlot& khd_sl = RenderIntegration::g_dls[s];
                 if (!khd_sl.live) continue;
                 khd_slots.push_back(static_cast<float>(s));
-                khd_slots.push_back(RenderIntegration::kh_dls_published(s) ? 1.0f : 0.0f);
+                khd_slots.push_back(RenderIntegration::dls_published(s) ? 1.0f : 0.0f);
                 khd_slots.push_back(static_cast<float>(khd_sl.light_id));
                 khd_slots.push_back(khd_sl.pos[0]);
                 khd_slots.push_back(khd_sl.pos[1]);
@@ -7935,19 +7935,20 @@ static game_value get_render_stats_sqf() {
         out.push_back(kv("shadowActiveObjects", static_cast<float>(khrs_casters)));
         out.push_back(kv("meshDefs", static_cast<float>(RenderIntegration::mesh_count())));
         out.push_back(kv("flushes", static_cast<float>(s.flushes)));
-        // KH_PRESENT_UI: 1 = the Present hook is installed and the UI chain is drawn from it, 0 = not attempted yet,
+        // PRESENT_UI: 1 = the Present hook is installed and the UI chain is drawn from it, 0 = not attempted yet,
         // -1 = the install failed and the UI passes are back on the graphics lock.
-        out.push_back(kv("presentHookActive", RenderIntegration::g_present_hook_active.load(std::memory_order_relaxed) ? 1.0f : (RenderIntegration::g_present_hook_failed ? -1.0f : 0.0f)));
-        // KH_UI_POISON_RUN: consecutive readings of the UI flush's alpha stage (eight 64 x 8 boxes) in which every
-        // texel reads 255. At KH_UI_POISON_DEAD the mask is dead for that display and no UI pass draws - which is the
+        out.push_back(kv("presentHookActive", RenderIntegration::g_present.hook_active.load(std::memory_order_relaxed)
+            ? 1.0f : (RenderIntegration::g_present.hook_failed ? -1.0f : 0.0f)));
+        // UI_POISON_RUN: consecutive readings of the UI flush's alpha stage (eight 64 x 8 boxes) in which every
+        // texel reads 255. At UI_POISON_DEAD the mask is dead for that display and no UI pass draws - which is the
         // map screen, by decision.
         out.push_back(kv("uiPoisonRun", static_cast<float>(RenderIntegration::g_ui_poison_run)));   // A plain int, read torn-free on x64.
         out.push_back(kv("uiFlushes", static_cast<float>(s.ui_flushes)));
         out.push_back(kv("injections", static_cast<float>(s.composite_injections)));
-        out.push_back(kv("pipInjections", static_cast<float>(s.pip_injections)));   // KH_PIP.
+        out.push_back(kv("pipInjections", static_cast<float>(s.pip_injections)));   // PIP.
         out.push_back(kv("pipMeshes", static_cast<float>(s.pip_meshes)));
-        out.push_back(kv("pipFx", static_cast<float>(s.pip_fx)));                // KH_PIP_FX: localized passes drawn in PIP.
-        // KH_CLOTH / KH_CHAIN. clothSkipped / chainSkipped rising means the workers are not keeping up with the frame
+        out.push_back(kv("pipFx", static_cast<float>(s.pip_fx)));                // PIP_FX: localized passes drawn in PIP.
+        // CLOTH / CHAIN. clothSkipped / chainSkipped rising means the workers are not keeping up with the frame
         // rate: a skipped frame's time is owed to the next step, so the simulation keeps real time and updates less
         // often. A mesh that asks to simulate and cannot (no weights, no skeleton, a named bone missing) is named once
         // in the RPT.
@@ -7955,18 +7956,18 @@ static game_value get_render_stats_sqf() {
         out.push_back(kv("clothSkipped", static_cast<float>(s.cloth_skipped)));
         out.push_back(kv("chainInstances", static_cast<float>(s.chain_instances)));
         out.push_back(kv("chainSkipped", static_cast<float>(s.chain_skipped)));
-        out.push_back(kv("solverWorkers", static_cast<float>(RenderIntegration::g_cloth_thr_n.load(std::memory_order_relaxed))));   // KH_POOL_SPLIT: the cloth / chain pool's threads (0 = not started yet).
+        out.push_back(kv("solverWorkers", static_cast<float>(RenderIntegration::g_cloth_thr_n.load(std::memory_order_relaxed))));   // POOL_SPLIT: the cloth / chain pool's threads (0 = not started yet).
         out.push_back(kv("skinWorkers", static_cast<float>(RenderIntegration::g_skin_thr_n.load(std::memory_order_relaxed))));   // ...and the skin pool's.
         out.push_back(kv("physicsColliders", static_cast<float>(s.physics_colliders)));
         // KH_AFF_GAUGE: the live count (a gauge, game thread) - the stats copy is taken only by a scene flush,
         // which needs a mesh, so affectors with no mesh read 0 or a stale count.
         out.push_back(kv("physicsAffectors", static_cast<float>(
             RenderIntegration::g_affectors_n.load(std::memory_order_relaxed))));
-        // KH_SIM_LOD: the share of the objects' own solver work (substeps x iterations) the cloth and chain steps ran
+        // SIM_LOD: the share of the objects' own solver work (substeps x iterations) the cloth and chain steps ran
         // at last frame; 1 = every instance at its dials (or none stepped).
         out.push_back(kv("simLodShare", s.simlod_full > 0 ? static_cast<float>(static_cast<double>(s.simlod_work) / static_cast<double>(s.simlod_full)) : 1.0f));
-        // KH_ATTACH_DIAG: the Draw3D sampler's object reads. attachRefused counts reads that failed the checks - a
-        // parent's leaves its mesh holding for that frame, a helper's is carried from the previous frame (KH_GTS_HOLD),
+        // ATTACH_DIAG: the Draw3D sampler's object reads. attachRefused counts reads that failed the checks - a
+        // parent's leaves its mesh holding for that frame, a helper's is carried from the previous frame (GTS_HOLD),
         // a rotation object's leaves the rotation holding; attachRepaired counts reads taken only because a bone-driven
         // basis was re-orthonormalised; attachSkew is the largest row-length deviation from 1 any read had.
         out.push_back(kv("attachRepaired", static_cast<float>(RenderIntegration::g_attach_repaired.load(std::memory_order_relaxed))));
@@ -7977,12 +7978,12 @@ static game_value get_render_stats_sqf() {
             memcpy(&khas_skew, &khas_bits, sizeof(khas_skew));
             out.push_back(kv("attachSkew", khas_skew));
         }
-        // KH_SKEL: skeletal meshes drawn from a skinned buffer (a simulating one is the cloth's and is not counted);
+        // SKEL: skeletal meshes drawn from a skinned buffer (a simulating one is the cloth's and is not counted);
         // the bones of every bound mesh's skeleton, the cloth's included; of those, the bones whose own name matched a
         // memory point of the parent (0 with skinBones above 0 means no name matched); and the memory-point proxies
         // following the parents.
         out.push_back(kv("skinnedMeshes", static_cast<float>(s.skin_meshes)));
-        // KH_SKIN_POOL: of those, the ones whose pose lives in a shared skin pool chunk (instanceable; the rest draw
+        // SKIN_POOL: of those, the ones whose pose lives in a shared skin pool chunk (instanceable; the rest draw
         // one by one); and, since the stats were armed, the skeletal instances the colour buckets drew from a chunk -
         // each its own pose (one per instance per draw; a crossfading one twice).
         out.push_back(kv("skinPooled", static_cast<float>(s.skin_pooled)));
@@ -7998,7 +7999,7 @@ static game_value get_render_stats_sqf() {
         // They are not in skinCpu. With skinned characters in view it stays put in normal play; climbing every
         // frame means their poses are being skinned on the CPU.
         out.push_back(kv("skinPoolFull", static_cast<float>(s.skin_pool_full)));
-        // KH_SKIN_GPU: the last complete cycle's skins by path - the GPU's and the pool's (skinCpu 0 with skinGpu > 0 =
+        // SKIN_GPU: the last complete cycle's skins by path - the GPU's and the pool's (skinCpu 0 with skinGpu > 0 =
         // every drawn binding is skinned on the GPU; a binding skinned twice in a cycle counts twice); 1 = the
         // stream-output objects could not be made (reported once; the CPU path stands - asked again about two seconds
         // on when the device refused memory, else until a device reset or the session's end); and, while armed, the
@@ -8006,20 +8007,20 @@ static game_value get_render_stats_sqf() {
         // measured one - only a collider's job measures).
         out.push_back(kv("skinGpu", static_cast<float>(RenderIntegration::g_skin_so_n.load(std::memory_order_relaxed))));
         out.push_back(kv("skinCpu", static_cast<float>(RenderIntegration::g_skin_cpu_n.load(std::memory_order_relaxed))));
-        // KH_SKIN_CULL: the last complete cycle's culls - a step that left a binding unskinned because no pass
+        // SKIN_CULL: the last complete cycle's culls - a step that left a binding unskinned because no pass
         // could draw it (one passed over at several steps counts at each; one a PIP, park or flush skinned later
         // anyway counts here and, from the render thread, in skinGpu too).
         out.push_back(kv("skinCulled",
                          static_cast<float>(RenderIntegration::g_skin_cull_n.load(std::memory_order_relaxed))));
         out.push_back(kv("skinGpuOff", RenderIntegration::g_skin_so_failed.load(std::memory_order_relaxed) ? 1.0f : 0.0f));
-        // KH_SKIN_GPU_MOVE, since the stats were armed: skeletal bindings moved from CPU skinning to GPU skinning once
+        // SKIN_GPU_MOVE, since the stats were armed: skeletal bindings moved from CPU skinning to GPU skinning once
         // the device gave them a buffer, and the device's refusals of a GPU-skinning buffer, a mesh's rest stream or
         // the GPU-skinning objects' memory (each leaves a binding on the CPU path, asked again about two seconds on -
         // or, when even its CPU buffer is refused, without a buffer and asked every frame: a count climbing every frame
         // means memory is exhausted).
         out.push_back(kv("skinGpuMoves", static_cast<float>(s.skin_gpu_moves)));
         out.push_back(kv("skinGpuRefused", static_cast<float>(s.skin_gpu_refused)));
-        // KH_SHOW_INFRONT (gauge): the main view's first-person verdict - the cycle that last ended drew the game's
+        // SHOW_INFRONT (gauge): the main view's first-person verdict - the cycle that last ended drew the game's
         // view-model slice (1) or not (0). The detector runs only while a visible mesh with showInFront false (not
         // inFront) or a visible inFront mesh with showInFront true exists; 0 otherwise.
         out.push_back(kv("firstPerson",
@@ -8031,7 +8032,7 @@ static game_value get_render_stats_sqf() {
             out.push_back(kv("skinBoundWorst", khsg_r));
         }
         out.push_back(kv("injectedMeshes", static_cast<float>(s.composite_meshes)));
-        out.push_back(kv("occluders", static_cast<float>(s.vis_occluders)));        // KH_OCC_STATS.
+        out.push_back(kv("occluders", static_cast<float>(s.vis_occluders)));        // OCC_STATS.
         out.push_back(kv("occludedMeshes", static_cast<float>(s.vis_occluded)));
         out.push_back(kv("texturedDraws", static_cast<float>(s.textured_draws)));
         out.push_back(kv("fbxImports", static_cast<float>(s.fbx_imports)));
@@ -8039,38 +8040,40 @@ static game_value get_render_stats_sqf() {
         out.push_back(kv("texturesReleased", static_cast<float>(s.textures_released)));
         out.push_back(kv("shaderCacheHits", static_cast<float>(RenderIntegration::g_shader_cache_hits.load(std::memory_order_relaxed))));
         out.push_back(kv("shaderCacheMisses", static_cast<float>(RenderIntegration::g_shader_cache_misses.load(std::memory_order_relaxed))));
-        // KH_PROF: the ended cycle's frame-time breakdown. For every CPU zone, "<zone>Us" is the microseconds spent in
+        // PROF: the ended cycle's frame-time breakdown. For every CPU zone, "<zone>Us" is the microseconds spent in
         // it during the cycle and "<zone>N" its entry count (hookMap counts maps and unmaps; the w* zones are
         // worker-microseconds summed across the pool; the drv* zones' N is an estimate: their sampled calls x 16). For
         // every GPU zone, "<zone>Us" is the GPU interval of its last run in the cycle six clears back (timestamp
-        // queries read without a stall). Zones and nesting: KhProfZone's notes (rendering/profiling.hpp).
-        for (uint32_t khps_z = 0; khps_z < RenderIntegration::KHP_ZONE_N; ++khps_z) {
+        // queries read without a stall). Zones and nesting: ProfZone's notes (rendering/profiling.hpp).
+        for (uint32_t khps_z = 0; khps_z < RenderIntegration::PROF_ZONE_N; ++khps_z) {
             const std::string khps_n = RenderIntegration::g_prof_zone_name[khps_z];
-            out.push_back(kv((khps_n + "Us").c_str(), static_cast<float>(RenderIntegration::g_prof_us_pub[khps_z].load(std::memory_order_relaxed))));
-            out.push_back(kv((khps_n + "N").c_str(), static_cast<float>(RenderIntegration::g_prof_n_pub[khps_z].load(std::memory_order_relaxed))));
+            out.push_back(kv((khps_n + "Us").c_str(),
+                static_cast<float>(RenderIntegration::g_prof.us_pub[khps_z].load(std::memory_order_relaxed))));
+            out.push_back(kv((khps_n + "N").c_str(),
+                static_cast<float>(RenderIntegration::g_prof.n_pub[khps_z].load(std::memory_order_relaxed))));
         }
-        for (uint32_t khgs_z = 0; khgs_z < RenderIntegration::KHG_ZONE_N; ++khgs_z) {
+        for (uint32_t khgs_z = 0; khgs_z < RenderIntegration::GPU_ZONE_N; ++khgs_z) {
             out.push_back(kv((std::string(RenderIntegration::g_gpu_zone_name[khgs_z]) + "Us").c_str(), static_cast<float>(RenderIntegration::g_gpu_us_pub[khgs_z].load(std::memory_order_relaxed))));
         }
-        // KH_PROF_WINDOW: the whole armed frames folded since the arming / resetRenderStats (the frame the arming
+        // PROF_WINDOW: the whole armed frames folded since the arming / resetRenderStats (the frame the arming
         // splits is left out) and, per CPU zone, [name, mean us, worst frame's us, mean N] - profWindow [frames,
         // [...]]; per GPU zone [name, mean us, worst us, frames harvested] - gpuWindow. The one-frame "<zone>Us" above
         // swing with the 1-in-16 sampling; the means do not (a sampled zone's worst is still one frame's 16x
         // extrapolation: read it for the zones timed whole).
         {
             namespace RI = RenderIntegration;
-            const uint64_t khpw_c = RI::g_prof_win_cycles.load(std::memory_order_relaxed);
+            const uint64_t khpw_c = RI::g_prof.win_cycles.load(std::memory_order_relaxed);
             const double khpw_d = khpw_c > 0 ? static_cast<double>(khpw_c) : 1.0;
             // khpw_ld: any of the atomics below, read relaxed, as a double; khpw_f: a number for the script.
             const auto khpw_ld = [](const auto& a) { return static_cast<double>(a.load(std::memory_order_relaxed)); };
             const auto khpw_f = [](double v) { return game_value(static_cast<float>(v)); };
             auto_array<game_value> khpw_z;
-            for (uint32_t khpw_i = 0; khpw_i < RI::KHP_ZONE_N; ++khpw_i) {
+            for (uint32_t khpw_i = 0; khpw_i < RI::PROF_ZONE_N; ++khpw_i) {
                 auto_array<game_value> khpw_e;
                 khpw_e.push_back(game_value(RI::g_prof_zone_name[khpw_i]));
-                khpw_e.push_back(khpw_f(khpw_ld(RI::g_prof_win_us[khpw_i]) / khpw_d));
-                khpw_e.push_back(khpw_f(khpw_ld(RI::g_prof_win_max[khpw_i])));
-                khpw_e.push_back(khpw_f(khpw_ld(RI::g_prof_win_n[khpw_i]) / khpw_d));
+                khpw_e.push_back(khpw_f(khpw_ld(RI::g_prof.win_us[khpw_i]) / khpw_d));
+                khpw_e.push_back(khpw_f(khpw_ld(RI::g_prof.win_max[khpw_i])));
+                khpw_e.push_back(khpw_f(khpw_ld(RI::g_prof.win_n[khpw_i]) / khpw_d));
                 khpw_z.push_back(game_value(std::move(khpw_e)));
             }
             auto_array<game_value> khpw;
@@ -8078,7 +8081,7 @@ static game_value get_render_stats_sqf() {
             khpw.push_back(game_value(std::move(khpw_z)));
             out.push_back(kva("profWindow", std::move(khpw)));
             auto_array<game_value> khgw;
-            for (uint32_t khgw_i = 0; khgw_i < RI::KHG_ZONE_N; ++khgw_i) {
+            for (uint32_t khgw_i = 0; khgw_i < RI::GPU_ZONE_N; ++khgw_i) {
                 const uint64_t khgw_n = RI::g_gpu_win_n[khgw_i].load(std::memory_order_relaxed);
                 auto_array<game_value> khgw_e;
                 khgw_e.push_back(game_value(RI::g_gpu_zone_name[khgw_i]));
@@ -8089,10 +8092,10 @@ static game_value get_render_stats_sqf() {
                 khgw.push_back(game_value(std::move(khgw_e)));
             }
             out.push_back(kva("gpuWindow", std::move(khgw)));
-            // KH_PROF_FUNNEL: [name, last frame, mean per frame] - the constant-buffer capture (uploads, copies and
-            // bytes by kind, the light sampler's lists, matches and windows; the KH_PROF_FUNNEL note above KhFunnel).
+            // PROF_FUNNEL: [name, last frame, mean per frame] - the constant-buffer capture (uploads, copies and
+            // bytes by kind, the light sampler's lists, matches and windows; the PROF_FUNNEL note above Funnel).
             auto_array<game_value> khfw;
-            for (uint32_t khfw_i = 0; khfw_i < RI::KHF_N; ++khfw_i) {
+            for (uint32_t khfw_i = 0; khfw_i < RI::FUNNEL_N; ++khfw_i) {
                 auto_array<game_value> khfw_e;
                 khfw_e.push_back(game_value(RI::g_fun_name[khfw_i]));
                 khfw_e.push_back(khpw_f(khpw_ld(RI::g_fun_pub[khfw_i])));
@@ -8100,25 +8103,25 @@ static game_value get_render_stats_sqf() {
                 khfw.push_back(game_value(std::move(khfw_e)));
             }
             out.push_back(kva("funnel", std::move(khfw)));
-            // KH_PROF_UPLOAD: [step, last frame's bytes, mean per frame] - the bytes each funnel step made the capture
+            // PROF_UPLOAD: [step, last frame's bytes, mean per frame] - the bytes each funnel step made the capture
             // copy past its eager 384 (steps with none in the window left out).
             auto_array<game_value> khxw;
-            for (uint32_t khxw_i = 0; khxw_i < RI::KHP_ZONE_N; ++khxw_i) {
-                const uint64_t khxw_w = RI::g_prof_xb_win[khxw_i].load(std::memory_order_relaxed);
+            for (uint32_t khxw_i = 0; khxw_i < RI::PROF_ZONE_N; ++khxw_i) {
+                const uint64_t khxw_w = RI::g_prof.xb_win[khxw_i].load(std::memory_order_relaxed);
                 if (khxw_w == 0) continue;
                 auto_array<game_value> khxw_e;
                 khxw_e.push_back(game_value(RI::g_prof_zone_name[khxw_i]));
-                khxw_e.push_back(khpw_f(khpw_ld(RI::g_prof_xb_pub[khxw_i])));
+                khxw_e.push_back(khpw_f(khpw_ld(RI::g_prof.xb_pub[khxw_i])));
                 khxw_e.push_back(game_value(static_cast<float>(static_cast<double>(khxw_w) / khpw_d)));
                 khxw.push_back(game_value(std::move(khxw_e)));
             }
             out.push_back(kva("scanExtBytes", std::move(khxw)));
-            // KH_GPU_PASS: the harvested frame's effect passes in draw order, [chain (0 scene, 1 UI), effect id, user
+            // GPU_PASS: the harvested frame's effect passes in draw order, [chain (0 scene, 1 UI), effect id, user
             // shader 0/1, stages fused into it, us]; and per (chain, effect, user) since the arming [chain, effect id,
             // user, mean us, worst us, passes timed].
             auto_array<game_value> khgp;
             const uint32_t khgp_n = RI::g_gpu_pass_pub_n.load(std::memory_order_relaxed);
-            for (uint32_t khgp_i = 0; khgp_i < khgp_n && khgp_i < RI::KH_GPU_PASS_N; ++khgp_i) {
+            for (uint32_t khgp_i = 0; khgp_i < khgp_n && khgp_i < RI::GPU_PASS_N; ++khgp_i) {
                 const uint64_t khgp_v = RI::g_gpu_pass_pub[khgp_i].load(std::memory_order_relaxed);
                 const uint32_t khgp_k = static_cast<uint32_t>(khgp_v >> 32);
                 auto_array<game_value> khgp_e;
@@ -8131,7 +8134,7 @@ static game_value get_render_stats_sqf() {
             }
             out.push_back(kva("gpuPasses", std::move(khgp)));
             auto_array<game_value> khgq;
-            for (uint32_t khgq_w = 0; khgq_w < RI::KH_GPU_PASS_W; ++khgq_w) {
+            for (uint32_t khgq_w = 0; khgq_w < RI::GPU_PASS_W; ++khgq_w) {
                 const uint64_t khgq_n = RI::g_gpu_passw_n[khgq_w].load(std::memory_order_relaxed);
                 if (khgq_n == 0) continue;
                 auto_array<game_value> khgq_r;
@@ -8146,35 +8149,36 @@ static game_value get_render_stats_sqf() {
             out.push_back(kva("gpuPassWindow", std::move(khgq)));
             // KH_PROF_SUB: the TSC's measured rate (MHz) every TSC-timed zone was converted with (0 = not yet measured
             // in this process; resets keep it).
-            out.push_back(kv("profTscMhz", static_cast<float>(RI::g_prof_tsc_per_us.load(std::memory_order_relaxed))));
+            out.push_back(kv("profTscMhz", static_cast<float>(RI::g_prof.tsc_per_us.load(std::memory_order_relaxed))));
         }
         out.push_back(kv("lockRetries", static_cast<float>(s.lock_retries)));
         out.push_back(kv("lockFailedFrames", static_cast<float>(s.lock_failed_frames)));
-        // KH_PARK_COUNT: the fallbacks' game-thread parks - Draw3D's (kh_park_run) and the UI lane's lock path -
+        // PARK_COUNT: the fallbacks' game-thread parks - Draw3D's (park_run) and the UI lane's lock path -
         // counted whether or not the stats are armed. Expected: a few whenever work appears (a mission's start, the
         // first object after the draw list was empty) until the render-thread flush runs, then none; FSAA 1x parks
         // every frame.
         out.push_back(kv("parks", static_cast<float>(RenderIntegration::g_parks)));
         out.push_back(kv("uiParks", static_cast<float>(RenderIntegration::g_ui_parks)));
-        out.push_back(kv("hookActive", RenderIntegration::g_reorder_hook_active.load(std::memory_order_relaxed) ? 1.0f : 0.0f));
-        out.push_back(kv("hookFailed", RenderIntegration::g_reorder_hook_failed ? 1.0f : 0.0f));
+        out.push_back(kv("hookActive", RenderIntegration::g_reorder_hook.active.load(std::memory_order_relaxed) ? 1.0f
+            : 0.0f));
+        out.push_back(kv("hookFailed", RenderIntegration::g_reorder_hook.failed ? 1.0f : 0.0f));
         // Exceptions caught inside the context hooks this session (each dropped that hook's work for the
         // frame); an event count, kept whether or not the stats are armed. 0 in a healthy session.
         out.push_back(kv("hookExceptions",
                          static_cast<float>(RenderIntegration::g_hook_exceptions.load(std::memory_order_relaxed))));
-        // KH_FX_PAIR_HOLD: depth-pair verdicts that held the adopted pair against the frame's (the effect
-        // chain's and the UI lane's depth readers, kh_fx_depth_pair_guard), since the stats were armed. A
+        // FX_PAIR_HOLD: depth-pair verdicts that held the adopted pair against the frame's (the effect
+        // chain's and the UI lane's depth readers, fx_depth_pair_guard), since the stats were armed. A
         // count stepping on the frame of a one-frame depth glitch (fog or light through a near surface)
         // names the foreign latch the guard holds off. 0 in a healthy session.
         out.push_back(kv("fxPairHolds", static_cast<float>(s.fx_pair_holds)));
-        // KH_WSEE_GPUT - "wseeGpu": the see-through record's GPU time in one frame of 16 while armed (KhWseeGput:
+        // WSEE_GPUT - "wseeGpu": the see-through record's GPU time in one frame of 16 while armed (WseeGput:
         // timestamps around each re-issue and pass, read back later without a wait; nothing drawn or decided reads
         // them). [frames read, frames dropped (not read within 14 frames, or disjoint), blocks left untimed (past 4096
         // stamps a frame, or nested), [[kind, ms in the last frame read, its intervals, mean ms per frame read, mean
         // intervals], ...]] - kinds: opqPost (the late opaques' replays after the frame's first fence-type layer),
         // fence (the fence-type layers'), particle (the particle-type re-issues' whole), pT / pNW / pTp / pTp2 / pTf
         // (their passes), pOther (a catch-all, 0 today), tail (our own translucent parts'), capture, b2, chainE (the
-        // edge mask's draw), d3Resolve, pOne (KH_PSB: the one pass; its block counts as particle). Each interval is
+        // edge mask's draw), d3Resolve, pOne (PSB: the one pass; its block counts as particle). Each interval is
         // elapsed GPU time between two timestamps (the pipeline's drain and refill included): an upper bound of each
         // kind's cost.
         {
@@ -8186,7 +8190,7 @@ static game_value get_render_stats_sqf() {
             khwg.push_back(game_value(static_cast<float>(RI::g_wsee_gput_drop.load(std::memory_order_relaxed))));
             khwg.push_back(game_value(static_cast<float>(RI::g_wsee_gput_untimed.load(std::memory_order_relaxed))));
             auto_array<game_value> khwg_k;
-            for (uint32_t khwg_i = 0; khwg_i < RI::KHWG_N; ++khwg_i) {
+            for (uint32_t khwg_i = 0; khwg_i < RI::WSEE_GPU_N; ++khwg_i) {
                 auto_array<game_value> khwg_e;
                 khwg_e.push_back(game_value(RI::g_wsee_gput_name[khwg_i]));
                 const auto khwg_ld = [](const std::atomic<uint64_t>& a) {
@@ -8230,21 +8234,23 @@ static game_value get_render_stats_sqf() {
         }
         // The helper pool, current.
         out.push_back(kv("pxyPool", static_cast<float>(RenderIntegration::g_pxy_pool_n.load(std::memory_order_relaxed))));
-        out.push_back(kv("dlIdle", static_cast<float>(RenderIntegration::g_dl_idle.load(std::memory_order_relaxed))));   // KH_DL_IDLE: harvests in a row with an empty pool (must read 0 with lights present).
+        // DL_IDLE: harvests in a row with an empty pool (must read 0 with lights present).
+        out.push_back(kv("dlIdle",
+            static_cast<float>(RenderIntegration::g_dlcap.idle.load(std::memory_order_relaxed))));
         // The dynamic-light state.
         out.push_back(kv("dlValid", khd_valid ? 1.0f : 0.0f));
         out.push_back(kv("dlPointN", static_cast<float>(khd_point_n)));
         out.push_back(kv("dlSpotN", static_cast<float>(khd_spot_n)));
         out.push_back(kv("dlPoolN", static_cast<float>(khd_pool_n)));
         out.push_back(kv("dlViewValid", khd_view_valid ? 1.0f : 0.0f));
-        // KH_DL_DIAG (counted while collection is armed, zeroed by resetRenderStats and the session reset): pool
+        // DL_DIAG (counted while collection is armed, zeroed by resetRenderStats and the session reset): pool
         // harvests by the injection and by the flush's fallback (a cycle no injection harvested); harvests known
         // incomplete (the TTL sweep ran); author windows refused at the span cap; lit mesh fills that found the pool
         // stale - those draws took no dynamic light, so this should stay 0; light-ring appends that
-        // failed; and the most lights one draw received. KH_DL_DIAG (CN-4) (RenderStats' note): pool lights one
+        // failed; and the most lights one draw received. DL_DIAG (CN-4) (RenderStats' note): pool lights one
         // harvest alone carried (dlBlinks); the reference's brightest candidate's (a placed window or an upload
         // re-sighted through its buffer's origin) moves [brighter, dimmer] (dlRefJumps) and one-harvest excursions
-        // [brighter, dimmer] (dlRefSpikes), before the reference's median (KH_DL_REF_MEDIAN); new entries repeating an
+        // [brighter, dimmer] (dlRefSpikes), before the reference's median (DL_REF_MEDIAN); new entries repeating an
         // older one a whole number of land-grid cells away (dlCopies); and dynamicLightFog lights whose light map is
         // not published (dlfUnshadowed, per pass and frame).
         out.push_back(kv("dlHarvestsInject", static_cast<float>(s.dl_harvests_inject)));
@@ -8254,8 +8260,8 @@ static game_value get_render_stats_sqf() {
         out.push_back(kv("dlStaleFills", static_cast<float>(s.dl_stale_fills)));
         out.push_back(kv("dlRingFails", static_cast<float>(s.dl_ring_fails)));
         out.push_back(kv("dlMeshLightsMax", static_cast<float>(s.dl_mesh_lights_max)));
-        out.push_back(kv("dlBlinks", static_cast<float>(s.dl_blinks)));   // KH_DL_DIAG (CN-4).
-        {   // KH_DL_PRES_MEMO: [light lists matched, of those replayed from the memo].
+        out.push_back(kv("dlBlinks", static_cast<float>(s.dl_blinks)));   // DL_DIAG (CN-4).
+        {   // DL_PRES_MEMO: [light lists matched, of those replayed from the memo].
             auto_array<game_value> khpm;
             khpm.push_back(game_value(static_cast<float>(s.dl_pres_calls)));
             khpm.push_back(game_value(static_cast<float>(s.dl_pres_memo_hits)));
@@ -8310,21 +8316,21 @@ static game_value get_render_stats_sqf() {
             out.push_back(kva("dlRef", std::move(ref)));
             out.push_back(kva("dlsSlots", std::move(slots)));
         }
-        {   // KH_VOL_REPLAY: [merged frames, fallback frames, refused passes, ring wraps captured, scissored frames,
-            // full-screen frames, mirror merged, mirror fallback, mirror idle (KH_MIR_REPLAY), uncovered passes
-            // (KH_REPLAY_SCISSOR), constant snapshots copied on the GPU, from the CPU (KH_REPLAY_CPUCB), write splits
-            // (KH_RP_WRITE_SPLIT), passes refused at the write split cap (KH_RP_SPLIT_CAP)].
-            const auto& c = RenderIntegration::g_rp_c;
+        {   // VOL_REPLAY: [merged frames, fallback frames, refused passes, ring wraps captured, scissored frames,
+            // full-screen frames, mirror merged, mirror fallback, mirror idle (MIR_REPLAY), uncovered passes
+            // (REPLAY_SCISSOR), constant snapshots copied on the GPU, from the CPU (REPLAY_CPUCB), write splits
+            // (RP_WRITE_SPLIT), passes refused at the write split cap (RP_SPLIT_CAP)].
+            const auto& c = RenderIntegration::g_rp_rec.c;
             auto_array<game_value> a;
             for (uint64_t v : { c.merged, c.fallback, c.refused, c.splits, c.scissored, c.fullscreen, c.mir_merged,
                                 c.mir_fallback, c.mir_idle, c.uncovered, c.cb_gpu, c.cb_cpu, c.wsplits, c.capped })
                 a.push_back(game_value(static_cast<float>(v)));
             out.push_back(kva("stencilReplay", std::move(a)));
         }
-        {   // KH_GTS_IDENTITY: relearnings of the sample-to-cycle offset that changed it.
+        {   // GTS_IDENTITY: relearnings of the sample-to-cycle offset that changed it.
             out.push_back(kv("identityBreaks", static_cast<float>(RenderIntegration::g_gid_breaks)));
         }
-        {   // KH_RT_PAINT_READ: [paints that tried a read, bindings read, torn, refused, matched, stale, other,
+        {   // RT_PAINT_READ: [paints that tried a read, bindings read, torn, refused, matched, stale, other,
             // final steps that read for the mesh].
             const auto& c = RenderIntegration::g_rtp_c;
             auto_array<game_value> a;
@@ -8345,7 +8351,7 @@ static game_value get_render_stats_sqf() {
 // Localized passes always sample the depth buffer. addLocalPostFX [[x,y,zASL], radius, falloff, effect, params?,
 // [r,g,b,a]?, shape?, blend?, duration?, inverse?]. Optional slots skip on nil ("" for blend).
 static game_value add_local_postfx_sqf(game_value_parameter args) {
-    if (kh_gfx_off()) return game_value("");   // KH_PLAYER_ONLY.
+    if (kh_gfx_off()) return game_value("");   // PLAYER_ONLY.
     try {
         auto& arr = args.to_array();
         std::string err;
@@ -8419,7 +8425,7 @@ static game_value add_local_postfx_sqf(game_value_parameter args) {
 // custom display. Cheap no-op when no UI-affecting passes exist. Returns bool (flush_ui_frame): true when a UI pass
 // exists and either the Present path draws the passes (nothing is drawn here) or the lock path ran the UI flush now.
 static game_value flush_ui_render_sqf() {
-    if (kh_gfx_off()) return game_value(false);   // KH_PLAYER_ONLY.
+    if (kh_gfx_off()) return game_value(false);   // PLAYER_ONLY.
 
     try {
         RenderIntegration::ensure_ui_driver();   // Explicit UI-render demand enables the driver.

@@ -1,10 +1,10 @@
 #pragma once
 
 // The feature half (rendering_integration_features.hpp): asset discovery and file reads (RenderAssetDiscovery,
-// kh_asset_read). Never include it on its own.
+// asset_read). Never include it on its own.
 namespace RenderIntegration {
 
-inline bool kh_ends_with_ci(const std::string& s, const char* suffix) {
+inline bool ends_with_ci(const std::string& s, const char* suffix) {
     const size_t sl = strlen(suffix);
     if (s.size() < sl) return false;
 
@@ -32,14 +32,14 @@ public:
         // PBO_PATH (search_mod_folders.hpp): one leading separator names a file inside the loaded PBOs by its engine
         // path - no rendering folder, no file-name fallback. The resolved form is ONE backslash before the normalised
         // engine path, which no path the folder search below returns begins with (a drive, or "\\" on a network
-        // share): kh_asset_read reads it from the PBO by that mark.
+        // share): asset_read reads it from the PBO by that mark.
         if (ModFolderSearcher::is_pbo_path(request)) {
-            const std::string khpb_key = ModFolderSearcher::normalise_pbo_path(request);
-            if (khpb_key.empty() || !ModFolderSearcher::pbo_file_exists(khpb_key)) return "";
-            const std::string khpb_res = "\\" + khpb_key;
+            const std::string key = ModFolderSearcher::normalise_pbo_path(request);
+            if (key.empty() || !ModFolderSearcher::pbo_file_exists(key)) return "";
+            const std::string res = "\\" + key;
             std::lock_guard<std::mutex> g(cache_mx());
-            cache()[request] = khpb_res;
-            return khpb_res;
+            cache()[request] = res;
+            return res;
         }
         std::vector<std::filesystem::path> search_paths;
 
@@ -98,7 +98,7 @@ public:
         return "(searched Documents\\Arma 3\\kh_framework\\rendering, then every mod's 'rendering' folder)";
     }
 
-    // KH_SESSION_RESET: a file added or removed between sessions resolves anew.
+    // SESSION_RESET: a file added or removed between sessions resolves anew.
     static void clear_cache() {
         std::lock_guard<std::mutex> g(cache_mx());
         cache().clear();
@@ -115,41 +115,41 @@ private:
 // PBO_PATH: a resolved asset's bytes - find_asset_file's PBO form (one leading backslash) from the loaded PBOs
 // (ModFolderSearcher::read_pbo_file_shared, whose cache keeps it), anything else from the disk. Every read of a
 // resolved asset goes through here: the .fbx import, the texture loads (sync, the loader worker, the .dds and .paa
-// routes) and kh_user_shader_source (.hlsl and .cube). False when it cannot be read, is empty, or holds khar_max
-// bytes or more; khar_err says which ("cannot open file", "empty file", "file too large", "read failed", or the PBO
+// routes) and user_shader_source (.hlsl and .cube). False when it cannot be read, is empty, or holds ar_max
+// bytes or more; err says which ("cannot open file", "empty file", "file too large", "read failed", or the PBO
 // reader's reason - "read failed" when it gave none).
-inline bool kh_asset_read(const std::string& khar_path, std::vector<uint8_t>& khar_out, uint64_t khar_max,
-                          std::string* khar_err = nullptr) {
-    khar_out.clear();
-    auto khar_fail = [&](const std::string& khar_why) {
-        khar_out.clear();
-        if (khar_err) *khar_err = khar_why.empty() ? std::string("read failed") : khar_why;   // Never no reason.
+inline bool asset_read(const std::string& path, std::vector<uint8_t>& out, uint64_t ar_max,
+                       std::string* err = nullptr) {
+    out.clear();
+    auto fail = [&](const std::string& why) {
+        out.clear();
+        if (err) *err = why.empty() ? std::string("read failed") : why;   // Never no reason.
         return false;
     };
 
     try {
-        if (ModFolderSearcher::is_pbo_path(khar_path)) {
-            std::string khar_e;
-            const std::shared_ptr<const std::vector<uint8_t>> khar_d =
-                ModFolderSearcher::read_pbo_file_shared(khar_path, &khar_e);
-            if (!khar_d) return khar_fail(khar_e);
-            if (khar_d->empty()) return khar_fail("empty file");
-            if (khar_d->size() >= khar_max) return khar_fail("file too large");
-            khar_out.assign(khar_d->begin(), khar_d->end());
+        if (ModFolderSearcher::is_pbo_path(path)) {
+            std::string e;
+            const std::shared_ptr<const std::vector<uint8_t>> d =
+                ModFolderSearcher::read_pbo_file_shared(path, &e);
+            if (!d) return fail(e);
+            if (d->empty()) return fail("empty file");
+            if (d->size() >= ar_max) return fail("file too large");
+            out.assign(d->begin(), d->end());
             return true;
         }
 
-        std::ifstream khar_f(khar_path, std::ios::binary | std::ios::ate);
-        if (!khar_f) return khar_fail("cannot open file");
-        const std::streamsize khar_n = khar_f.tellg();
-        if (khar_n <= 0) return khar_fail("empty file");
-        if (static_cast<uint64_t>(khar_n) >= khar_max) return khar_fail("file too large");
-        khar_out.resize(static_cast<size_t>(khar_n));
-        khar_f.seekg(0);
-        if (!khar_f.read(reinterpret_cast<char*>(khar_out.data()), khar_n)) return khar_fail("read failed");
+        std::ifstream f(path, std::ios::binary | std::ios::ate);
+        if (!f) return fail("cannot open file");
+        const std::streamsize n = f.tellg();
+        if (n <= 0) return fail("empty file");
+        if (static_cast<uint64_t>(n) >= ar_max) return fail("file too large");
+        out.resize(static_cast<size_t>(n));
+        f.seekg(0);
+        if (!f.read(reinterpret_cast<char*>(out.data()), n)) return fail("read failed");
         return true;
     } catch (...) {
-        return khar_fail("read failed");
+        return fail("read failed");
     }
 }
 }

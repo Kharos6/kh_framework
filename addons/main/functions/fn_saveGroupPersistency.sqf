@@ -9,7 +9,7 @@ private _currentEntries = _persistencyNamespace readKhData ["groupPersistency", 
 
 {
 	_currentEntries set [[side _x, groupId _x] joinString "_", [_x] call KH_fnc_getGroupAttributes];
-} forEach _groups;
+} forEach (_groups select {!(isNull _x);});
 
 _persistencyNamespace writeKhData ["groupPersistency", _currentEntries];
 _currentEntries;

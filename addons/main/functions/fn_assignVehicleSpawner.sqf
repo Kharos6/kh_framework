@@ -30,5 +30,5 @@ execute [
     "BIS_fnc_holdActionAdd", 
     "PLAYERS",
     true,
-    ["JIP", _x, false, ""]
+    ["JIP", _object, false, ""]
 ];

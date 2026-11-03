@@ -97,7 +97,7 @@ params [["_unit", objNull, [objNull]]];
 			};
 		},
 		[(collisionDisabledWith _unit) select 0, true] call KH_fnc_getEntityVariableName,
-		(getPhysicsCollisionFlag _unit) select 0,
+		(getPhysicsCollisionFlag _unit) param [0, false],
 		(_unit targetsQuery [objNull, sideUnknown, "", [], 0]) apply {
 			_x params ["_accuracy", "_target", "_targetSide", "_targetType", "_targetPosition", "_targetAge"];
 			[_accuracy, [_target, true] call KH_fnc_getEntityVariableName, _targetSide, _targetType, _targetPosition, _targetAge];

@@ -2036,10 +2036,15 @@ if hasInterface then {
 				[],
 				{
 					params ["_unit", "_corpse"];
-					_corpse setVariable ["KH_var_playerUnit", _unit, true];					
+					KH_var_playerUnit = _unit;
+					_corpse setVariable ["KH_var_playerUnit", _unit, true];
+
+					{
+						[_corpse] call _x;
+					} forEach KH_var_playerRespawnStack;
+
 					[_corpse] call KH_fnc_playerRespawnInit;
 					triggerCbaEvent ["KH_eve_playerRespawned", [clientOwner, getPlayerUID _unit, getPlayerID _unit, _unit, _corpse], "GLOBAL", false];
-					nil;
 				}
 			] call KH_fnc_addEventHandler;
 
@@ -2053,6 +2058,11 @@ if hasInterface then {
 				[],
 				{
 					params ["_unit", "_killer", "_instigator"];
+
+					{
+						[_killer, _instigator] call _x;
+					} forEach KH_var_playerKilledStack;
+
 					[_killer, _instigator] call KH_fnc_playerKilledInit;
 					triggerCbaEvent ["KH_eve_playerKilled", [clientOwner, getPlayerUID _unit, getPlayerID _unit, _unit, _killer, _instigator], "GLOBAL", false];
 				}

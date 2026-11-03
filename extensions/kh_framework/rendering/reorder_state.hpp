@@ -1,6 +1,6 @@
 #pragma once
 
-// The shared head (rendering_integration.hpp): the reorder hook's state (ReorderState g_ro, KhInjectionFlagScope,
+// The shared head (rendering_integration.hpp): the reorder hook's state (ReorderState g_ro, InjectionFlagScope,
 // g_orig_draw). Never include it on its own.
 namespace RenderIntegration {
 typedef void (STDMETHODCALLTYPE* FnDraw)(ID3D11DeviceContext*, UINT, UINT);
@@ -35,7 +35,7 @@ struct ReorderState {
     float world_m22 = 0.0f;
     float world_m32 = 0.0f;
     bool  world_pair_valid = false;
-    uint64_t frame_cycles = 0;   // Main depth-clear cycles since the session reset (KH_CAST_FRAME64: 64-bit - at 16
+    uint64_t frame_cycles = 0;   // Main depth-clear cycles since the session reset (CAST_FRAME64: 64-bit - at 16
                                  // bits it wrapped every ~4.5 min at 240 fps, and the cast latch compares it with !=).
     uint32_t opaques_since_inject = 0;
     // Set when an anomalous (slot-silent) cycle is seen at an injection attempt; consumed by the flush, which then
@@ -44,24 +44,24 @@ struct ReorderState {
     bool anomaly_seen = false;
 };
 static ReorderState g_ro;
-// Restores g_ro.in_injection on every exit, exception included. Its users: the parked flush (kh_park_run - its
-// save/restore pairs are skipped by a throw; game thread, inside the park's lock scope), kh_skin_so_batch and
-// kh_uvs_step (the render thread's steps - and, for kh_uvs_step, the flush's thread at kh_uvs_upload's end - which
+// Restores g_ro.in_injection on every exit, exception included. Its users: the parked flush (park_run - its
+// save/restore pairs are skipped by a throw; game thread, inside the park's lock scope), skin_so_batch and
+// uvs_step (the render thread's steps - and, for uvs_step, the flush's thread at uvs_upload's end - which
 // declare it ahead of their StateBackup so that it unwinds after the restore), flush_ui_frame's lock path
-// (KH_PARK_INJ, as the parked flush), the seam footprint's step (kh_volume_seam_inject) and the volume replay's
-// (kh_rp_replay, KH_RP_PRESYNC), the mirror patch's fast-path upload (kh_vmir_patch_b2, KH_VMIR_FAST_OWN), the
-// mirror re-issue's two OM binds (kh_vmir_begin / kh_vmir_end, KH_VMIR_OM_OWN), KH_VM_SEE's snapshot
-// (kh_vmsee_snapshot, ahead of its StateBackup) and transmittance re-issue's OM binds (kh_vmsee_t_begin /
-// kh_vmsee_t_end), KH_STEP_OWN_FLAG's steps: the cast fire's and its two repicks (mask_cast_engine) and the
-// skin-cull catch-up (kh_skin_cull_catchup), and KH_WSEE's capture, B2 moment and D3 resolve (kh_wsee_snapshot,
-// kh_wsee_b2_take, kh_wsee_d3m_resolve, ahead of their saves), its re-issues' binds (kh_wsee_re_set,
-// kh_wsee_re_restore) and the one pass (kh_psb_post), and the in-front slice's injection (kh_infront_inject,
-// KH_EA_VM_FLAG: its deferred tail runs on either thread).
-struct KhInjectionFlagScope {
-    bool khif_prev;
-    KhInjectionFlagScope() : khif_prev(g_ro.in_injection) {}
-    ~KhInjectionFlagScope() { g_ro.in_injection = khif_prev; }
-    KhInjectionFlagScope(const KhInjectionFlagScope&) = delete;
-    KhInjectionFlagScope& operator=(const KhInjectionFlagScope&) = delete;
+// (PARK_INJ, as the parked flush), the seam footprint's step (volume_seam_inject) and the volume replay's
+// (rp_replay, RP_PRESYNC), the mirror patch's fast-path upload (vmir_patch_b2, VMIR_FAST_OWN), the
+// mirror re-issue's two OM binds (vmir_begin / vmir_end, VMIR_OM_OWN), VM_SEE's snapshot
+// (vmsee_snapshot, ahead of its StateBackup) and transmittance re-issue's OM binds (vmsee_t_begin /
+// vmsee_t_end), STEP_OWN_FLAG's steps: the cast fire's and its two repicks (mask_cast_engine) and the
+// skin-cull catch-up (skin_cull_catchup), and WSEE's capture, B2 moment and D3 resolve (wsee_snapshot,
+// wsee_b2_take, wsee_d3m_resolve, ahead of their saves), its re-issues' binds (wsee_re_set,
+// wsee_re_restore) and the one pass (psb_post), and the in-front slice's injection (infront_inject,
+// EA_VM_FLAG: its deferred tail runs on either thread).
+struct InjectionFlagScope {
+    bool prev;
+    InjectionFlagScope() : prev(g_ro.in_injection) {}
+    ~InjectionFlagScope() { g_ro.in_injection = prev; }
+    InjectionFlagScope(const InjectionFlagScope&) = delete;
+    InjectionFlagScope& operator=(const InjectionFlagScope&) = delete;
 };
 }

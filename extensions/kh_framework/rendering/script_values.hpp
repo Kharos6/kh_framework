@@ -7,14 +7,14 @@ namespace RenderIntegration {
 // A script number as an int: false when it is not finite or lies outside int's range (either conversion is
 // undefined behaviour); INT_MIN itself is refused too (the bound is open), so the caller refuses it as it refuses any
 // other out-of-range value. The fraction truncates.
-inline bool kh_gv_int(const game_value& khgi_v, int& khgi_out) {
-    const float khgi_f = static_cast<float>(khgi_v);
-    if (!(khgi_f > -2147483648.0f && khgi_f < 2147483648.0f)) return false;   // NaN fails both.
-    khgi_out = static_cast<int>(khgi_f);
+inline bool gv_int(const game_value& v, int& out) {
+    const float f = static_cast<float>(v);
+    if (!(f > -2147483648.0f && f < 2147483648.0f)) return false;   // NaN fails both.
+    out = static_cast<int>(f);
     return true;
 }
 
-inline void kh_sanitize_color(float c[4]) {
+inline void sanitize_color(float c[4]) {
     for (int i = 0; i < 4; ++i) if (!(c[i] == c[i])) c[i] = 1.0f;
     for (int i = 0; i < 3; ++i) {
         if (c[i] < 0.0f) c[i] = 0.0f;
@@ -27,7 +27,7 @@ inline void kh_sanitize_color(float c[4]) {
 inline int blend_id_from_gv(const game_value& gv) {
     if (gv.type_enum() == game_data_type::SCALAR) {
         int id = -1;
-        if (!kh_gv_int(gv, id)) return -1;
+        if (!gv_int(gv, id)) return -1;
         return (id >= 0 && id <= 5) ? id : -1;
     }
 
@@ -50,7 +50,7 @@ inline int mesh_id_from_gv(const game_value& gv) {
 
     if (gv.type_enum() == game_data_type::SCALAR) {
         int id = -1;
-        return kh_gv_int(gv, id) && kh_mesh_alive(id) ? id : -1;
+        return gv_int(gv, id) && mesh_alive(id) ? id : -1;
     }
 
     if (gv.type_enum() != game_data_type::STRING) return -1;
@@ -58,7 +58,7 @@ inline int mesh_id_from_gv(const game_value& gv) {
     s = kh_lower_copy(std::move(s));
 
     for (int i = 0; i < n; ++i) {
-        if (!kh_mesh_alive(i)) continue;
+        if (!mesh_alive(i)) continue;
         const MeshDef& md = mesh_def(i);
         if (s == md.name || (!md.alias.empty() && s == md.alias)) return i;
     }
@@ -71,7 +71,7 @@ inline int mesh_id_from_gv(const game_value& gv) {
 inline int shape_id_from_gv(const game_value& gv) {
     if (gv.type_enum() == game_data_type::SCALAR) {
         int id = -1;
-        if (!kh_gv_int(gv, id)) return -1;
+        if (!gv_int(gv, id)) return -1;
         return (id == 0 || id == 1) ? id : -1;
     }
 
@@ -84,7 +84,7 @@ inline int shape_id_from_gv(const game_value& gv) {
 }
 
 // Reads a scalar (uniform) or [x, y, z] array into out[3]. Returns false on a
-// malformed value (KH_ARG_EXACT: an array of any other length included).
+// malformed value (ARG_EXACT: an array of any other length included).
 inline bool read_vec3_or_uniform(const game_value& gv, float out[3]) {
     if (gv.type_enum() == game_data_type::SCALAR) {
         const float v = static_cast<float>(gv);
@@ -94,7 +94,7 @@ inline bool read_vec3_or_uniform(const game_value& gv, float out[3]) {
 
     if (gv.type_enum() == game_data_type::ARRAY) {
         auto& a = gv.to_array();
-        if (a.size() != 3 ||   // KH_ARG_EXACT: contract 2 (sqf) - a fourth element is an error, not ignored.
+        if (a.size() != 3 ||   // ARG_EXACT: contract 2 (sqf) - a fourth element is an error, not ignored.
             a[0].type_enum() != game_data_type::SCALAR ||
             a[1].type_enum() != game_data_type::SCALAR ||
             a[2].type_enum() != game_data_type::SCALAR) return false;
@@ -110,11 +110,11 @@ inline bool read_vec3_or_uniform(const game_value& gv, float out[3]) {
 inline int effect_id_from_gv(const game_value& gv) {
     if (gv.type_enum() == game_data_type::SCALAR) {
         int id = -1;
-        if (!kh_gv_int(gv, id)) return -1;
+        if (!gv_int(gv, id)) return -1;
         // 18..20 = clarity/deband/rainlens; 21 = crt; 22 = ssgi; 23 =
-        // fogscatter; 31 = dynamiclightfog (KH_DLF). 24 - 30 are internal side ids (EffectId's note: SSGI's 24 - 26,
-        // 27 retired, KH_FX_SIDE's 28 - 30).
-        return (id >= 0 && id <= KH_MAX_EFFECT && !(id >= 24 && id <= 30)) ? id : -1;
+        // fogscatter; 31 = dynamiclightfog (DLF). 24 - 30 are internal side ids (EffectId's note: SSGI's 24 - 26,
+        // 27 retired, FX_SIDE's 28 - 30).
+        return (id >= 0 && id <= MAX_EFFECT && !(id >= 24 && id <= 30)) ? id : -1;
     }
 
     if (gv.type_enum() != game_data_type::STRING) return -1;
@@ -144,29 +144,29 @@ inline int effect_id_from_gv(const game_value& gv) {
     if (s == "crt")        return 21;
     if (s == "ssgi")       return 22;
     if (s == "fogscatter") return 23;
-    if (s == "dynamiclightfog") return 31;   // KH_DLF.
+    if (s == "dynamiclightfog") return 31;   // DLF.
     return -1;
 }
 
-inline int kh_effect_from_gv(const game_value& gv, std::string& out_hlsl, std::string& err) {
+inline int effect_from_gv(const game_value& gv, std::string& out_hlsl, std::string& err) {
     out_hlsl.clear();
     err.clear();
 
     if (gv.type_enum() == game_data_type::STRING) {
-        const std::string khfx_s = static_cast<std::string>(gv);
-        const bool khfx_is_hlsl = kh_ends_with_ci(khfx_s, ".hlsl");
-        const bool khfx_is_cube = !khfx_is_hlsl && kh_ends_with_ci(khfx_s, ".cube");
+        const std::string s = static_cast<std::string>(gv);
+        const bool is_hlsl = ends_with_ci(s, ".hlsl");
+        const bool is_cube = !is_hlsl && ends_with_ci(s, ".cube");
 
-        if (khfx_is_hlsl || khfx_is_cube) {
-            const std::string khfx_resolved = RenderAssetDiscovery::find_asset_file(khfx_s);
+        if (is_hlsl || is_cube) {
+            const std::string resolved = RenderAssetDiscovery::find_asset_file(s);
 
-            if (khfx_resolved.empty()) {
-                err = "'" + khfx_s + "' not found " + RenderAssetDiscovery::searched(khfx_s);
+            if (resolved.empty()) {
+                err = "'" + s + "' not found " + RenderAssetDiscovery::searched(s);
                 return -1;
             }
 
-            out_hlsl = khfx_resolved;
-            return khfx_is_cube ? KH_EFFECT_LUT : KH_EFFECT_CUSTOM;
+            out_hlsl = resolved;
+            return is_cube ? EFFECT_LUT : EFFECT_CUSTOM;
         }
     }
 
@@ -182,7 +182,7 @@ inline bool parse_duration_gv(const game_value& gv, RenderObject& obj) {
         hd = static_cast<float>(gv);
     } else if (gv.type_enum() == game_data_type::ARRAY) {
         auto& a = gv.to_array();
-        if (a.size() > 3) return false;   // KH_ARG_EXACT: contract 2 (sqf) - a fourth element is an error.
+        if (a.size() > 3) return false;   // ARG_EXACT: contract 2 (sqf) - a fourth element is an error.
         if ((a.size() > 0 && a[0].type_enum() != game_data_type::SCALAR) ||
             (a.size() > 1 && a[1].type_enum() != game_data_type::SCALAR) ||
             (a.size() > 2 && a[2].type_enum() != game_data_type::SCALAR)) return false;
@@ -193,7 +193,7 @@ inline bool parse_duration_gv(const game_value& gv, RenderObject& obj) {
         return false;
     }
 
-    // KH_DURATION_NAN: a part that is not a number is refused - the clamps below keep a NaN, and the sum's test
+    // DURATION_NAN: a part that is not a number is refused - the clamps below keep a NaN, and the sum's test
     // would then make the object permanent without a word. An infinite part is accepted.
     if (fi != fi || hd != hd || fo != fo) return false;
     fi = fi < 0.0f ? 0.0f : fi;

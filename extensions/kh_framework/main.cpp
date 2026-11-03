@@ -95,7 +95,7 @@ void intercept::pre_start() {
     (void)UIFramework::instance();
     (void)NetworkFramework::instance();
     (void)TeamspeakFramework::instance();
-    RenderIntegration::kh_psv_hook_ensure();
+    RenderIntegration::psv_hook_ensure();
     sqf::call_extension("kh_rv_extension", "ready");
 
     if (RVExtBridge::initialize()) {

@@ -28,7 +28,7 @@ private _currentUndefinedEntries = [];
 			};
 		};
 	};
-} forEach (_objects select {(_x getVariable ["KH_var_allowPersistency", true]) && (([_x] call KH_fnc_getEntityNetworkType) isEqualTo "GLOBAL");});
+} forEach (_objects select {(_x getVariable ["KH_var_allowPersistency", true]) && (([_x] call KH_fnc_getEntityNetworkType) isEqualTo "GLOBAL") && !(isNull _x);});
 
 _persistencyNamespace writeKhData ["objectPersistency", _currentEntries];
 _persistencyNamespace writeKhData [["undefinedObjectPersistency", toLowerANSI worldName] joinString "_", _currentUndefinedEntries];

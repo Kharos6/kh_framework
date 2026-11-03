@@ -25,20 +25,20 @@ inline bool locator_sky_anchor(const float* f, uint32_t nf) {
 
     return true;
 }
-// KH_RING_BEST_AGE: a best the injection may still take - admitted within KH_RING_BEST_MAX_CYCLES. The hunt's
+// RING_BEST_AGE: a best the injection may still take - admitted within RING_BEST_MAX_CYCLES. The hunt's
 // admission asks the same: an aged best is no best there either, so any new candidate replaces it (it could
 // otherwise be displaced only by a strictly lower error, which a still camera never produces).
-inline bool kh_ring_best_fresh() {
-    return g_ring_best_valid && g_topo_cycles >= g_ring_best_cycle &&
-           g_topo_cycles - g_ring_best_cycle <= KH_RING_BEST_MAX_CYCLES;
+inline bool ring_best_fresh() {
+    return g_ring_best.valid && g_topo_cycles >= g_ring_best.cycle &&
+           g_topo_cycles - g_ring_best.cycle <= RING_BEST_MAX_CYCLES;
 }
 
 // Functional, not diagnostic: gates the sky-span trigger path and the injection's rescue take. Healthy frames are never
 // carried; a rescue early in the repainting partition writes world-range depth.
-inline bool kh_rescue_window_open() {
-    const uint64_t khr_cfs = g_cc_flush_serial.load(std::memory_order_relaxed);
+inline bool rescue_window_open() {
+    const uint64_t cfs = g_cc_flush_serial.load(std::memory_order_relaxed);
 
-    if (g_carry_pending_serial.load(std::memory_order_relaxed) != khr_cfs) {
+    if (g_carry_pending_serial.load(std::memory_order_relaxed) != cfs) {
         return false;
     }
 
@@ -46,12 +46,12 @@ inline bool kh_rescue_window_open() {
         return false;
     }
 
-    const bool khr_keep_ok = g_slot_keep_near > 0.0f && g_slot_keep_ms != 0 &&
-                             steady_now_ms() - g_slot_keep_ms < 250 &&
-                             g_slot_keep_near >= KH_CAM_NEAR_MIN &&
-                             g_slot_keep_near <= KH_CAM_NEAR_MAX;
+    const bool keep_ok = g_slot_keep.near_m > 0.0f && g_slot_keep.ms != 0 &&
+                         steady_now_ms() - g_slot_keep.ms < 250 &&
+                         g_slot_keep.near_m >= CAM_NEAR_MIN &&
+                         g_slot_keep.near_m <= CAM_NEAR_MAX;
 
-    if (!khr_keep_ok) {
+    if (!keep_ok) {
         return false;
     }
 
@@ -80,9 +80,9 @@ inline void skybind_step(ID3D11DeviceContext* ctx) {
         const uint32_t nf = g_skybind.bytes[i] / 4;
 
         if (nf >= 72 && locator_sky_anchor(f, nf)) {
-            // KH_EA_SKYBIND_BUF: a window at the buffer's start is the upload path's block - name its buffer, as an
+            // EA_SKYBIND_BUF: a window at the buffer's start is the upload path's block - name its buffer, as an
             // anchored upload does, or a lock by this path alone (before any admitted upload of the block, or onto a
-            // buffer the engine re-created) leaves kh_fog_probe_admits keyed on a null or dead buffer.
+            // buffer the engine re-created) leaves fog_probe_admits keyed on a null or dead buffer.
             if (g_skybind.base_fl[i] == 0u && g_skybind.src[i]) g_sky_probe.buf = g_skybind.src[i];
             g_sky_probe.floats = nf;
             g_sky_probe.valid = true;
@@ -93,7 +93,7 @@ inline void skybind_step(ID3D11DeviceContext* ctx) {
 
         // VS-side windows carry the world draws' view matrix: feed the same scan the upload hooks feed - ring admission
         // when unlocked. VS copies are staged only while the view is unlocked, so after the lock only copies already in
-        // flight arrive here. KH_VIEW_STAGED_LOCKED: those are not fed - a copy staged at an earlier opaque sample
+        // flight arrive here. VIEW_STAGED_LOCKED: those are not fed - a copy staged at an earlier opaque sample
         // would be published as this moment's frame view (the locked path stamps it now); locked, the scan's only use
         // of a copy is that publish (with its disagreement count against the bridge).
         if (i >= 8 && g_skybind.src[i] && !g_ls.view_src_valid && !g_ro.in_injection) {
@@ -115,7 +115,7 @@ inline void skybind_step(ID3D11DeviceContext* ctx) {
     ID3D11Buffer* bufs[16] = {};
     UINT first16[16] = {};
     UINT num16[16] = {};
-    ID3D11DeviceContext1* ctx1 = kh_ctx1(ctx);
+    ID3D11DeviceContext1* ctx1 = as_ctx1(ctx);
 
     if (ctx1) {
         ctx1->PSGetConstantBuffers1(0, 8, bufs, first16, num16);
@@ -191,7 +191,7 @@ inline void skybind_step(ID3D11DeviceContext* ctx) {
     if (dev) dev->Release();
 }
 
-// KH_ANCHOR_NAN: both lane tests are in positive form, so a NaN lane (an int -1 / all-ones mask reads as NaN)
+// ANCHOR_NAN: both lane tests are in positive form, so a NaN lane (an int -1 / all-ones mask reads as NaN)
 // fails them; wherever d and tol are not NaN, !(d <= tol) is d > tol, the same verdict.
 inline bool locator_light_anchor(const float* f, uint32_t i, uint32_t nf, float decay, float cam_alt) {
     if (i + 16 > nf) return false;
@@ -203,13 +203,13 @@ inline bool locator_light_anchor(const float* f, uint32_t i, uint32_t nf, float 
 inline bool locator_zero_anchor(const float* f, uint32_t i, uint32_t nf,
                                 float cam_alt) {
     if (i + 16 > nf) return false;
-    if (!(fabsf(f[i + 12] + cam_alt) <= 2.5f)) return false;   // nb[52] = -(camera altitude). KH_ANCHOR_NAN.
-    uint32_t khza_mode = 0;
-    memcpy(&khza_mode, &f[i + 4], sizeof(khza_mode));   // nb[44] = fog-model selector.
-    return khza_mode == 1u || khza_mode == 3u;
+    if (!(fabsf(f[i + 12] + cam_alt) <= 2.5f)) return false;   // nb[52] = -(camera altitude). ANCHOR_NAN.
+    uint32_t mode = 0;
+    memcpy(&mode, &f[i + 4], sizeof(mode));   // nb[44] = fog-model selector.
+    return mode == 1u || mode == 3u;
 }
 
-// meta is the caller's field (kh_probe_mirror_refresh stores the light probe's off - nb_base there; KH_PROBE_META40).
+// meta is the caller's field (probe_mirror_refresh stores the light probe's off - nb_base there; PROBE_META40).
 inline void locator_capture(CbColorProbe& pr, const float* f, uint32_t nf, uint32_t win) {
     if (win > 96) win = 96;
 
@@ -224,32 +224,32 @@ inline void locator_capture(CbColorProbe& pr, const float* f, uint32_t nf, uint3
     memcpy(pr.nb, f + pr.nb_base, n * sizeof(float));
 
     // Sky-probe refreshes also update the engine-sun reference (floats 8-10 of the sky block, normalized, unflipped):
-    // the sky lane kh_sun_raw_frame and kh_sun_axis_lane_fresh / _ok read, and the motion window kh_sky_static reads.
+    // the sky lane sun_raw_frame and sun_axis_lane_fresh / _ok read, and the motion window sky_static reads.
     if (&pr == &g_sky_probe && nf >= 11) {
         const float sl = sqrtf(f[8] * f[8] + f[9] * f[9] + f[10] * f[10]);
 
         if (sl > 0.5f && sl < 2.0f) {
-            g_skysun_ref[0] = f[8] / sl;
-            g_skysun_ref[1] = f[9] / sl;
-            g_skysun_ref[2] = f[10] / sl;
-            g_skysun_ref_valid = true;
-            g_skysun_ref_ms = steady_now_ms();
+            g_skysun.ref[0] = f[8] / sl;
+            g_skysun.ref[1] = f[9] / sl;
+            g_skysun.ref[2] = f[10] / sl;
+            g_skysun.ref_valid = true;
+            g_skysun.ref_ms = steady_now_ms();
 
-            if (g_skysun_mot_ref_ms == 0) {
-                g_skysun_mot_ref[0] = g_skysun_ref[0];
-                g_skysun_mot_ref[1] = g_skysun_ref[1];
-                g_skysun_mot_ref[2] = g_skysun_ref[2];
-                g_skysun_mot_ref_ms = g_skysun_ref_ms;
-            } else if (g_skysun_ref_ms - g_skysun_mot_ref_ms >= 1000) {
-                float khsm_d = g_skysun_ref[0] * g_skysun_mot_ref[0] +
-                               g_skysun_ref[1] * g_skysun_mot_ref[1] +
-                               g_skysun_ref[2] * g_skysun_mot_ref[2];
-                khsm_d = khsm_d > 1.0f ? 1.0f : (khsm_d < -1.0f ? -1.0f : khsm_d);
-                g_skysun_mot_deg = acosf(khsm_d) * 57.29578f;
-                g_skysun_mot_ref[0] = g_skysun_ref[0];
-                g_skysun_mot_ref[1] = g_skysun_ref[1];
-                g_skysun_mot_ref[2] = g_skysun_ref[2];
-                g_skysun_mot_ref_ms = g_skysun_ref_ms;
+            if (g_skysun.mot_ref_ms == 0) {
+                g_skysun.mot_ref[0] = g_skysun.ref[0];
+                g_skysun.mot_ref[1] = g_skysun.ref[1];
+                g_skysun.mot_ref[2] = g_skysun.ref[2];
+                g_skysun.mot_ref_ms = g_skysun.ref_ms;
+            } else if (g_skysun.ref_ms - g_skysun.mot_ref_ms >= 1000) {
+                float d = g_skysun.ref[0] * g_skysun.mot_ref[0] +
+                          g_skysun.ref[1] * g_skysun.mot_ref[1] +
+                          g_skysun.ref[2] * g_skysun.mot_ref[2];
+                d = d > 1.0f ? 1.0f : (d < -1.0f ? -1.0f : d);
+                g_skysun.mot_deg = acosf(d) * 57.29578f;
+                g_skysun.mot_ref[0] = g_skysun.ref[0];
+                g_skysun.mot_ref[1] = g_skysun.ref[1];
+                g_skysun.mot_ref[2] = g_skysun.ref[2];
+                g_skysun.mot_ref_ms = g_skysun.ref_ms;
             }
         }
     }

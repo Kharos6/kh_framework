@@ -7,7 +7,7 @@ namespace RenderIntegration {
 // Per frame, per cascade cycle: latch that matrix from the upload (locator-cached offset, rediscovery on miss),
 // snapshot the bound viewport at the cycle's next draw as the cascade's atlas tile, and hand the table to the
 // composited mesh shader, which performs the engine's own shadow compare for our pixels.
-static constexpr uint32_t KH_LIVE_MAX_CASCADES = 8;
+static constexpr uint32_t LIVE_MAX_CASCADES = 8;
 
 struct LiveShadowEntry {
     float    m[12];
@@ -39,8 +39,8 @@ struct LiveShadowState {
     float    pending_m[12] = {};
     // An engine observation (no code decodes it): the small sampling block's second 4x3 is a pure camera-yaw rotation
     // R with translation t2 = (0.30, -1.59, 0.01) - an eye-height-shaped origin offset in yaw-rotated space.
-    // KH_REG_SLICE: data holds floats [KH_REG_SLICE_LO, KH_REG_SLICE_LO + KH_REG_SLICE_N) of the upload, and only
-    // when floats >= KH_REG_READ_MIN - the whole of what resolve_pair_capture / band_capture read; the rest is stale.
+    // REG_SLICE: data holds floats [REG_SLICE_LO, REG_SLICE_LO + REG_SLICE_N) of the upload, and only
+    // when floats >= REG_READ_MIN - the whole of what resolve_pair_capture / band_capture read; the rest is stale.
     struct CbRecord { void* buf = nullptr; uint32_t floats = 0; uint64_t seq = 0; float data[512]; };
     CbRecord cb_reg[16];
     uint32_t cb_reg_next = 0;
@@ -49,7 +49,7 @@ struct LiveShadowState {
     // needs updating, so a per-frame table is empty on most frames. Entries are keyed by scale (each cascade has a
     // distinct extent) and replaced in place. The engine's cascade CB exceeds the registry's size gate, so the
     // pass-scoped stash of the last window-shaped matrix is what holds it.
-    LiveShadowEntry entries[KH_LIVE_MAX_CASCADES] = {};
+    LiveShadowEntry entries[LIVE_MAX_CASCADES] = {};
     uint32_t count = 0;
     bool     wipe_deferred = false;   // The table was marked suspect; the first commit prunes it.
     uint64_t stamp_counter = 0;

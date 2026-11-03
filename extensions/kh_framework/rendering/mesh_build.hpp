@@ -19,22 +19,22 @@ inline void quad(std::vector<MeshVertex>& v,
 
     // Analytic tangent: T = normalize(b - a) (the uv u axis); handedness = sign
     // of cross(N, T) . (d - a).
-    float khq_t[3] = { b[0] - a[0], b[1] - a[1], b[2] - a[2] };
-    const float khq_tl = sqrtf(khq_t[0] * khq_t[0] + khq_t[1] * khq_t[1] + khq_t[2] * khq_t[2]);
+    float t[3] = { b[0] - a[0], b[1] - a[1], b[2] - a[2] };
+    const float tl = sqrtf(t[0] * t[0] + t[1] * t[1] + t[2] * t[2]);
 
-    if (khq_tl > 1e-8f) {
-        khq_t[0] /= khq_tl; khq_t[1] /= khq_tl; khq_t[2] /= khq_tl;
+    if (tl > 1e-8f) {
+        t[0] /= tl; t[1] /= tl; t[2] /= tl;
     } else {
-        khq_t[0] = 1.0f; khq_t[1] = 0.0f; khq_t[2] = 0.0f;
+        t[0] = 1.0f; t[1] = 0.0f; t[2] = 0.0f;
     }
 
-    const float khq_bx[3] = {
-        n[1] * khq_t[2] - n[2] * khq_t[1],
-        n[2] * khq_t[0] - n[0] * khq_t[2],
-        n[0] * khq_t[1] - n[1] * khq_t[0],
+    const float bx[3] = {
+        n[1] * t[2] - n[2] * t[1],
+        n[2] * t[0] - n[0] * t[2],
+        n[0] * t[1] - n[1] * t[0],
     };
-    const float khq_w = (khq_bx[0] * (d[0] - a[0]) + khq_bx[1] * (d[1] - a[1]) +
-                         khq_bx[2] * (d[2] - a[2])) >= 0.0f ? 1.0f : -1.0f;
+    const float w = (bx[0] * (d[0] - a[0]) + bx[1] * (d[1] - a[1]) +
+                     bx[2] * (d[2] - a[2])) >= 0.0f ? 1.0f : -1.0f;
 
     for (int i = 0; i < 6; ++i) {
         MeshVertex mv = {};
@@ -42,8 +42,8 @@ inline void quad(std::vector<MeshVertex>& v,
         memcpy(mv.nrm, n, sizeof(mv.nrm));
         mv.uv[0] = uvs[uvi[i]][0];
         mv.uv[1] = uvs[uvi[i]][1];
-        memcpy(mv.tan, khq_t, sizeof(khq_t));
-        mv.tan[3] = khq_w;
+        memcpy(mv.tan, t, sizeof(t));
+        mv.tan[3] = w;
         v.push_back(mv);
     }
 }
@@ -61,42 +61,42 @@ inline void tri(std::vector<MeshVertex>& v,
     // Per-face uv-delta tangent (the standard derivation), shared by all three
     // vertices; degenerate uv area falls back to any vector perpendicular to
     // the first normal.
-    const float khe1[3] = { b[0] - a[0], b[1] - a[1], b[2] - a[2] };
-    const float khe2[3] = { c[0] - a[0], c[1] - a[1], c[2] - a[2] };
-    const float khdu1 = ub[0] - ua[0], khdv1 = ub[1] - ua[1];
-    const float khdu2 = uc[0] - ua[0], khdv2 = uc[1] - ua[1];
-    const float khr = khdu1 * khdv2 - khdu2 * khdv1;
-    float kht_t[3];
-    float kht_w = 1.0f;
+    const float e1[3] = { b[0] - a[0], b[1] - a[1], b[2] - a[2] };
+    const float e2[3] = { c[0] - a[0], c[1] - a[1], c[2] - a[2] };
+    const float du1 = ub[0] - ua[0], dv1 = ub[1] - ua[1];
+    const float du2 = uc[0] - ua[0], dv2 = uc[1] - ua[1];
+    const float r = du1 * dv2 - du2 * dv1;
+    float t[3];
+    float w = 1.0f;
 
-    if (khr > 1e-10f || khr < -1e-10f) {
-        const float khir = 1.0f / khr;
-        kht_t[0] = (khe1[0] * khdv2 - khe2[0] * khdv1) * khir;
-        kht_t[1] = (khe1[1] * khdv2 - khe2[1] * khdv1) * khir;
-        kht_t[2] = (khe1[2] * khdv2 - khe2[2] * khdv1) * khir;
-        const float khb[3] = {
-            (khe2[0] * khdu1 - khe1[0] * khdu2) * khir,
-            (khe2[1] * khdu1 - khe1[1] * khdu2) * khir,
-            (khe2[2] * khdu1 - khe1[2] * khdu2) * khir,
+    if (r > 1e-10f || r < -1e-10f) {
+        const float ir = 1.0f / r;
+        t[0] = (e1[0] * dv2 - e2[0] * dv1) * ir;
+        t[1] = (e1[1] * dv2 - e2[1] * dv1) * ir;
+        t[2] = (e1[2] * dv2 - e2[2] * dv1) * ir;
+        const float bitan[3] = {
+            (e2[0] * du1 - e1[0] * du2) * ir,
+            (e2[1] * du1 - e1[1] * du2) * ir,
+            (e2[2] * du1 - e1[2] * du2) * ir,
         };
-        const float khcx[3] = {
-            na[1] * kht_t[2] - na[2] * kht_t[1],
-            na[2] * kht_t[0] - na[0] * kht_t[2],
-            na[0] * kht_t[1] - na[1] * kht_t[0],
+        const float cx[3] = {
+            na[1] * t[2] - na[2] * t[1],
+            na[2] * t[0] - na[0] * t[2],
+            na[0] * t[1] - na[1] * t[0],
         };
-        kht_w = (khcx[0] * khb[0] + khcx[1] * khb[1] + khcx[2] * khb[2]) >= 0.0f ? 1.0f : -1.0f;
+        w = (cx[0] * bitan[0] + cx[1] * bitan[1] + cx[2] * bitan[2]) >= 0.0f ? 1.0f : -1.0f;
     } else {
         // uv-degenerate: any perpendicular to the first normal.
-        if (na[0] * na[0] < 0.9f) { kht_t[0] = 0.0f; kht_t[1] = -na[2]; kht_t[2] = na[1]; }
-        else                      { kht_t[0] = -na[2]; kht_t[1] = 0.0f; kht_t[2] = na[0]; }
+        if (na[0] * na[0] < 0.9f) { t[0] = 0.0f; t[1] = -na[2]; t[2] = na[1]; }
+        else                      { t[0] = -na[2]; t[1] = 0.0f; t[2] = na[0]; }
     }
 
-    const float kht_l = sqrtf(kht_t[0] * kht_t[0] + kht_t[1] * kht_t[1] + kht_t[2] * kht_t[2]);
+    const float l = sqrtf(t[0] * t[0] + t[1] * t[1] + t[2] * t[2]);
 
-    if (kht_l > 1e-8f) {
-        kht_t[0] /= kht_l; kht_t[1] /= kht_l; kht_t[2] /= kht_l;
+    if (l > 1e-8f) {
+        t[0] /= l; t[1] /= l; t[2] /= l;
     } else {
-        kht_t[0] = 1.0f; kht_t[1] = 0.0f; kht_t[2] = 0.0f;
+        t[0] = 1.0f; t[1] = 0.0f; t[2] = 0.0f;
     }
 
     for (int i = 0; i < 3; ++i) {
@@ -105,8 +105,8 @@ inline void tri(std::vector<MeshVertex>& v,
         memcpy(mv.nrm, n[i], sizeof(mv.nrm));
         mv.uv[0] = u[i][0];
         mv.uv[1] = u[i][1];
-        memcpy(mv.tan, kht_t, sizeof(kht_t));
-        mv.tan[3] = kht_w;
+        memcpy(mv.tan, t, sizeof(t));
+        mv.tan[3] = w;
         v.push_back(mv);
     }
 }
@@ -139,7 +139,7 @@ inline void block(std::vector<MeshVertex>& v, const float mn[3], const float mx[
 // UV sphere, radius 0.5. Pole rows emit one zero-area triangle per slice;
 // harmless, never rasterized.
 inline void uv_sphere(std::vector<MeshVertex>& v, int stacks, int slices) {
-    const float khms_pi = 3.14159265358979f;
+    const float pi = 3.14159265358979f;
 
     for (int st = 0; st < stacks; ++st) {
         const float t0 = static_cast<float>(st) / static_cast<float>(stacks);
@@ -154,20 +154,20 @@ inline void uv_sphere(std::vector<MeshVertex>& v, int stacks, int slices) {
             float p[4][3], n[4][3], u[4][2];
 
             for (int k = 0; k < 4; ++k) {
-                // KH_OCC_BOX: watertight - the seam's closing column takes the first
+                // OCC_BOX: watertight - the seam's closing column takes the first
                 // column's angle and a pole is exact (float 2 pi and pi / 2 are not), so
                 // every shared corner is one position bit for bit, but for the sign of a
-                // zero (a pole's 0 * cos / 0 * sin gives -0.0f on some slices; KH_OCC_BOX's weld adds 0.0f, which folds
+                // zero (a pole's 0 * cos / 0 * sin gives -0.0f on some slices; OCC_BOX's weld adds 0.0f, which folds
                 // it to +0.0f).
-                const int khms_s = st + ci[k][1];
-                const int khms_w = (sl + ci[k][0]) % slices;
-                const float la = (static_cast<float>(khms_s) / static_cast<float>(stacks) - 0.5f) * khms_pi;
-                const float lo = static_cast<float>(khms_w) / static_cast<float>(slices) * 2.0f * khms_pi;
-                const float khms_cl = (khms_s == 0 || khms_s == stacks) ? 0.0f : cosf(la);
-                const float khms_sa = khms_s == 0 ? -1.0f : (khms_s == stacks ? 1.0f : sinf(la));
-                n[k][0] = khms_cl * cosf(lo);
-                n[k][1] = khms_cl * sinf(lo);
-                n[k][2] = khms_sa;
+                const int s = st + ci[k][1];
+                const int w = (sl + ci[k][0]) % slices;
+                const float la = (static_cast<float>(s) / static_cast<float>(stacks) - 0.5f) * pi;
+                const float lo = static_cast<float>(w) / static_cast<float>(slices) * 2.0f * pi;
+                const float cl = (s == 0 || s == stacks) ? 0.0f : cosf(la);
+                const float sa = s == 0 ? -1.0f : (s == stacks ? 1.0f : sinf(la));
+                n[k][0] = cl * cosf(lo);
+                n[k][1] = cl * sinf(lo);
+                n[k][2] = sa;
                 p[k][0] = n[k][0] * 0.5f;
                 p[k][1] = n[k][1] * 0.5f;
                 p[k][2] = n[k][2] * 0.5f;
@@ -184,7 +184,7 @@ inline void uv_sphere(std::vector<MeshVertex>& v, int stacks, int slices) {
 // Cylinder: axis z-up, radius 0.5, height 1, capped. Smooth radial side
 // normals, flat cap fans (disc UVs).
 inline void cylinder(std::vector<MeshVertex>& v, int slices) {
-    const float khms_pi = 3.14159265358979f;
+    const float pi = 3.14159265358979f;
     const float top[3] = { 0.0f, 0.0f,  0.5f }, bot[3] = { 0.0f, 0.0f, -0.5f };
     const float nzp[3] = { 0.0f, 0.0f,  1.0f }, nzn[3] = { 0.0f, 0.0f, -1.0f };
     const float ucc[2] = { 0.5f, 0.5f };
@@ -192,10 +192,10 @@ inline void cylinder(std::vector<MeshVertex>& v, int slices) {
     for (int sl = 0; sl < slices; ++sl) {
         const float s0 = static_cast<float>(sl) / static_cast<float>(slices);
         const float s1 = static_cast<float>(sl + 1) / static_cast<float>(slices);
-        // KH_OCC_BOX: the closing slice ends on the first one's angle exactly
+        // OCC_BOX: the closing slice ends on the first one's angle exactly
         // (float 2 pi does not), so the seam's corners are one position.
         const float s1w = static_cast<float>((sl + 1) % slices) / static_cast<float>(slices);
-        const float a0 = s0 * 2.0f * khms_pi, a1 = s1w * 2.0f * khms_pi;
+        const float a0 = s0 * 2.0f * pi, a1 = s1w * 2.0f * pi;
         const float r0[3] = { cosf(a0), sinf(a0), 0.0f };
         const float r1[3] = { cosf(a1), sinf(a1), 0.0f };
         const float p00[3] = { r0[0] * 0.5f, r0[1] * 0.5f, -0.5f };
@@ -217,24 +217,24 @@ inline void cylinder(std::vector<MeshVertex>& v, int slices) {
 // normals normalize(cos, sin, r/h) with r/h = 0.5; the apex takes the face's
 // mid-angle normal (the standard degenerate-pole treatment).
 inline void cone(std::vector<MeshVertex>& v, int slices) {
-    const float khms_pi = 3.14159265358979f;
+    const float pi = 3.14159265358979f;
     const float apex[3] = { 0.0f, 0.0f, 0.5f }, bot[3] = { 0.0f, 0.0f, -0.5f };
     const float nzn[3] = { 0.0f, 0.0f, -1.0f };
     const float ucc[2] = { 0.5f, 0.5f };
-    const float khms_l = sqrtf(1.25f);
+    const float l = sqrtf(1.25f);
 
     for (int sl = 0; sl < slices; ++sl) {
         const float s0 = static_cast<float>(sl) / static_cast<float>(slices);
         const float s1 = static_cast<float>(sl + 1) / static_cast<float>(slices);
-        const float a0 = s0 * 2.0f * khms_pi, a1 = s1 * 2.0f * khms_pi;
+        const float a0 = s0 * 2.0f * pi, a1 = s1 * 2.0f * pi;
         const float am = 0.5f * (a0 + a1);
-        // KH_OCC_BOX: the closing slice's corner on the first one's angle exactly.
-        const float a1w = static_cast<float>((sl + 1) % slices) / static_cast<float>(slices) * 2.0f * khms_pi;
+        // OCC_BOX: the closing slice's corner on the first one's angle exactly.
+        const float a1w = static_cast<float>((sl + 1) % slices) / static_cast<float>(slices) * 2.0f * pi;
         const float p0[3] = { cosf(a0) * 0.5f, sinf(a0) * 0.5f, -0.5f };
         const float p1[3] = { cosf(a1w) * 0.5f, sinf(a1w) * 0.5f, -0.5f };
-        const float n0[3] = { cosf(a0) / khms_l, sinf(a0) / khms_l, 0.5f / khms_l };
-        const float n1[3] = { cosf(a1w) / khms_l, sinf(a1w) / khms_l, 0.5f / khms_l };
-        const float na[3] = { cosf(am) / khms_l, sinf(am) / khms_l, 0.5f / khms_l };
+        const float n0[3] = { cosf(a0) / l, sinf(a0) / l, 0.5f / l };
+        const float n1[3] = { cosf(a1w) / l, sinf(a1w) / l, 0.5f / l };
+        const float na[3] = { cosf(am) / l, sinf(am) / l, 0.5f / l };
         const float u0[2] = { s0, 0.0f }, u1[2] = { s1, 0.0f };
         const float ua[2] = { 0.5f * (s0 + s1), 1.0f };
         tri(v, p0, n0, u0, p1, n1, u1, apex, na, ua);
@@ -253,11 +253,11 @@ inline void pyramid(std::vector<MeshVertex>& v) {
     quad(v, b[0], b[1], b[2], b[3], nzn);
     // Side face normals: normalize(outward edge normal, rise) - the cross
     // product of (base edge, base corner -> apex) is (edge_out, 0.5)/L.
-    const float khms_l = sqrtf(1.25f);
-    const float ns[4][3] = { {  0.0f,          -1.0f / khms_l, 0.5f / khms_l },
-                             {  1.0f / khms_l,  0.0f,          0.5f / khms_l },
-                             {  0.0f,           1.0f / khms_l, 0.5f / khms_l },
-                             { -1.0f / khms_l,  0.0f,          0.5f / khms_l } };
+    const float l = sqrtf(1.25f);
+    const float ns[4][3] = { {  0.0f,          -1.0f / l, 0.5f / l },
+                             {  1.0f / l,  0.0f,          0.5f / l },
+                             {  0.0f,           1.0f / l, 0.5f / l },
+                             { -1.0f / l,  0.0f,          0.5f / l } };
     const float u0[2] = { 0.0f, 0.0f }, u1[2] = { 1.0f, 0.0f }, ua[2] = { 0.5f, 1.0f };
 
     for (int f = 0; f < 4; ++f) {
@@ -269,15 +269,15 @@ inline void pyramid(std::vector<MeshVertex>& v) {
 // up) -> engine [x, z, y] (the swap every SQF position/size fill performs),
 // then reorder each triangle so cross(b-a, c-a) points along its stored normal
 // (the swap flips handedness).
-// khb_ext: the per-axis extents the positions were squashed by, in the ENGINE
+// ext: the per-axis extents the positions were squashed by, in the ENGINE
 // frame (the import's d.native_ext), or null for a mesh authored in the unit
 // box (the builtins). The winding test is weighted by 1 / ext^2: squashing by
 // diag(1 / ext) turns the geometric cross into diag(ext) . n_geom and
-// KH_IMPORT_NRM stores diag(ext) . n, so the plain dot is weighted by ext^2 and
+// IMPORT_NRM stores diag(ext) . n, so the plain dot is weighted by ext^2 and
 // a thin mesh's smoothed normals decide its sign by their tiny in-plane parts;
 // the weighting recovers sign(n_geom . n), the authored winding, never a
 // back-facing hole. Null weights are exactly 1.0.
-inline void bake(std::vector<MeshVertex>& v, const float* khb_ext = nullptr) {
+inline void bake(std::vector<MeshVertex>& v, const float* ext = nullptr) {
     for (auto& mv : v) {
         const float py = mv.pos[1]; mv.pos[1] = mv.pos[2]; mv.pos[2] = py;
         const float ny = mv.nrm[1]; mv.nrm[1] = mv.nrm[2]; mv.nrm[2] = ny;
@@ -300,15 +300,15 @@ inline void bake(std::vector<MeshVertex>& v, const float* khb_ext = nullptr) {
             e1[0] * e2[1] - e1[1] * e2[0],
         };
         const float* n = v[i].nrm;
-        float khb_w[3] = { 1.0f, 1.0f, 1.0f };
-        if (khb_ext) {
+        float w[3] = { 1.0f, 1.0f, 1.0f };
+        if (ext) {
             for (int k = 0; k < 3; ++k) {
-                const float khb_e = fabsf(khb_ext[k]) > 1.0e-6f ? khb_ext[k] : 1.0f;
-                khb_w[k] = 1.0f / (khb_e * khb_e);
+                const float e = fabsf(ext[k]) > 1.0e-6f ? ext[k] : 1.0f;
+                w[k] = 1.0f / (e * e);
             }
         }
 
-        if (g[0] * n[0] * khb_w[0] + g[1] * n[1] * khb_w[1] + g[2] * n[2] * khb_w[2] < 0.0f) {
+        if (g[0] * n[0] * w[0] + g[1] * n[1] * w[1] + g[2] * n[2] * w[2] < 0.0f) {
             const MeshVertex tmp = v[i + 1];
             v[i + 1] = v[i + 2];
             v[i + 2] = tmp;
@@ -322,199 +322,199 @@ inline void bake(std::vector<MeshVertex>& v, const float* khb_ext = nullptr) {
 // is unchanged; the index stream mirrors input order, so every triangle-vertex
 // range is already the index range. Idempotent. Then Forsyth's vertex-cache
 // order per submesh range per level plus a first-use vertex remap, baked into
-// the mesh cache (KH_MESH_CACHE_VERSION).
-static constexpr uint32_t KH_MCO_CACHE   = 32u;   // Modelled LRU cache depth.
-inline float kh_mco_cache_score(uint32_t khmc_p) {
-    if (khmc_p >= KH_MCO_CACHE) return 0.0f;
-    if (khmc_p < 3u) return 0.75f;   // The last triangle's own vertices: a flat score, so
+// the mesh cache (MESH_CACHE_VERSION).
+static constexpr uint32_t MCO_CACHE   = 32u;   // Modelled LRU cache depth.
+inline float mco_cache_score(uint32_t p) {
+    if (p >= MCO_CACHE) return 0.0f;
+    if (p < 3u) return 0.75f;   // The last triangle's own vertices: a flat score, so
                                      // a strip does not chase itself.
-    const float khmc_s = 1.0f - (static_cast<float>(khmc_p) - 3.0f) / (static_cast<float>(KH_MCO_CACHE) - 3.0f);
-    return powf(khmc_s, 1.5f);
+    const float s = 1.0f - (static_cast<float>(p) - 3.0f) / (static_cast<float>(MCO_CACHE) - 3.0f);
+    return powf(s, 1.5f);
 }
-inline float kh_mco_valence_score(uint32_t khmv_n) {
-    if (khmv_n == 0u) return -1.0f;
-    return 2.0f * powf(static_cast<float>(khmv_n), -0.5f);
+inline float mco_valence_score(uint32_t n) {
+    if (n == 0u) return -1.0f;
+    return 2.0f * powf(static_cast<float>(n), -0.5f);
 }
-// One index range: the khmo_c indices at khmo_ix (a multiple of 3).
-inline void kh_mco_range(uint32_t* khmo_ix, uint32_t khmo_c, uint32_t khmo_vn) {
-    const uint32_t khmo_tn = khmo_c / 3u;
-    if (khmo_tn < 2u || khmo_vn == 0u) return;
-    for (uint32_t i = 0; i < khmo_c; ++i) if (khmo_ix[i] >= khmo_vn) return;   // Never touch a bad stream.
-    std::vector<uint32_t> khmo_deg(khmo_vn, 0u);          // Remaining triangles per vertex.
-    for (uint32_t i = 0; i < khmo_c; ++i) ++khmo_deg[khmo_ix[i]];
-    std::vector<uint32_t> khmo_off(khmo_vn + 1u, 0u);     // Vertex -> its triangle list.
-    for (uint32_t v = 0; v < khmo_vn; ++v) khmo_off[v + 1u] = khmo_off[v] + khmo_deg[v];
-    std::vector<uint32_t> khmo_adj(khmo_c);
+// One index range: the mo_c indices at ix (a multiple of 3).
+inline void mco_range(uint32_t* ix, uint32_t mo_c, uint32_t vn) {
+    const uint32_t tn = mo_c / 3u;
+    if (tn < 2u || vn == 0u) return;
+    for (uint32_t i = 0; i < mo_c; ++i) if (ix[i] >= vn) return;   // Never touch a bad stream.
+    std::vector<uint32_t> deg(vn, 0u);          // Remaining triangles per vertex.
+    for (uint32_t i = 0; i < mo_c; ++i) ++deg[ix[i]];
+    std::vector<uint32_t> off(vn + 1u, 0u);     // Vertex -> its triangle list.
+    for (uint32_t v = 0; v < vn; ++v) off[v + 1u] = off[v] + deg[v];
+    std::vector<uint32_t> adj(mo_c);
     {
-        std::vector<uint32_t> khmo_fill(khmo_off.begin(), khmo_off.end() - 1);
-        for (uint32_t t = 0; t < khmo_tn; ++t)
-            for (uint32_t k = 0; k < 3u; ++k) khmo_adj[khmo_fill[khmo_ix[t * 3u + k]]++] = t;
+        std::vector<uint32_t> fill(off.begin(), off.end() - 1);
+        for (uint32_t t = 0; t < tn; ++t)
+            for (uint32_t k = 0; k < 3u; ++k) adj[fill[ix[t * 3u + k]]++] = t;
     }
-    std::vector<uint32_t> khmo_cpos(khmo_vn, KH_MCO_CACHE);   // Cache position (>= CACHE = out).
-    std::vector<float>    khmo_vsc(khmo_vn, 0.0f);
-    for (uint32_t v = 0; v < khmo_vn; ++v)
-        khmo_vsc[v] = kh_mco_cache_score(KH_MCO_CACHE) + kh_mco_valence_score(khmo_deg[v]);
-    std::vector<float>   khmo_tsc(khmo_tn, 0.0f);
-    std::vector<uint8_t> khmo_done(khmo_tn, 0u);
-    for (uint32_t t = 0; t < khmo_tn; ++t)
-        khmo_tsc[t] = khmo_vsc[khmo_ix[t * 3u]] + khmo_vsc[khmo_ix[t * 3u + 1u]] + khmo_vsc[khmo_ix[t * 3u + 2u]];
-    // KH_MCO_TREE - the fallback's pick without a scan of every triangle left: a max tree over the triangles' scores,
+    std::vector<uint32_t> cpos(vn, MCO_CACHE);   // Cache position (>= CACHE = out).
+    std::vector<float>    vsc(vn, 0.0f);
+    for (uint32_t v = 0; v < vn; ++v)
+        vsc[v] = mco_cache_score(MCO_CACHE) + mco_valence_score(deg[v]);
+    std::vector<float>   tsc(tn, 0.0f);
+    std::vector<uint8_t> done(tn, 0u);
+    for (uint32_t t = 0; t < tn; ++t)
+        tsc[t] = vsc[ix[t * 3u]] + vsc[ix[t * 3u + 1u]] + vsc[ix[t * 3u + 2u]];
+    // MCO_TREE - the fallback's pick without a scan of every triangle left: a max tree over the triangles' scores,
     // a done one at -inf, a tie to the lower index. The fallback runs only when no triangle left touches the cache, so
-    // each vertex of one left is out of it and its khmo_vsc is the out-of-cache score it took on leaving (or at the
+    // each vertex of one left is out of it and its vsc is the out-of-cache score it took on leaving (or at the
     // start), unchanged since: only an emit moves a valence, and an emit puts the vertex in the cache. An emit marks
-    // its vertices stale; the fallback first re-scores the stale vertices' triangles from khmo_vsc with the scan's own
+    // its vertices stale; the fallback first re-scores the stale vertices' triangles from vsc with the scan's own
     // sum, so every leaf holds what the scan would compute and the pick is the scan's - the first of the best. One
     // scan per exhausted region was quadratic in a mesh of many regions (a flat-shaded one: every face is one); a pick
     // is now O(log n), and the stale triangles' refresh O(log n) each.
-    uint32_t khmo_tp = 1u;
-    while (khmo_tp < khmo_tn) khmo_tp <<= 1;
-    const float khmo_inf = std::numeric_limits<float>::infinity();
-    std::vector<float> khmo_tv(2u * static_cast<size_t>(khmo_tp), -khmo_inf);
-    std::vector<uint32_t> khmo_ti(2u * static_cast<size_t>(khmo_tp), 0u);
-    auto khmo_tfix = [&](uint32_t khmo_nd) {   // The nodes above a leaf, again.
-        for (khmo_nd >>= 1; khmo_nd >= 1u; khmo_nd >>= 1) {
-            const uint32_t khmo_l = 2u * khmo_nd;
-            const bool khmo_lw = khmo_tv[khmo_l] >= khmo_tv[khmo_l + 1u];
-            khmo_tv[khmo_nd] = khmo_lw ? khmo_tv[khmo_l] : khmo_tv[khmo_l + 1u];
-            khmo_ti[khmo_nd] = khmo_lw ? khmo_ti[khmo_l] : khmo_ti[khmo_l + 1u];
+    uint32_t tp = 1u;
+    while (tp < tn) tp <<= 1;
+    const float inf = std::numeric_limits<float>::infinity();
+    std::vector<float> tv(2u * static_cast<size_t>(tp), -inf);
+    std::vector<uint32_t> ti(2u * static_cast<size_t>(tp), 0u);
+    auto tfix = [&](uint32_t nd) {   // The nodes above a leaf, again.
+        for (nd >>= 1; nd >= 1u; nd >>= 1) {
+            const uint32_t l = 2u * nd;
+            const bool lw = tv[l] >= tv[l + 1u];
+            tv[nd] = lw ? tv[l] : tv[l + 1u];
+            ti[nd] = lw ? ti[l] : ti[l + 1u];
         }
     };
-    for (uint32_t t = 0; t < khmo_tn; ++t) { khmo_tv[khmo_tp + t] = khmo_tsc[t]; khmo_ti[khmo_tp + t] = t; }
-    for (uint32_t khmo_nd = khmo_tp - 1u; khmo_nd >= 1u; --khmo_nd) {
-        const uint32_t khmo_l = 2u * khmo_nd;
-        const bool khmo_lw = khmo_tv[khmo_l] >= khmo_tv[khmo_l + 1u];
-        khmo_tv[khmo_nd] = khmo_lw ? khmo_tv[khmo_l] : khmo_tv[khmo_l + 1u];
-        khmo_ti[khmo_nd] = khmo_lw ? khmo_ti[khmo_l] : khmo_ti[khmo_l + 1u];
+    for (uint32_t t = 0; t < tn; ++t) { tv[tp + t] = tsc[t]; ti[tp + t] = t; }
+    for (uint32_t nd = tp - 1u; nd >= 1u; --nd) {
+        const uint32_t l = 2u * nd;
+        const bool lw = tv[l] >= tv[l + 1u];
+        tv[nd] = lw ? tv[l] : tv[l + 1u];
+        ti[nd] = lw ? ti[l] : ti[l + 1u];
     }
-    std::vector<uint8_t>  khmo_stale(khmo_vn, 0u);
-    std::vector<uint32_t> khmo_stl;   // The stale vertices, each once.
-    std::vector<uint32_t> khmo_out;
-    khmo_out.reserve(khmo_c);
-    std::vector<uint32_t> khmo_cache;   // Most recent first.
-    khmo_cache.reserve(KH_MCO_CACHE + 3u);
-    int64_t  khmo_best = -1;
-    float    khmo_best_s = -1.0e30f;
-    for (uint32_t t = 0; t < khmo_tn; ++t) if (khmo_tsc[t] > khmo_best_s) { khmo_best_s = khmo_tsc[t]; khmo_best = t; }
-    for (uint32_t khmo_emit = 0; khmo_emit < khmo_tn; ++khmo_emit) {
-        if (khmo_best < 0) {   // Nothing in the cache neighbourhood: the best-scoring triangle left (KH_MCO_TREE).
-            for (uint32_t khmo_v : khmo_stl) {
-                khmo_stale[khmo_v] = 0u;
-                for (uint32_t khmo_a = khmo_off[khmo_v]; khmo_a < khmo_off[khmo_v + 1u]; ++khmo_a) {
-                    const uint32_t u = khmo_adj[khmo_a];
-                    khmo_tv[khmo_tp + u] = khmo_done[u] ? -khmo_inf
-                                         : khmo_vsc[khmo_ix[u * 3u]] + khmo_vsc[khmo_ix[u * 3u + 1u]] +
-                                           khmo_vsc[khmo_ix[u * 3u + 2u]];
-                    khmo_tfix(khmo_tp + u);
+    std::vector<uint8_t>  stale(vn, 0u);
+    std::vector<uint32_t> stl;   // The stale vertices, each once.
+    std::vector<uint32_t> out;
+    out.reserve(mo_c);
+    std::vector<uint32_t> cache;   // Most recent first.
+    cache.reserve(MCO_CACHE + 3u);
+    int64_t  best = -1;
+    float    best_s = -1.0e30f;
+    for (uint32_t t = 0; t < tn; ++t) if (tsc[t] > best_s) { best_s = tsc[t]; best = t; }
+    for (uint32_t emit = 0; emit < tn; ++emit) {
+        if (best < 0) {   // Nothing in the cache neighbourhood: the best-scoring triangle left (MCO_TREE).
+            for (uint32_t mo_v : stl) {
+                stale[mo_v] = 0u;
+                for (uint32_t mo_a = off[mo_v]; mo_a < off[mo_v + 1u]; ++mo_a) {
+                    const uint32_t u = adj[mo_a];
+                    tv[tp + u] = done[u] ? -inf
+                               : vsc[ix[u * 3u]] + vsc[ix[u * 3u + 1u]] +
+                                 vsc[ix[u * 3u + 2u]];
+                    tfix(tp + u);
                 }
             }
-            khmo_stl.clear();
-            if (!(khmo_tv[1] > -khmo_inf)) break;   // None left.
-            khmo_best = khmo_ti[1];
+            stl.clear();
+            if (!(tv[1] > -inf)) break;   // None left.
+            best = ti[1];
         }
-        const uint32_t t = static_cast<uint32_t>(khmo_best);
-        khmo_done[t] = 1u;
+        const uint32_t t = static_cast<uint32_t>(best);
+        done[t] = 1u;
         for (uint32_t k = 0; k < 3u; ++k) {
-            const uint32_t v = khmo_ix[t * 3u + k];
-            khmo_out.push_back(v);
-            --khmo_deg[v];
-            if (!khmo_stale[v]) { khmo_stale[v] = 1u; khmo_stl.push_back(v); }   // KH_MCO_TREE.
+            const uint32_t v = ix[t * 3u + k];
+            out.push_back(v);
+            --deg[v];
+            if (!stale[v]) { stale[v] = 1u; stl.push_back(v); }   // MCO_TREE.
             // Move v to the cache front (an LRU list of positions, the model of the paper).
-            size_t khmo_at = khmo_cache.size();
-            for (size_t c = 0; c < khmo_cache.size(); ++c) if (khmo_cache[c] == v) { khmo_at = c; break; }
-            if (khmo_at < khmo_cache.size()) khmo_cache.erase(khmo_cache.begin() + static_cast<std::ptrdiff_t>(khmo_at));
-            khmo_cache.insert(khmo_cache.begin(), v);
+            size_t at = cache.size();
+            for (size_t c = 0; c < cache.size(); ++c) if (cache[c] == v) { at = c; break; }
+            if (at < cache.size()) cache.erase(cache.begin() + static_cast<std::ptrdiff_t>(at));
+            cache.insert(cache.begin(), v);
         }
         // Re-score every vertex in the cache (positions moved), drop the overflow.
-        for (size_t c = 0; c < khmo_cache.size(); ++c) {
-            const uint32_t v = khmo_cache[c];
-            khmo_cpos[v] = static_cast<uint32_t>(c);
-            khmo_vsc[v] = kh_mco_cache_score(khmo_cpos[v]) + kh_mco_valence_score(khmo_deg[v]);
+        for (size_t c = 0; c < cache.size(); ++c) {
+            const uint32_t v = cache[c];
+            cpos[v] = static_cast<uint32_t>(c);
+            vsc[v] = mco_cache_score(cpos[v]) + mco_valence_score(deg[v]);
         }
-        while (khmo_cache.size() > KH_MCO_CACHE) {
-            const uint32_t v = khmo_cache.back();
-            khmo_cache.pop_back();
-            khmo_cpos[v] = KH_MCO_CACHE;
-            khmo_vsc[v] = kh_mco_cache_score(KH_MCO_CACHE) + kh_mco_valence_score(khmo_deg[v]);
+        while (cache.size() > MCO_CACHE) {
+            const uint32_t v = cache.back();
+            cache.pop_back();
+            cpos[v] = MCO_CACHE;
+            vsc[v] = mco_cache_score(MCO_CACHE) + mco_valence_score(deg[v]);
         }
         // Re-score the triangles touching the cache and pick the next best among them.
-        khmo_best = -1; khmo_best_s = -1.0e30f;
-        for (size_t c = 0; c < khmo_cache.size(); ++c) {
-            const uint32_t v = khmo_cache[c];
-            for (uint32_t a = khmo_off[v]; a < khmo_off[v + 1u]; ++a) {
-                const uint32_t u = khmo_adj[a];
-                if (khmo_done[u]) continue;
-                const float s = khmo_vsc[khmo_ix[u * 3u]] + khmo_vsc[khmo_ix[u * 3u + 1u]] + khmo_vsc[khmo_ix[u * 3u + 2u]];
-                khmo_tsc[u] = s;
-                if (s > khmo_best_s) { khmo_best_s = s; khmo_best = u; }
+        best = -1; best_s = -1.0e30f;
+        for (size_t c = 0; c < cache.size(); ++c) {
+            const uint32_t v = cache[c];
+            for (uint32_t a = off[v]; a < off[v + 1u]; ++a) {
+                const uint32_t u = adj[a];
+                if (done[u]) continue;
+                const float s = vsc[ix[u * 3u]] + vsc[ix[u * 3u + 1u]] + vsc[ix[u * 3u + 2u]];
+                tsc[u] = s;
+                if (s > best_s) { best_s = s; best = u; }
             }
         }
     }
-    if (khmo_out.size() != khmo_c) return;   // Defensive: leave the stream as it was.
-    memcpy(khmo_ix, khmo_out.data(), khmo_c * sizeof(uint32_t));
+    if (out.size() != mo_c) return;   // Defensive: leave the stream as it was.
+    memcpy(ix, out.data(), mo_c * sizeof(uint32_t));
 }
-inline void kh_mesh_cache_order(MeshDef& khmo_d) {
-    if (khmo_d.indices.empty() || khmo_d.verts.empty()) return;
-    const uint32_t khmo_vn = static_cast<uint32_t>(khmo_d.verts.size());
-    const uint32_t khmo_in = static_cast<uint32_t>(khmo_d.indices.size());
+inline void mesh_cache_order(MeshDef& d) {
+    if (d.indices.empty() || d.verts.empty()) return;
+    const uint32_t vn = static_cast<uint32_t>(d.verts.size());
+    const uint32_t in = static_cast<uint32_t>(d.indices.size());
     // The submesh ranges of every level, each ordered on its own.
-    for (int khmo_l = 0; khmo_l <= static_cast<int>(khmo_d.lod_n); ++khmo_l) {
-        const std::vector<MeshSubmesh>& khmo_tab = khmo_l == 0 ? khmo_d.submeshes : khmo_d.lod_sub[khmo_l - 1];
-        for (const MeshSubmesh& khmo_sm : khmo_tab) {
-            if (khmo_sm.index_count < 6u || khmo_sm.index_count % 3u != 0u) continue;
-            if (khmo_sm.index_start > khmo_in || khmo_sm.index_count > khmo_in - khmo_sm.index_start) continue;
-            kh_mco_range(khmo_d.indices.data() + khmo_sm.index_start, khmo_sm.index_count, khmo_vn);
+    for (int l = 0; l <= static_cast<int>(d.lod_n); ++l) {
+        const std::vector<MeshSubmesh>& tab = l == 0 ? d.submeshes : d.lod_sub[l - 1];
+        for (const MeshSubmesh& sm : tab) {
+            if (sm.index_count < 6u || sm.index_count % 3u != 0u) continue;
+            if (sm.index_start > in || sm.index_count > in - sm.index_start) continue;
+            mco_range(d.indices.data() + sm.index_start, sm.index_count, vn);
         }
     }
     // First-use vertex order: the vertex fetch walks forward with the index stream.
-    std::vector<uint32_t> khmo_map(khmo_vn, 0xFFFFFFFFu);
-    uint32_t khmo_next = 0;
-    for (uint32_t i = 0; i < khmo_in; ++i) {
-        const uint32_t v = khmo_d.indices[i];
-        if (v >= khmo_vn) return;   // A bad stream: the triangle order above still stands.
-        if (khmo_map[v] == 0xFFFFFFFFu) khmo_map[v] = khmo_next++;
+    std::vector<uint32_t> map(vn, 0xFFFFFFFFu);
+    uint32_t next = 0;
+    for (uint32_t i = 0; i < in; ++i) {
+        const uint32_t v = d.indices[i];
+        if (v >= vn) return;   // A bad stream: the triangle order above still stands.
+        if (map[v] == 0xFFFFFFFFu) map[v] = next++;
     }
-    for (uint32_t v = 0; v < khmo_vn; ++v) if (khmo_map[v] == 0xFFFFFFFFu) khmo_map[v] = khmo_next++;   // Unreferenced verts last.
-    std::vector<MeshVertex> khmo_nv(khmo_vn);
-    for (uint32_t v = 0; v < khmo_vn; ++v) khmo_nv[khmo_map[v]] = khmo_d.verts[v];
-    khmo_d.verts.swap(khmo_nv);
-    for (uint32_t i = 0; i < khmo_in; ++i) khmo_d.indices[i] = khmo_map[khmo_d.indices[i]];
+    for (uint32_t v = 0; v < vn; ++v) if (map[v] == 0xFFFFFFFFu) map[v] = next++;   // Unreferenced verts last.
+    std::vector<MeshVertex> nv(vn);
+    for (uint32_t v = 0; v < vn; ++v) nv[map[v]] = d.verts[v];
+    d.verts.swap(nv);
+    for (uint32_t i = 0; i < in; ++i) d.indices[i] = map[d.indices[i]];
 }
 
-inline void kh_mesh_weld(MeshDef& khmw_d) {
-    if (!khmw_d.indices.empty() || khmw_d.verts.empty()) return;
-    struct KhMwKey {
+inline void mesh_weld(MeshDef& d) {
+    if (!d.indices.empty() || d.verts.empty()) return;
+    struct MwKey {
         MeshVertex v;
-        bool operator==(const KhMwKey& o) const { return memcmp(&v, &o.v, sizeof(MeshVertex)) == 0; }
+        bool operator==(const MwKey& o) const { return memcmp(&v, &o.v, sizeof(MeshVertex)) == 0; }
     };
-    struct KhMwHash {
-        size_t operator()(const KhMwKey& k) const {
+    struct MwHash {
+        size_t operator()(const MwKey& k) const {
             return static_cast<size_t>(CryptoGenerator::fnv1a64_raw(&k.v, sizeof(MeshVertex)));
         }
     };
-    std::unordered_map<KhMwKey, uint32_t, KhMwHash> khmw_map;
-    khmw_map.reserve(khmw_d.verts.size() / 2 + 16);
-    std::vector<MeshVertex> khmw_unique;
-    khmw_unique.reserve(khmw_d.verts.size() / 2 + 16);
-    khmw_d.indices.resize(khmw_d.verts.size());
+    std::unordered_map<MwKey, uint32_t, MwHash> map;
+    map.reserve(d.verts.size() / 2 + 16);
+    std::vector<MeshVertex> unique;
+    unique.reserve(d.verts.size() / 2 + 16);
+    d.indices.resize(d.verts.size());
 
-    for (size_t khmw_i = 0; khmw_i < khmw_d.verts.size(); ++khmw_i) {
-        KhMwKey khmw_k;
-        khmw_k.v = khmw_d.verts[khmw_i];
-        auto khmw_it = khmw_map.find(khmw_k);
-        if (khmw_it == khmw_map.end()) {
-            const uint32_t khmw_id = static_cast<uint32_t>(khmw_unique.size());
-            khmw_unique.push_back(khmw_k.v);
-            khmw_it = khmw_map.emplace(khmw_k, khmw_id).first;
+    for (size_t i = 0; i < d.verts.size(); ++i) {
+        MwKey mw_k;
+        mw_k.v = d.verts[i];
+        auto it = map.find(mw_k);
+        if (it == map.end()) {
+            const uint32_t id = static_cast<uint32_t>(unique.size());
+            unique.push_back(mw_k.v);
+            it = map.emplace(mw_k, id).first;
         }
-        khmw_d.indices[khmw_i] = khmw_it->second;
+        d.indices[i] = it->second;
     }
 
-    khmw_d.verts.swap(khmw_unique);
-    khmw_d.verts.shrink_to_fit();
-    kh_mesh_cache_order(khmw_d);   // KH_MESH_CACHE_ORDER: the same triangles, in cache order.
+    d.verts.swap(unique);
+    d.verts.shrink_to_fit();
+    mesh_cache_order(d);   // MESH_CACHE_ORDER: the same triangles, in cache order.
 }
 
-// KH_OCC_BOX - every mesh's occluder for KH_VIS_OCC, builtin or imported: a box
+// OCC_BOX - every mesh's occluder for VIS_OCC, builtin or imported: a box
 // in normalised mesh space (engine axes; a vertex p is drawn at centre +
 // R (p * size)) that every level of the mesh covers from any camera outside that
 // level's bounds. The proof, per level, runs over the level's closed pieces
@@ -531,30 +531,30 @@ inline void kh_mesh_weld(MeshDef& khmw_d) {
 // the point. The box: the cube inside the ball about the seed (the normalised
 // origin) that no closed piece's triangle of any level enters, grown face by
 // face while the slab it gains meets none - the triangle-box test with the box
-// inflated by KH_OCC_EPS, so the gap stays (far above the float rounding of the
+// inflated by OCC_EPS, so the gap stays (far above the float rounding of the
 // stored box). occ_ok false = no box: a level with no closed piece, pieces
 // inside out, the seed outside their solid or on its surface. occ_hmn /
 // occ_hmx bound every level's vertices, open pieces included (a decimated
 // level's optimum can leave the unit box): what the camera must stay out of,
-// the drawn extent the burial check reads, and - KH_OCC_TARGET - the extent
-// every bounds test gives an object (kh_bounds_size_of, KH_LOD_BOUNDS); made
+// the drawn extent the burial check reads, and - OCC_TARGET - the extent
+// every bounds test gives an object (bounds_size_of, LOD_BOUNDS); made
 // before the proof, for every mesh whose level tables are sound, whatever it
 // decides. Game thread: the builtins in mesh_store, every import before its
 // cache write (a cache load takes the sealed box instead) and every generated
-// mesh (kh_gen_build).
-static constexpr double KH_OCC_EPS = 1.0e-6;
-static constexpr int    KH_OCC_ITERS = 30;   // Bisection steps per face: 2^-30 of its reach.
-static constexpr int    KH_OCC_ROUNDS = 2;   // Passes over the six faces.
+// mesh (gen_build).
+static constexpr double OCC_EPS = 1.0e-6;
+static constexpr int    OCC_ITERS = 30;   // Bisection steps per face: 2^-30 of its reach.
+static constexpr int    OCC_ROUNDS = 2;   // Passes over the six faces.
 // Separating-axis test of a triangle against an axis-aligned box (centre c,
 // half extents h): false only when an axis separates them.
-inline bool kh_occ_tri_box(const double* c, const double* h, const double* p0, const double* p1, const double* p2) {
+inline bool occ_tri_box(const double* c, const double* h, const double* p0, const double* p1, const double* p2) {
     const double v[3][3] = { { p0[0] - c[0], p0[1] - c[1], p0[2] - c[2] },
                              { p1[0] - c[0], p1[1] - c[1], p1[2] - c[2] },
                              { p2[0] - c[0], p2[1] - c[1], p2[2] - c[2] } };
     const double e[3][3] = { { v[1][0] - v[0][0], v[1][1] - v[0][1], v[1][2] - v[0][2] },
                              { v[2][0] - v[1][0], v[2][1] - v[1][1], v[2][2] - v[1][2] },
                              { v[0][0] - v[2][0], v[0][1] - v[2][1], v[0][2] - v[2][2] } };
-    auto khot_sep = [&](const double* u) -> bool {
+    auto sep = [&](const double* u) -> bool {
         const double r = h[0] * fabs(u[0]) + h[1] * fabs(u[1]) + h[2] * fabs(u[2]);
         double mn = 1.0e300, mx = -1.0e300;
         for (int i = 0; i < 3; ++i) {
@@ -566,20 +566,20 @@ inline bool kh_occ_tri_box(const double* c, const double* h, const double* p0, c
     };
     for (int k = 0; k < 3; ++k) {
         const double u[3] = { k == 0 ? 1.0 : 0.0, k == 1 ? 1.0 : 0.0, k == 2 ? 1.0 : 0.0 };
-        if (khot_sep(u)) return false;
+        if (sep(u)) return false;
         for (int j = 0; j < 3; ++j) {   // The box axis crossed with each edge.
             const double a[3] = { u[1] * e[j][2] - u[2] * e[j][1], u[2] * e[j][0] - u[0] * e[j][2],
                                   u[0] * e[j][1] - u[1] * e[j][0] };
-            if (khot_sep(a)) return false;
+            if (sep(a)) return false;
         }
     }
     const double n[3] = { e[0][1] * e[1][2] - e[0][2] * e[1][1], e[0][2] * e[1][0] - e[0][0] * e[1][2],
                           e[0][0] * e[1][1] - e[0][1] * e[1][0] };
-    return !khot_sep(n);
+    return !sep(n);
 }
 // Squared distance from the origin to a segment and to a triangle (Ericson's
 // regions; a triangle with no area falls back to its three edges).
-inline double kh_occ_seg_d2(const double* a, const double* b) {
+inline double occ_seg_d2(const double* a, const double* b) {
     const double d[3] = { b[0] - a[0], b[1] - a[1], b[2] - a[2] };
     const double l2 = d[0] * d[0] + d[1] * d[1] + d[2] * d[2];
     double t = l2 > 0.0 ? -(a[0] * d[0] + a[1] * d[1] + a[2] * d[2]) / l2 : 0.0;
@@ -587,348 +587,348 @@ inline double kh_occ_seg_d2(const double* a, const double* b) {
     const double q[3] = { a[0] + t * d[0], a[1] + t * d[1], a[2] + t * d[2] };
     return q[0] * q[0] + q[1] * q[1] + q[2] * q[2];
 }
-inline double kh_occ_tri_d2(const double* a, const double* b, const double* c) {
-    auto khod_dot = [](const double* x, const double* y) { return x[0] * y[0] + x[1] * y[1] + x[2] * y[2]; };
+inline double occ_tri_d2(const double* a, const double* b, const double* c) {
+    auto dot = [](const double* x, const double* y) { return x[0] * y[0] + x[1] * y[1] + x[2] * y[2]; };
     const double ab[3] = { b[0] - a[0], b[1] - a[1], b[2] - a[2] };
     const double ac[3] = { c[0] - a[0], c[1] - a[1], c[2] - a[2] };
     const double pa[3] = { -a[0], -a[1], -a[2] }, pb[3] = { -b[0], -b[1], -b[2] }, pc[3] = { -c[0], -c[1], -c[2] };
-    const double d1 = khod_dot(ab, pa), d2 = khod_dot(ac, pa);
-    if (d1 <= 0.0 && d2 <= 0.0) return khod_dot(a, a);
-    const double d3 = khod_dot(ab, pb), d4 = khod_dot(ac, pb);
-    if (d3 >= 0.0 && d4 <= d3) return khod_dot(b, b);
-    const double d5 = khod_dot(ab, pc), d6 = khod_dot(ac, pc);
-    if (d6 >= 0.0 && d5 <= d6) return khod_dot(c, c);
+    const double d1 = dot(ab, pa), d2 = dot(ac, pa);
+    if (d1 <= 0.0 && d2 <= 0.0) return dot(a, a);
+    const double d3 = dot(ab, pb), d4 = dot(ac, pb);
+    if (d3 >= 0.0 && d4 <= d3) return dot(b, b);
+    const double d5 = dot(ab, pc), d6 = dot(ac, pc);
+    if (d6 >= 0.0 && d5 <= d6) return dot(c, c);
     const double vc = d1 * d4 - d3 * d2, vb = d5 * d2 - d1 * d6, va = d3 * d6 - d5 * d4;
     if (!(va + vb + vc > 0.0)) {
-        const double s0 = kh_occ_seg_d2(a, b), s1 = kh_occ_seg_d2(b, c), s2 = kh_occ_seg_d2(c, a);
+        const double s0 = occ_seg_d2(a, b), s1 = occ_seg_d2(b, c), s2 = occ_seg_d2(c, a);
         return s0 < s1 ? (s0 < s2 ? s0 : s2) : (s1 < s2 ? s1 : s2);
     }
-    if (vc <= 0.0 && d1 >= 0.0 && d3 <= 0.0) return kh_occ_seg_d2(a, b);
-    if (vb <= 0.0 && d2 >= 0.0 && d6 <= 0.0) return kh_occ_seg_d2(a, c);
-    if (va <= 0.0 && d4 - d3 >= 0.0 && d5 - d6 >= 0.0) return kh_occ_seg_d2(b, c);
+    if (vc <= 0.0 && d1 >= 0.0 && d3 <= 0.0) return occ_seg_d2(a, b);
+    if (vb <= 0.0 && d2 >= 0.0 && d6 <= 0.0) return occ_seg_d2(a, c);
+    if (va <= 0.0 && d4 - d3 >= 0.0 && d5 - d6 >= 0.0) return occ_seg_d2(b, c);
     const double inv = 1.0 / (va + vb + vc), v = vb * inv, w = vc * inv;
     const double q[3] = { a[0] + ab[0] * v + ac[0] * w, a[1] + ab[1] * v + ac[1] * w, a[2] + ab[2] * v + ac[2] * w };
-    return khod_dot(q, q);
+    return dot(q, q);
 }
-inline void kh_mesh_occ_prep(MeshDef& khop_d) {
-    khop_d.occ_ok = false;
-    const size_t khop_nv = khop_d.verts.size(), khop_ni = khop_d.indices.size();
+inline void mesh_occ_prep(MeshDef& d) {
+    d.occ_ok = false;
+    const size_t nv = d.verts.size(), ni = d.indices.size();
     // The levels' index ranges, 0 .. lod_n (level 0 ends where level 1 begins).
-    std::vector<std::pair<size_t, size_t>> khop_lv;
-    khop_lv.emplace_back(static_cast<size_t>(0), khop_d.lod_n ? static_cast<size_t>(khop_d.lod_istart[0]) : khop_ni);
-    for (int khop_l = 0; khop_l < static_cast<int>(khop_d.lod_n) && khop_l < KH_LOD_MAX; ++khop_l) {
-        khop_lv.emplace_back(khop_d.lod_istart[khop_l], khop_d.lod_icount[khop_l]);
+    std::vector<std::pair<size_t, size_t>> lv;
+    lv.emplace_back(static_cast<size_t>(0), d.lod_n ? static_cast<size_t>(d.lod_istart[0]) : ni);
+    for (int l = 0; l < static_cast<int>(d.lod_n) && l < LOD_MAX; ++l) {
+        lv.emplace_back(d.lod_istart[l], d.lod_icount[l]);
     }
-    for (const auto& khop_r : khop_lv) {
-        if (khop_r.first > khop_ni || khop_r.second > khop_ni - khop_r.first) return;
+    for (const auto& r : lv) {
+        if (r.first > ni || r.second > ni - r.first) return;
     }
-    // KH_OCC_TARGET: the bounds of everything every level draws, open pieces and
+    // OCC_TARGET: the bounds of everything every level draws, open pieces and
     // triangles with no area included, made before the proof and kept whatever it
     // decides (-0 read as +0, as the weld below reads it). Every index is checked
     // here, so the proof's own walk over these ranges stays in range.
-    double khop_mn[3] = { 1.0e300, 1.0e300, 1.0e300 }, khop_mx[3] = { -1.0e300, -1.0e300, -1.0e300 };
-    for (const auto& khop_r : khop_lv) {
-        for (size_t khop_t = khop_r.first; khop_t < khop_r.first + khop_r.second; ++khop_t) {
-            const uint32_t khop_ix = khop_d.indices[khop_t];
-            if (khop_ix >= khop_nv) return;
-            for (int khop_k = 0; khop_k < 3; ++khop_k) {
-                const float khop_f = khop_d.verts[khop_ix].pos[khop_k];
-                if (!(khop_f > -1.0e6f && khop_f < 1.0e6f)) return;   // NaN or absurd.
-                const double khop_x = static_cast<double>(khop_f + 0.0f);
-                if (khop_x < khop_mn[khop_k]) khop_mn[khop_k] = khop_x;
-                if (khop_x > khop_mx[khop_k]) khop_mx[khop_k] = khop_x;
+    double mn[3] = { 1.0e300, 1.0e300, 1.0e300 }, mx[3] = { -1.0e300, -1.0e300, -1.0e300 };
+    for (const auto& r : lv) {
+        for (size_t t = r.first; t < r.first + r.second; ++t) {
+            const uint32_t ix = d.indices[t];
+            if (ix >= nv) return;
+            for (int op_k = 0; op_k < 3; ++op_k) {
+                const float f = d.verts[ix].pos[op_k];
+                if (!(f > -1.0e6f && f < 1.0e6f)) return;   // NaN or absurd.
+                const double x = static_cast<double>(f + 0.0f);
+                if (x < mn[op_k]) mn[op_k] = x;
+                if (x > mx[op_k]) mx[op_k] = x;
             }
         }
     }
-    if (!(khop_mn[0] <= khop_mx[0] && khop_mn[1] <= khop_mx[1] && khop_mn[2] <= khop_mx[2])) return;
-    for (int khop_k = 0; khop_k < 3; ++khop_k) {
-        khop_d.occ_hmn[khop_k] = static_cast<float>(khop_mn[khop_k]);   // Exact: float positions.
-        khop_d.occ_hmx[khop_k] = static_cast<float>(khop_mx[khop_k]);
+    if (!(mn[0] <= mx[0] && mn[1] <= mx[1] && mn[2] <= mx[2])) return;
+    for (int op_k = 0; op_k < 3; ++op_k) {
+        d.occ_hmn[op_k] = static_cast<float>(mn[op_k]);   // Exact: float positions.
+        d.occ_hmx[op_k] = static_cast<float>(mx[op_k]);
     }
-    if (khop_nv < 4u || khop_ni < 12u || khop_ni % 3u != 0u) return;
-    for (const auto& khop_r : khop_lv) {
-        if (khop_r.second < 12u || khop_r.second % 3u != 0u) return;
+    if (nv < 4u || ni < 12u || ni % 3u != 0u) return;
+    for (const auto& r : lv) {
+        if (r.second < 12u || r.second % 3u != 0u) return;
     }
     // Positions welded by their exact bits (-0 read as +0): an edge two
     // triangles share is two positions they share, whatever else differs.
-    struct KhOpKey {
+    struct OpKey {
         float p[3];
-        bool operator==(const KhOpKey& o) const { return memcmp(p, o.p, sizeof(p)) == 0; }
+        bool operator==(const OpKey& o) const { return memcmp(p, o.p, sizeof(p)) == 0; }
     };
-    struct KhOpHash {
-        size_t operator()(const KhOpKey& k) const {
+    struct OpHash {
+        size_t operator()(const OpKey& k) const {
             return static_cast<size_t>(CryptoGenerator::fnv1a64_raw(k.p, sizeof(k.p)));
         }
     };
-    std::unordered_map<KhOpKey, uint32_t, KhOpHash> khop_map;
-    khop_map.reserve(khop_nv);
-    std::vector<uint32_t> khop_pid(khop_nv);
-    std::vector<double> khop_p;   // 3 per position.
-    khop_p.reserve(khop_nv * 3u);
-    for (size_t khop_v = 0; khop_v < khop_nv; ++khop_v) {
-        KhOpKey khop_k;
-        for (int khop_c = 0; khop_c < 3; ++khop_c) {
-            const float khop_x = khop_d.verts[khop_v].pos[khop_c];
-            if (!(khop_x > -1.0e6f && khop_x < 1.0e6f)) return;   // NaN or absurd.
-            khop_k.p[khop_c] = khop_x + 0.0f;
+    std::unordered_map<OpKey, uint32_t, OpHash> map;
+    map.reserve(nv);
+    std::vector<uint32_t> pid(nv);
+    std::vector<double> op_p;   // 3 per position.
+    op_p.reserve(nv * 3u);
+    for (size_t v = 0; v < nv; ++v) {
+        OpKey op_k;
+        for (int op_c = 0; op_c < 3; ++op_c) {
+            const float x = d.verts[v].pos[op_c];
+            if (!(x > -1.0e6f && x < 1.0e6f)) return;   // NaN or absurd.
+            op_k.p[op_c] = x + 0.0f;
         }
-        auto khop_it = khop_map.find(khop_k);
-        if (khop_it == khop_map.end()) {
-            khop_it = khop_map.emplace(khop_k, static_cast<uint32_t>(khop_p.size() / 3u)).first;
-            for (int khop_c = 0; khop_c < 3; ++khop_c) khop_p.push_back(khop_k.p[khop_c]);
+        auto it = map.find(op_k);
+        if (it == map.end()) {
+            it = map.emplace(op_k, static_cast<uint32_t>(op_p.size() / 3u)).first;
+            for (int op_c = 0; op_c < 3; ++op_c) op_p.push_back(op_k.p[op_c]);
         }
-        khop_pid[khop_v] = khop_it->second;
+        pid[v] = it->second;
     }
     // Every level: its closed pieces' triangles with area kept.
-    std::vector<uint32_t> khop_tri;   // Position ids, 3 per triangle, level after level.
-    std::vector<size_t> khop_lt;      // Where each level's triangles begin in khop_tri, then the end.
-    struct KhOpEdge {
+    std::vector<uint32_t> op_tri;   // Position ids, 3 per triangle, level after level.
+    std::vector<size_t> lt;      // Where each level's triangles begin in op_tri, then the end.
+    struct OpEdge {
         int32_t bal;    // Crossings one way minus the other.
         uint32_t tri;   // A triangle using it: the edge's piece.
     };
-    std::unordered_map<uint64_t, KhOpEdge> khop_edge;
-    std::vector<uint32_t> khop_lvt;   // This level's triangles with area.
-    std::vector<uint32_t> khop_par;   // Union-find over them: the pieces.
-    std::vector<uint8_t> khop_open;   // Per piece root: an edge of it does not balance.
-    for (const auto& khop_r : khop_lv) {
-        khop_lt.push_back(khop_tri.size());
-        khop_edge.clear();
-        khop_lvt.clear();
-        for (size_t khop_t = khop_r.first; khop_t < khop_r.first + khop_r.second; khop_t += 3u) {
-            uint32_t khop_q[3];
-            for (int khop_c = 0; khop_c < 3; ++khop_c) {
-                khop_q[khop_c] = khop_pid[khop_d.indices[khop_t + static_cast<size_t>(khop_c)]];
+    std::unordered_map<uint64_t, OpEdge> edge;
+    std::vector<uint32_t> lvt;   // This level's triangles with area.
+    std::vector<uint32_t> par;   // Union-find over them: the pieces.
+    std::vector<uint8_t> open;   // Per piece root: an edge of it does not balance.
+    for (const auto& r : lv) {
+        lt.push_back(op_tri.size());
+        edge.clear();
+        lvt.clear();
+        for (size_t t = r.first; t < r.first + r.second; t += 3u) {
+            uint32_t q[3];
+            for (int op_c = 0; op_c < 3; ++op_c) {
+                q[op_c] = pid[d.indices[t + static_cast<size_t>(op_c)]];
             }
-            if (khop_q[0] == khop_q[1] || khop_q[1] == khop_q[2] || khop_q[0] == khop_q[2]) continue;   // No area.
-            khop_lvt.insert(khop_lvt.end(), khop_q, khop_q + 3);
+            if (q[0] == q[1] || q[1] == q[2] || q[0] == q[2]) continue;   // No area.
+            lvt.insert(lvt.end(), q, q + 3);
         }
-        const uint32_t khop_ln = static_cast<uint32_t>(khop_lvt.size() / 3u);
-        khop_par.resize(khop_ln);
-        for (uint32_t khop_i = 0; khop_i < khop_ln; ++khop_i) khop_par[khop_i] = khop_i;
-        auto khop_find = [&](uint32_t khop_x) -> uint32_t {
-            while (khop_par[khop_x] != khop_x) {
-                khop_par[khop_x] = khop_par[khop_par[khop_x]];
-                khop_x = khop_par[khop_x];
+        const uint32_t ln = static_cast<uint32_t>(lvt.size() / 3u);
+        par.resize(ln);
+        for (uint32_t i = 0; i < ln; ++i) par[i] = i;
+        auto find = [&](uint32_t x) -> uint32_t {
+            while (par[x] != x) {
+                par[x] = par[par[x]];
+                x = par[x];
             }
-            return khop_x;
+            return x;
         };
-        for (uint32_t khop_i = 0; khop_i < khop_ln; ++khop_i) {
-            for (int khop_c = 0; khop_c < 3; ++khop_c) {
-                const uint32_t khop_a = khop_lvt[khop_i * 3u + static_cast<uint32_t>(khop_c)];
-                const uint32_t khop_b = khop_lvt[khop_i * 3u + static_cast<uint32_t>((khop_c + 1) % 3)];
-                const uint64_t khop_key = khop_a < khop_b ? (static_cast<uint64_t>(khop_b) << 32) | khop_a
-                                                          : (static_cast<uint64_t>(khop_a) << 32) | khop_b;
-                const int32_t khop_dir = khop_a < khop_b ? 1 : -1;
-                auto khop_it = khop_edge.find(khop_key);
-                if (khop_it == khop_edge.end()) {
-                    khop_edge.emplace(khop_key, KhOpEdge{ khop_dir, khop_i });
+        for (uint32_t i = 0; i < ln; ++i) {
+            for (int op_c = 0; op_c < 3; ++op_c) {
+                const uint32_t op_a = lvt[i * 3u + static_cast<uint32_t>(op_c)];
+                const uint32_t op_b = lvt[i * 3u + static_cast<uint32_t>((op_c + 1) % 3)];
+                const uint64_t key = op_a < op_b ? (static_cast<uint64_t>(op_b) << 32) | op_a
+                                                          : (static_cast<uint64_t>(op_a) << 32) | op_b;
+                const int32_t dir = op_a < op_b ? 1 : -1;
+                auto it = edge.find(key);
+                if (it == edge.end()) {
+                    edge.emplace(key, OpEdge{ dir, i });
                 } else {
-                    khop_it->second.bal += khop_dir;
-                    const uint32_t khop_ra = khop_find(khop_i), khop_rb = khop_find(khop_it->second.tri);
-                    if (khop_ra != khop_rb) khop_par[khop_ra] = khop_rb;
+                    it->second.bal += dir;
+                    const uint32_t ra = find(i), rb = find(it->second.tri);
+                    if (ra != rb) par[ra] = rb;
                 }
             }
         }
         // A piece is open when any of its edges does not balance (a hole, a
         // crack, a sheet); each edge belongs to exactly one piece.
-        khop_open.assign(khop_ln, 0u);
-        for (const auto& khop_kv : khop_edge) {
-            if (khop_kv.second.bal != 0) khop_open[khop_find(khop_kv.second.tri)] = 1u;
+        open.assign(ln, 0u);
+        for (const auto& kv : edge) {
+            if (kv.second.bal != 0) open[find(kv.second.tri)] = 1u;
         }
-        for (uint32_t khop_i = 0; khop_i < khop_ln; ++khop_i) {
-            if (khop_open[khop_find(khop_i)]) continue;
-            khop_tri.insert(khop_tri.end(), khop_lvt.begin() + khop_i * 3u, khop_lvt.begin() + khop_i * 3u + 3u);
+        for (uint32_t i = 0; i < ln; ++i) {
+            if (open[find(i)]) continue;
+            op_tri.insert(op_tri.end(), lvt.begin() + i * 3u, lvt.begin() + i * 3u + 3u);
         }
-        if (khop_tri.size() == khop_lt.back()) return;   // No closed piece at this level.
+        if (op_tri.size() == lt.back()) return;   // No closed piece at this level.
     }
-    khop_lt.push_back(khop_tri.size());
-    const size_t khop_nt = khop_tri.size() / 3u;
-    if (khop_nt < 4u) return;
-    auto khop_pt = [&](size_t khop_t, int khop_c) -> const double* {
-        return &khop_p[static_cast<size_t>(khop_tri[khop_t * 3u + static_cast<size_t>(khop_c)]) * 3u];
+    lt.push_back(op_tri.size());
+    const size_t nt = op_tri.size() / 3u;
+    if (nt < 4u) return;
+    auto pt = [&](size_t t, int op_c) -> const double* {
+        return &op_p[static_cast<size_t>(op_tri[t * 3u + static_cast<size_t>(op_c)]) * 3u];
     };
     // The seed inside every level's closed pieces (winding at least 1, +g
     // outward) and clear of every one of their triangles.
-    for (size_t khop_l = 0; khop_l + 1u < khop_lt.size(); ++khop_l) {
-        double khop_w = 0.0;
-        for (size_t khop_t = khop_lt[khop_l] / 3u; khop_t < khop_lt[khop_l + 1u] / 3u; ++khop_t) {
-            const double* a = khop_pt(khop_t, 0);
-            const double* b = khop_pt(khop_t, 1);
-            const double* c = khop_pt(khop_t, 2);
+    for (size_t l = 0; l + 1u < lt.size(); ++l) {
+        double w = 0.0;
+        for (size_t t = lt[l] / 3u; t < lt[l + 1u] / 3u; ++t) {
+            const double* a = pt(t, 0);
+            const double* b = pt(t, 1);
+            const double* c = pt(t, 2);
             const double la = sqrt(a[0] * a[0] + a[1] * a[1] + a[2] * a[2]);
             const double lb = sqrt(b[0] * b[0] + b[1] * b[1] + b[2] * b[2]);
             const double lc = sqrt(c[0] * c[0] + c[1] * c[1] + c[2] * c[2]);
             if (!(la > 0.0 && lb > 0.0 && lc > 0.0)) return;   // The seed on a vertex.
-            const double khop_det = a[0] * (b[1] * c[2] - b[2] * c[1]) + a[1] * (b[2] * c[0] - b[0] * c[2]) +
-                                    a[2] * (b[0] * c[1] - b[1] * c[0]);
-            const double khop_den = la * lb * lc + (a[0] * b[0] + a[1] * b[1] + a[2] * b[2]) * lc +
-                                    (a[0] * c[0] + a[1] * c[1] + a[2] * c[2]) * lb +
-                                    (b[0] * c[0] + b[1] * c[1] + b[2] * c[2]) * la;
-            khop_w += 2.0 * atan2(khop_det, khop_den);   // The solid angle (Van Oosterom - Strackee).
+            const double det = a[0] * (b[1] * c[2] - b[2] * c[1]) + a[1] * (b[2] * c[0] - b[0] * c[2]) +
+                               a[2] * (b[0] * c[1] - b[1] * c[0]);
+            const double den = la * lb * lc + (a[0] * b[0] + a[1] * b[1] + a[2] * b[2]) * lc +
+                               (a[0] * c[0] + a[1] * c[1] + a[2] * c[2]) * lb +
+                               (b[0] * c[0] + b[1] * c[1] + b[2] * c[2]) * la;
+            w += 2.0 * atan2(det, den);   // The solid angle (Van Oosterom - Strackee).
         }
-        khop_w /= 4.0 * 3.14159265358979323846;
-        const double khop_wr = floor(khop_w + 0.5);
-        if (!(khop_wr >= 1.0) || !(fabs(khop_w - khop_wr) < 0.25)) return;   // Outside the solid, or inside out.
+        w /= 4.0 * 3.14159265358979323846;
+        const double wr = floor(w + 0.5);
+        if (!(wr >= 1.0) || !(fabs(w - wr) < 0.25)) return;   // Outside the solid, or inside out.
     }
-    double khop_d2 = 1.0e300;
-    for (size_t khop_t = 0; khop_t < khop_nt; ++khop_t) {
-        const double khop_e = kh_occ_tri_d2(khop_pt(khop_t, 0), khop_pt(khop_t, 1), khop_pt(khop_t, 2));
-        if (khop_e < khop_d2) khop_d2 = khop_e;
+    double d2 = 1.0e300;
+    for (size_t t = 0; t < nt; ++t) {
+        const double e = occ_tri_d2(pt(t, 0), pt(t, 1), pt(t, 2));
+        if (e < d2) d2 = e;
     }
-    const double khop_r0 = (sqrt(khop_d2) - KH_OCC_EPS) / sqrt(3.0);   // Its corners KH_OCC_EPS inside the ball.
-    if (!(khop_r0 > KH_OCC_EPS)) return;
-    double khop_lo[3] = { -khop_r0, -khop_r0, -khop_r0 }, khop_hi[3] = { khop_r0, khop_r0, khop_r0 };
+    const double r0 = (sqrt(d2) - OCC_EPS) / sqrt(3.0);   // Its corners OCC_EPS inside the ball.
+    if (!(r0 > OCC_EPS)) return;
+    double lo[3] = { -r0, -r0, -r0 }, hi[3] = { r0, r0, r0 };
     // A uniform grid of the closed pieces' triangles over the bounds, for the
     // slab queries.
-    int khop_g = static_cast<int>(cbrt(static_cast<double>(khop_nt) * 0.5));
-    khop_g = khop_g < 1 ? 1 : (khop_g > 64 ? 64 : khop_g);
-    double khop_inv[3];
-    for (int khop_k = 0; khop_k < 3; ++khop_k) {
-        const double khop_ext = khop_mx[khop_k] - khop_mn[khop_k];
-        khop_inv[khop_k] = khop_ext > 0.0 ? static_cast<double>(khop_g) / khop_ext : 0.0;
+    int g = static_cast<int>(cbrt(static_cast<double>(nt) * 0.5));
+    g = g < 1 ? 1 : (g > 64 ? 64 : g);
+    double inv[3];
+    for (int op_k = 0; op_k < 3; ++op_k) {
+        const double ext = mx[op_k] - mn[op_k];
+        inv[op_k] = ext > 0.0 ? static_cast<double>(g) / ext : 0.0;
     }
-    auto khop_cell = [&](double khop_x, int khop_k) -> int {
-        const double khop_f = floor((khop_x - khop_mn[khop_k]) * khop_inv[khop_k]);
-        return khop_f < 0.0 ? 0 : (khop_f > static_cast<double>(khop_g - 1) ? khop_g - 1 : static_cast<int>(khop_f));
+    auto cell = [&](double x, int op_k) -> int {
+        const double f = floor((x - mn[op_k]) * inv[op_k]);
+        return f < 0.0 ? 0 : (f > static_cast<double>(g - 1) ? g - 1 : static_cast<int>(f));
     };
-    const size_t khop_gn = static_cast<size_t>(khop_g) * static_cast<size_t>(khop_g) * static_cast<size_t>(khop_g);
-    std::vector<uint32_t> khop_cs(khop_gn + 1u, 0u), khop_cl;
-    for (int khop_pass = 0; khop_pass < 2; ++khop_pass) {   // Count, then fill (CSR).
-        if (khop_pass == 1) {
-            for (size_t khop_i = 1; khop_i <= khop_gn; ++khop_i) khop_cs[khop_i] += khop_cs[khop_i - 1u];
-            khop_cl.assign(khop_cs[khop_gn], 0u);
+    const size_t gn = static_cast<size_t>(g) * static_cast<size_t>(g) * static_cast<size_t>(g);
+    std::vector<uint32_t> cs(gn + 1u, 0u), cl;
+    for (int pass = 0; pass < 2; ++pass) {   // Count, then fill (CSR).
+        if (pass == 1) {
+            for (size_t i = 1; i <= gn; ++i) cs[i] += cs[i - 1u];
+            cl.assign(cs[gn], 0u);
         }
-        std::vector<uint32_t> khop_fill;
-        if (khop_pass == 1) khop_fill.assign(khop_cs.begin(), khop_cs.end() - 1);
-        for (size_t khop_t = 0; khop_t < khop_nt; ++khop_t) {
-            int khop_i0[3], khop_i1[3];
-            for (int khop_k = 0; khop_k < 3; ++khop_k) {
-                double khop_a = khop_pt(khop_t, 0)[khop_k], khop_b = khop_a;
-                for (int khop_c = 1; khop_c < 3; ++khop_c) {
-                    const double khop_x = khop_pt(khop_t, khop_c)[khop_k];
-                    if (khop_x < khop_a) khop_a = khop_x;
-                    if (khop_x > khop_b) khop_b = khop_x;
+        std::vector<uint32_t> op_fill;
+        if (pass == 1) op_fill.assign(cs.begin(), cs.end() - 1);
+        for (size_t t = 0; t < nt; ++t) {
+            int i0[3], i1[3];
+            for (int op_k = 0; op_k < 3; ++op_k) {
+                double op_a = pt(t, 0)[op_k], op_b = op_a;
+                for (int op_c = 1; op_c < 3; ++op_c) {
+                    const double x = pt(t, op_c)[op_k];
+                    if (x < op_a) op_a = x;
+                    if (x > op_b) op_b = x;
                 }
-                khop_i0[khop_k] = khop_cell(khop_a - KH_OCC_EPS, khop_k);
-                khop_i1[khop_k] = khop_cell(khop_b + KH_OCC_EPS, khop_k);
+                i0[op_k] = cell(op_a - OCC_EPS, op_k);
+                i1[op_k] = cell(op_b + OCC_EPS, op_k);
             }
-            for (int khop_z = khop_i0[2]; khop_z <= khop_i1[2]; ++khop_z)
-                for (int khop_y = khop_i0[1]; khop_y <= khop_i1[1]; ++khop_y)
-                    for (int khop_x = khop_i0[0]; khop_x <= khop_i1[0]; ++khop_x) {
-                        const size_t khop_ci = (static_cast<size_t>(khop_z) * khop_g + khop_y) * khop_g + khop_x;
-                        if (khop_pass == 0) ++khop_cs[khop_ci + 1u];
-                        else khop_cl[khop_fill[khop_ci]++] = static_cast<uint32_t>(khop_t);
+            for (int z = i0[2]; z <= i1[2]; ++z)
+                for (int y = i0[1]; y <= i1[1]; ++y)
+                    for (int x = i0[0]; x <= i1[0]; ++x) {
+                        const size_t ci = (static_cast<size_t>(z) * g + y) * g + x;
+                        if (pass == 0) ++cs[ci + 1u];
+                        else cl[op_fill[ci]++] = static_cast<uint32_t>(t);
                     }
         }
     }
-    std::vector<uint32_t> khop_seen(khop_nt, 0u);
-    uint32_t khop_stamp = 0u;
+    std::vector<uint32_t> seen(nt, 0u);
+    uint32_t stamp = 0u;
     // Whether any closed piece's triangle meets the box [bmn, bmx] inflated by
-    // KH_OCC_EPS.
-    auto khop_hits = [&](const double* khop_bmn, const double* khop_bmx) -> bool {
-        if (++khop_stamp == 0u) { std::fill(khop_seen.begin(), khop_seen.end(), 0u); khop_stamp = 1u; }
-        double khop_c[3], khop_h[3];
-        int khop_i0[3], khop_i1[3];
-        for (int khop_k = 0; khop_k < 3; ++khop_k) {
-            khop_c[khop_k] = 0.5 * (khop_bmn[khop_k] + khop_bmx[khop_k]);
-            khop_h[khop_k] = 0.5 * (khop_bmx[khop_k] - khop_bmn[khop_k]) + KH_OCC_EPS;
-            khop_i0[khop_k] = khop_cell(khop_bmn[khop_k] - KH_OCC_EPS, khop_k);
-            khop_i1[khop_k] = khop_cell(khop_bmx[khop_k] + KH_OCC_EPS, khop_k);
+    // OCC_EPS.
+    auto hits = [&](const double* bmn, const double* bmx) -> bool {
+        if (++stamp == 0u) { std::fill(seen.begin(), seen.end(), 0u); stamp = 1u; }
+        double op_c[3], h[3];
+        int i0[3], i1[3];
+        for (int op_k = 0; op_k < 3; ++op_k) {
+            op_c[op_k] = 0.5 * (bmn[op_k] + bmx[op_k]);
+            h[op_k] = 0.5 * (bmx[op_k] - bmn[op_k]) + OCC_EPS;
+            i0[op_k] = cell(bmn[op_k] - OCC_EPS, op_k);
+            i1[op_k] = cell(bmx[op_k] + OCC_EPS, op_k);
         }
-        for (int khop_z = khop_i0[2]; khop_z <= khop_i1[2]; ++khop_z)
-            for (int khop_y = khop_i0[1]; khop_y <= khop_i1[1]; ++khop_y)
-                for (int khop_x = khop_i0[0]; khop_x <= khop_i1[0]; ++khop_x) {
-                    const size_t khop_ci = (static_cast<size_t>(khop_z) * khop_g + khop_y) * khop_g + khop_x;
-                    for (uint32_t khop_j = khop_cs[khop_ci]; khop_j < khop_cs[khop_ci + 1u]; ++khop_j) {
-                        const uint32_t khop_t = khop_cl[khop_j];
-                        if (khop_seen[khop_t] == khop_stamp) continue;
-                        khop_seen[khop_t] = khop_stamp;
-                        if (kh_occ_tri_box(khop_c, khop_h, khop_pt(khop_t, 0), khop_pt(khop_t, 1),
-                                           khop_pt(khop_t, 2))) return true;
+        for (int z = i0[2]; z <= i1[2]; ++z)
+            for (int y = i0[1]; y <= i1[1]; ++y)
+                for (int x = i0[0]; x <= i1[0]; ++x) {
+                    const size_t ci = (static_cast<size_t>(z) * g + y) * g + x;
+                    for (uint32_t j = cs[ci]; j < cs[ci + 1u]; ++j) {
+                        const uint32_t t = cl[j];
+                        if (seen[t] == stamp) continue;
+                        seen[t] = stamp;
+                        if (occ_tri_box(op_c, h, pt(t, 0), pt(t, 1),
+                                        pt(t, 2))) return true;
                     }
                 }
         return false;
     };
     // Growth: each face in turn, as far as a slab of the growth stays clear.
     // The solid ends inside the bounds, so a face never passes them.
-    for (int khop_rd = 0; khop_rd < KH_OCC_ROUNDS; ++khop_rd) {
-        for (int khop_f = 0; khop_f < 6; ++khop_f) {
-            const int khop_ax = khop_f >> 1;
-            const bool khop_up = (khop_f & 1) == 0;
-            double khop_a = khop_up ? khop_hi[khop_ax] : khop_lo[khop_ax];   // Clear so far.
-            double khop_b = khop_up ? khop_mx[khop_ax] : khop_mn[khop_ax];
-            if (khop_up ? !(khop_b > khop_a) : !(khop_b < khop_a)) continue;
-            for (int khop_it = 0; khop_it < KH_OCC_ITERS; ++khop_it) {
-                const double khop_m = 0.5 * (khop_a + khop_b);
-                double khop_smn[3] = { khop_lo[0], khop_lo[1], khop_lo[2] };
-                double khop_smx[3] = { khop_hi[0], khop_hi[1], khop_hi[2] };
-                if (khop_up) { khop_smn[khop_ax] = khop_a; khop_smx[khop_ax] = khop_m; }
-                else         { khop_smn[khop_ax] = khop_m; khop_smx[khop_ax] = khop_a; }
-                if (khop_hits(khop_smn, khop_smx)) khop_b = khop_m; else khop_a = khop_m;
+    for (int rd = 0; rd < OCC_ROUNDS; ++rd) {
+        for (int f = 0; f < 6; ++f) {
+            const int ax = f >> 1;
+            const bool up = (f & 1) == 0;
+            double op_a = up ? hi[ax] : lo[ax];   // Clear so far.
+            double op_b = up ? mx[ax] : mn[ax];
+            if (up ? !(op_b > op_a) : !(op_b < op_a)) continue;
+            for (int it = 0; it < OCC_ITERS; ++it) {
+                const double m = 0.5 * (op_a + op_b);
+                double smn[3] = { lo[0], lo[1], lo[2] };
+                double smx[3] = { hi[0], hi[1], hi[2] };
+                if (up) { smn[ax] = op_a; smx[ax] = m; }
+                else         { smn[ax] = m; smx[ax] = op_a; }
+                if (hits(smn, smx)) op_b = m; else op_a = m;
             }
-            if (khop_up) khop_hi[khop_ax] = khop_a; else khop_lo[khop_ax] = khop_a;
+            if (up) hi[ax] = op_a; else lo[ax] = op_a;
         }
     }
-    for (int khop_k = 0; khop_k < 3; ++khop_k) {
-        khop_d.occ_c[khop_k] = static_cast<float>(0.5 * (khop_lo[khop_k] + khop_hi[khop_k]));
-        khop_d.occ_h[khop_k] = static_cast<float>(0.5 * (khop_hi[khop_k] - khop_lo[khop_k]));
+    for (int op_k = 0; op_k < 3; ++op_k) {
+        d.occ_c[op_k] = static_cast<float>(0.5 * (lo[op_k] + hi[op_k]));
+        d.occ_h[op_k] = static_cast<float>(0.5 * (hi[op_k] - lo[op_k]));
     }
-    khop_d.occ_ok = true;
+    d.occ_ok = true;
 }
-// KH_OCC_BOX - the mesh cache's box chunk (KH_OCC_CACHE_MAGIC): the verdict, the
+// OCC_BOX - the mesh cache's box chunk (OCC_CACHE_MAGIC): the verdict, the
 // box and the bounds as a 12-float record (occ_c, occ_h, occ_hmn, occ_hmx), and
 // a seal - FNV-1a 64 over the verdict, the record and everything the proof read
 // (positions, indices, the level tables) - so a cached box is taken only for
 // exactly the triangles it was proven on. Any other byte: a cache miss, and
 // the mesh imports again.
-inline void kh_mesh_occ_record(const MeshDef& khor_d, float khor_r[12]) {
+inline void mesh_occ_record(const MeshDef& d, float r[12]) {
     for (int k = 0; k < 3; ++k) {
-        khor_r[k] = khor_d.occ_c[k];
-        khor_r[3 + k] = khor_d.occ_h[k];
-        khor_r[6 + k] = khor_d.occ_hmn[k];
-        khor_r[9 + k] = khor_d.occ_hmx[k];
+        r[k] = d.occ_c[k];
+        r[3 + k] = d.occ_h[k];
+        r[6 + k] = d.occ_hmn[k];
+        r[9 + k] = d.occ_hmx[k];
     }
 }
-inline uint64_t kh_mesh_occ_seal(const MeshDef& khos_d, uint32_t khos_ok, const float khos_r[12]) {
-    uint64_t khos_h = CryptoGenerator::FNV1A64_OFFSET;
-    khos_h = CryptoGenerator::fnv1a64_update(khos_h, reinterpret_cast<const char*>(&khos_ok), 4);
-    khos_h = CryptoGenerator::fnv1a64_update(khos_h, reinterpret_cast<const char*>(khos_r), 48);
-    for (const MeshVertex& khos_v : khos_d.verts) {
-        khos_h = CryptoGenerator::fnv1a64_update(khos_h, reinterpret_cast<const char*>(khos_v.pos), 12);
+inline uint64_t mesh_occ_seal(const MeshDef& d, uint32_t ok, const float r[12]) {
+    uint64_t h = CryptoGenerator::FNV1A64_OFFSET;
+    h = CryptoGenerator::fnv1a64_update(h, reinterpret_cast<const char*>(&ok), 4);
+    h = CryptoGenerator::fnv1a64_update(h, reinterpret_cast<const char*>(r), 48);
+    for (const MeshVertex& v : d.verts) {
+        h = CryptoGenerator::fnv1a64_update(h, reinterpret_cast<const char*>(v.pos), 12);
     }
-    if (!khos_d.indices.empty()) {
-        khos_h = CryptoGenerator::fnv1a64_update(khos_h, reinterpret_cast<const char*>(khos_d.indices.data()),
-                                                 khos_d.indices.size() * sizeof(uint32_t));
+    if (!d.indices.empty()) {
+        h = CryptoGenerator::fnv1a64_update(h, reinterpret_cast<const char*>(d.indices.data()),
+                                            d.indices.size() * sizeof(uint32_t));
     }
-    const uint32_t khos_ln = khos_d.lod_n;
-    khos_h = CryptoGenerator::fnv1a64_update(khos_h, reinterpret_cast<const char*>(&khos_ln), 4);
-    if (khos_ln) {
-        khos_h = CryptoGenerator::fnv1a64_update(khos_h, reinterpret_cast<const char*>(khos_d.lod_istart),
-                                                 khos_ln * 4u);
-        khos_h = CryptoGenerator::fnv1a64_update(khos_h, reinterpret_cast<const char*>(khos_d.lod_icount),
-                                                 khos_ln * 4u);
+    const uint32_t ln = d.lod_n;
+    h = CryptoGenerator::fnv1a64_update(h, reinterpret_cast<const char*>(&ln), 4);
+    if (ln) {
+        h = CryptoGenerator::fnv1a64_update(h, reinterpret_cast<const char*>(d.lod_istart),
+                                            ln * 4u);
+        h = CryptoGenerator::fnv1a64_update(h, reinterpret_cast<const char*>(d.lod_icount),
+                                            ln * 4u);
     }
-    return khos_h;
+    return h;
 }
 // A read chunk, taken when its seal matches this geometry and the record is
 // sane (finite; a box inside its bounds). False = a cache miss.
-inline bool kh_mesh_occ_accept(MeshDef& khoa_d, uint32_t khoa_ok, const float khoa_r[12], uint64_t khoa_seal) {
-    if (khoa_ok > 1u) return false;
-    for (int k = 0; k < 12; ++k) if (!(khoa_r[k] > -1.0e6f && khoa_r[k] < 1.0e6f)) return false;
-    if (khoa_ok) {
+inline bool mesh_occ_accept(MeshDef& d, uint32_t ok, const float r[12], uint64_t seal) {
+    if (ok > 1u) return false;
+    for (int k = 0; k < 12; ++k) if (!(r[k] > -1.0e6f && r[k] < 1.0e6f)) return false;
+    if (ok) {
         for (int k = 0; k < 3; ++k) {
-            if (!(khoa_r[3 + k] > 0.0f) || khoa_r[k] - khoa_r[3 + k] < khoa_r[6 + k] ||
-                khoa_r[k] + khoa_r[3 + k] > khoa_r[9 + k]) return false;
+            if (!(r[3 + k] > 0.0f) || r[k] - r[3 + k] < r[6 + k] ||
+                r[k] + r[3 + k] > r[9 + k]) return false;
         }
     }
-    if (kh_mesh_occ_seal(khoa_d, khoa_ok, khoa_r) != khoa_seal) return false;
+    if (mesh_occ_seal(d, ok, r) != seal) return false;
     for (int k = 0; k < 3; ++k) {
-        khoa_d.occ_c[k] = khoa_r[k];
-        khoa_d.occ_h[k] = khoa_r[3 + k];
-        khoa_d.occ_hmn[k] = khoa_r[6 + k];
-        khoa_d.occ_hmx[k] = khoa_r[9 + k];
+        d.occ_c[k] = r[k];
+        d.occ_h[k] = r[3 + k];
+        d.occ_hmn[k] = r[6 + k];
+        d.occ_hmx[k] = r[9 + k];
     }
-    khoa_d.occ_ok = khoa_ok != 0u;
+    d.occ_ok = ok != 0u;
     return true;
 }
 }

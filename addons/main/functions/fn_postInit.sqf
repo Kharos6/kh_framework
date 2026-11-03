@@ -1427,7 +1427,6 @@ isNil {
 
 										[_corpse] call KH_fnc_playerRespawnInit;
 										triggerCbaEvent ["KH_eve_playerRespawned", [clientOwner, getPlayerUID _unit, getPlayerID _unit, _unit, _corpse], "GLOBAL", false];
-										nil;
 									}
 								] call KH_fnc_addEventHandler;
 

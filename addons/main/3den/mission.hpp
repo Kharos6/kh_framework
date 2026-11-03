@@ -20,6 +20,7 @@ class Mission
 						"\
 							if (!is3DEN && isServer && (_value isNotEqualTo '')) then {\
 								KH_fnc_serverMissionLoadInit = compile _value;\
+								nil;\
 							};\
 						";
 						defaultValue = "''";
@@ -35,6 +36,7 @@ class Mission
 						"\
 							if (!is3DEN && isServer && (_value isNotEqualTo '')) then {\
 								KH_fnc_serverMissionStartInit = compile _value;\
+								nil;\
 							};\
 						";
 						defaultValue = "''";
@@ -50,6 +52,7 @@ class Mission
 						"\
 							if (!is3DEN && isServer && (_value isNotEqualTo '')) then {\
 								KH_fnc_serverPlayersLoadedInit = compile _value;\
+								nil;\
 							};\
 						";
 						defaultValue = "''";
@@ -65,6 +68,7 @@ class Mission
 						"\
 							if (!is3DEN && isServer && (_value isNotEqualTo '')) then {\
 								KH_fnc_serverMissionEndInit = compile _value;\
+								nil;\
 							};\
 						";
 						defaultValue = "''";
@@ -80,6 +84,7 @@ class Mission
 						"\
 							if (!is3DEN && !isServer && !hasInterface && (_value isNotEqualTo '')) then {\
 								KH_fnc_headlessMissionLoadInit = compile _value;\
+								nil;\
 							};\
 						";
 						defaultValue = "''";
@@ -95,6 +100,7 @@ class Mission
 						"\
 							if (!is3DEN && !isServer && !hasInterface && (_value isNotEqualTo '')) then {\
 								KH_fnc_headlessMissionStartInit = compile _value;\
+								nil;\
 							};\
 						";
 						defaultValue = "''";
@@ -110,6 +116,7 @@ class Mission
 						"\
 							if (!is3DEN && !isServer && !hasInterface && (_value isNotEqualTo '')) then {\
 								KH_fnc_headlessLoadInit = compile _value;\
+								nil;\
 							};\
 						";
 						defaultValue = "''";
@@ -125,6 +132,7 @@ class Mission
 						"\
 							if (!is3DEN && !isServer && !hasInterface && (_value isNotEqualTo '')) then {\
 								KH_fnc_headlessPlayersLoadedInit = compile _value;\
+								nil;\
 							};\
 						";
 						defaultValue = "''";
@@ -140,6 +148,7 @@ class Mission
 						"\
 							if (!is3DEN && !isServer && !hasInterface && (_value isNotEqualTo '')) then {\
 								KH_fnc_headlessMissionEndInit = compile _value;\
+								nil;\
 							};\
 						";
 						defaultValue = "''";
@@ -155,6 +164,7 @@ class Mission
 						"\
 							if (!is3DEN && hasInterface && (_value isNotEqualTo '')) then {\
 								KH_fnc_playerMissionLoadInit = compile _value;\
+								nil;\
 							};\
 						";
 						defaultValue = "''";
@@ -170,6 +180,7 @@ class Mission
 						"\
 							if (!is3DEN && hasInterface && (_value isNotEqualTo '')) then {\
 								KH_fnc_playerMissionStartInit = compile _value;\
+								nil;\
 							};\
 						";
 						defaultValue = "''";
@@ -185,6 +196,7 @@ class Mission
 						"\
 							if (!is3DEN && hasInterface && (_value isNotEqualTo '')) then {\
 								KH_fnc_playerLoadInit = compile _value;\
+								nil;\
 							};\
 						";
 						defaultValue = "''";
@@ -200,6 +212,7 @@ class Mission
 						"\
 							if (!is3DEN && hasInterface && (_value isNotEqualTo '')) then {\
 								KH_fnc_playerPlayersLoadedInit = compile _value;\
+								nil;\
 							};\
 						";
 						defaultValue = "''";
@@ -215,6 +228,7 @@ class Mission
 						"\
 							if (!is3DEN && hasInterface && (_value isNotEqualTo '')) then {\
 								KH_fnc_playerKilledInit = compile _value;\
+								nil;\
 							};\
 						";
 						defaultValue = "''";
@@ -230,6 +244,7 @@ class Mission
 						"\
 							if (!is3DEN && hasInterface && (_value isNotEqualTo '')) then {\
 								KH_fnc_playerRespawnInit = compile _value;\
+								nil;\
 							};\
 						";
 						defaultValue = "''";
@@ -245,6 +260,7 @@ class Mission
 						"\
 							if (!is3DEN && hasInterface && (_value isNotEqualTo '')) then {\
 								KH_fnc_playerSwitchInit = compile _value;\
+								nil;\
 							};\
 						";
 						defaultValue = "''";
@@ -260,6 +276,7 @@ class Mission
 						"\
 							if (!is3DEN && hasInterface && (_value isNotEqualTo '')) then {\
 								KH_fnc_playerControlledUnitChangeInit = compile _value;\
+								nil;\
 							};\
 						";
 						defaultValue = "''";
@@ -275,6 +292,7 @@ class Mission
 						"\
 							if (!is3DEN && hasInterface && (_value isNotEqualTo '')) then {\
 								KH_fnc_playerMissionEndInit = compile _value;\
+								nil;\
 							};\
 						";
 						defaultValue = "''";
@@ -442,6 +460,7 @@ class Mission
 							_value params ['_toggle', '_bluforToBlufor', '_bluforToOpfor', '_bluforToGreenfor', '_bluforToCivilian', '_opforToBlufor', '_opforToOpfor', '_opforToGreenfor', '_opforToCivilian', '_greenforToBlufor', '_greenforToOpfor', '_greenforToGreenfor', '_greenforToCivilian', '_civilianToBlufor', '_civilianToOpfor', '_civilianToGreenfor', '_civilianToCivilian'];\
 							if (!is3DEN && isServer && _toggle) then {\
 								KH_var_initialSideRelations = [[west, west, _bluforToBlufor], [west, east, _bluforToOpfor], [west, resistance, _bluforToGreenfor], [west, civilian, _bluforToCivilian], [east, west, _opforToBlufor], [east, east, _opforToOpfor], [east, resistance, _opforToGreenfor], [east, civilian, _opforToCivilian], [resistance, west, _greenforToBlufor], [resistance, east, _greenforToOpfor], [resistance, resistance, _greenforToGreenfor], [resistance, civilian, _greenforToCivilian], [civilian, west, _civilianToBlufor], [civilian, east, _civilianToOpfor], [civilian, resistance, _civilianToGreenfor], [civilian, civilian, _civilianToCivilian]];\
+								nil;\
 							};\
 						";
 						defaultValue = "[false, true, false, true, true, false, true, false, true, true, false, true, true, true, true, true, true]";
@@ -470,6 +489,7 @@ class Mission
 						"\
 							if (!is3DEN && isServer && (_value isNotEqualTo 0)) then {\
 								KH_var_missionStartSuspension = _value;\
+								nil;\
 							};\
 						";
 						defaultValue = "0";

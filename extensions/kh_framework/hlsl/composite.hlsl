@@ -35,13 +35,13 @@ VSOutC VSComposite(VSIn i)
     KhVsCore(i.pos, i.nrm, centerSize.xyz, centerRel.xyz, centerRel.w, sizeAxes.xyz,
              khvR0, khvR1, khvR2, o.pos, o.wpos, o.wrel, o.nrm);
     o.icol = color;
-    KhObjLanesCb(o.iobj0, o.iobj1);   // KH_OBJBUF: the CB's per-object lanes.
+    KhObjLanesCb(o.iobj0, o.iobj1);   // OBJBUF: the CB's per-object lanes.
 #if KH_TEXTURED
     o.uv = i.uv;
     // Tangents are covariant (transform like positions, not normals): per-axis scale then the object rotation,
     // renormalized. The handedness sign rides untouched in w.
     o.tanw = float4(normalize(KhRotateR(i.tan.xyz * sizeAxes.xyz, khvR0, khvR1, khvR2)), i.tan.w);
-    o.matIx = (uint)matCtl.x;   // KH_MAT_TABLE: the draw's entry.
+    o.matIx = (uint)matCtl.x;   // MAT_TABLE: the draw's entry.
 #endif
     return o;
 }
@@ -51,7 +51,7 @@ VSOutC VSCompositeInst(VSIn i, VSInst n)
 {
     VSOutC o;
     KhObjRec r = khObjs[n.islot];
-    precise float3 khvRel = (r.pos.xyz - khPass.xyz) + r.res.xyz;   // KH_POS_RES.
+    precise float3 khvRel = (r.pos.xyz - khPass.xyz) + r.res.xyz;   // POS_RES.
     KhVsCore(i.pos, i.nrm, r.pos.xyz, khvRel, khPass.w, r.size.xyz,
              r.rot0.xyz, r.rot1.xyz, r.rot2.xyz, o.pos, o.wpos, o.wrel, o.nrm);
     o.icol = float4(r.col.rgb, n.ilane.y);
@@ -59,12 +59,12 @@ VSOutC VSCompositeInst(VSIn i, VSInst n)
 #if KH_TEXTURED
     o.uv = i.uv;
     o.tanw = float4(normalize(KhRotateR(i.tan.xyz * r.size.xyz, r.rot0.xyz, r.rot1.xyz, r.rot2.xyz)), i.tan.w);
-    o.matIx = (matCtl.z >= 0.5f) ? (uint)matCtl.x : (uint)(n.ilane.z + matCtl.y);   // KH_MAT_TABLE.
+    o.matIx = (matCtl.z >= 0.5f) ? (uint)matCtl.x : (uint)(n.ilane.z + matCtl.y);   // MAT_TABLE.
 #endif
     return o;
 }
 
-// KH_SKIN_POOL - VSCompositeInst over a skin pool chunk (cb.hlsl's KhSkPull). Twin: VSMainInstSk in the static unit.
+// SKIN_POOL - VSCompositeInst over a skin pool chunk (cb.hlsl's KhSkPull). Twin: VSMainInstSk in the static unit.
 VSOutC VSCompositeInstSk(VSInstSk s)
 {
     return VSCompositeInst(KhSkPull(s.vid, khObjs[s.islot].res.w), KhSkLane(s));
@@ -72,29 +72,29 @@ VSOutC VSCompositeInstSk(VSInstSk s)
 
 #if KH_ARB_DEPTH && KH_TEXTURED
 KhMeshOut PSComposite(VSOutC i, bool khFront : SV_IsFrontFace, out float khaODepth : SV_Depth,
-                      out uint khA2cCov : SV_Coverage)   // KH_MESH_O1; KH_CUTOUT_A2C (cb.hlsl KhCutoutCover).
+                      out uint khA2cCov : SV_Coverage)   // MESH_O1; CUTOUT_A2C (cb.hlsl KhCutoutCover).
 #elif KH_ARB_DEPTH
-KhMeshOut PSComposite(VSOutC i, bool khFront : SV_IsFrontFace, out float khaODepth : SV_Depth)   // KH_MESH_O1.
+KhMeshOut PSComposite(VSOutC i, bool khFront : SV_IsFrontFace, out float khaODepth : SV_Depth)   // MESH_O1.
 #elif KH_TEXTURED
 KhMeshOut PSComposite(VSOutC i, bool khFront : SV_IsFrontFace,
-                      out uint khA2cCov : SV_Coverage)   // KH_MESH_O1; KH_CUTOUT_A2C (cb.hlsl KhCutoutCover).
+                      out uint khA2cCov : SV_Coverage)   // MESH_O1; CUTOUT_A2C (cb.hlsl KhCutoutCover).
 #else
-KhMeshOut PSComposite(VSOutC i, bool khFront : SV_IsFrontFace)   // KH_MESH_O1: two outputs (cb.hlsl KhMeshOut).
+KhMeshOut PSComposite(VSOutC i, bool khFront : SV_IsFrontFace)   // MESH_O1: two outputs (cb.hlsl KhMeshOut).
 #endif
 {
 #if KH_TEXTURED
-    khA2cCov = 0xFFFFFFFFu;   // KH_CUTOUT_A2C: every sample the raster covers, but a cutout's edge. TWIN: PSMain.
+    khA2cCov = 0xFFFFFFFFu;   // CUTOUT_A2C: every sample the raster covers, but a cutout's edge. TWIN: PSMain.
 #endif
     // TWO-SIDED: a back face is the other side of the same sheet, so it shades with the front's normal reversed. Every
     // consumer below reads i.nrm or the mapped normal built from it (on the textured route the N.L gate, the lighting
     // and the dynamic lights' N.L take the mapped one; the self-shadow bias and the lights' shadow lookup the geometric
-    // one, KH_DLS_GEOM_N), so reversing it here, with the tangent term the textured block reverses, is the whole fix.
+    // one, DLS_GEOM_N), so reversing it here, with the tangent term the textured block reverses, is the whole fix.
     // Front is the authored side: meshgen::bake and the importer wind every triangle to its normal, no rasterizer sets
     // FrontCounterClockwise, and size is never negative. Unreversed, a single sheet's back takes the front's sun and,
     // at N.V clamped to 0, a grazing Fresnel over its whole area. Twin: PSMain.
     const float khFs = khFront ? 1.0f : -1.0f;
     i.nrm *= khFs;
-    KhObjLoad(i.iobj0, i.iobj1);   // KH_OBJBUF: the per-object lanes, per draw or per instance.
+    KhObjLoad(i.iobj0, i.iobj1);   // OBJBUF: the per-object lanes, per draw or per instance.
     KhLodDitherCut(i.pos.xy, khObjDither);
     ClipEdgeSliver(i.wpos);   // Degenerate edge-on fragments (fireflies).
     ClipOwnNear(i.pos.w);   // Our own near plane. Twin call.
@@ -134,7 +134,7 @@ KhMeshOut PSComposite(VSOutC i, bool khFront : SV_IsFrontFace)   // KH_MESH_O1: 
                                          : khaD;
         bool  khaNzArm = (khaNzN > 0.0f && khaNzD < khaNzN);
 
-        // KH_ARB_GRAD: the gate is the terrain lane alone (a CB lane: uniform); the fragment's own terrain data
+        // ARB_GRAD: the gate is the terrain lane alone (a CB lane: uniform); the fragment's own terrain data
         // (khtClear) is tested below, past the probe's gradient.
         if (thmParams.w >= 0.5f) {
             float khaCh = abs(fxParams1.w);
@@ -168,7 +168,7 @@ KhMeshOut PSComposite(VSOutC i, bool khFront : SV_IsFrontFace)   // KH_MESH_O1: 
             // (0.10 m) at most. Without one, the pull is the gap + 0.25, up to the cap (below).
             const bool khaFixed = (snapCam.w >= 0.5f);
             const float khaFixM = 0.10f;
-            // KH_ARB_GRAD: the terrain probe at the snapshot ray's point - its height over the heightfield (khaTd) and
+            // ARB_GRAD: the terrain probe at the snapshot ray's point - its height over the heightfield (khaTd) and
             // that height's screen gradient (the ramp's width) - for every pixel of the quad, in uniform control flow
             // (fxParams1.w is a CB lane): the ramp reads its neighbours' heights, and a gradient taken past the
             // per-pixel tests below reads lanes that left them. The tests read it as they read it in place.
@@ -180,7 +180,7 @@ KhMeshOut PSComposite(VSOutC i, bool khFront : SV_IsFrontFace)   // KH_MESH_O1: 
                 float3 khaSp = khaRayO + khaDir * khaIdZ;
                 khaSh = KhThmHeight(khaSp.xz);
                 khaTd = khaSp.y - khaSh;
-                // KH_ARB_NODATA: a probe outside the heightfield (khaSh -1e6) has a khaTd of 1e6 m or more, which
+                // ARB_NODATA: a probe outside the heightfield (khaSh -1e6) has a khaTd of 1e6 m or more, which
                 // fwidth would hand its quad neighbours as their ramp width (khaTerrW ~1 there: the full pull at
                 // any height). Such a lane enters the gradient at the tolerance height instead - its own khaTerrW
                 // is 0 whatever this gives (below) - so a neighbour ramps as it would beside terrain at that
@@ -199,7 +199,7 @@ KhMeshOut PSComposite(VSOutC i, bool khFront : SV_IsFrontFace)   // KH_MESH_O1: 
                 bool khaTerr = true;
                 float khaTerrW = 1.0f;   // The ramped form of khaTerr.
 
-                if (fxParams1.w > 0.0f) {   // KH_ARB_GRAD: the probe above.
+                if (fxParams1.w > 0.0f) {   // ARB_GRAD: the probe above.
                     khaTerr = (khaSh > -1.0e5f) && (khaTd <= khaTol);
                     float khaTe = khaTol + khaTrw;   // The ramp reaches up past the tolerance.
                     khaTerrW = (khaSh > -1.0e5f)
@@ -220,10 +220,10 @@ KhMeshOut PSComposite(VSOutC i, bool khFront : SV_IsFrontFace)   // KH_MESH_O1: 
 
         // i.pos.z is the rasterizer's own interpolated, viewport-mapped depth at the pixel centre - on a single-sample
         // target, byte-exact with what the hardware would have written had we never declared SV_Depth.
-        // KH_ARB_MS_DEPTH: this shader runs per pixel, so its SV_Depth is one value for every covered sample; under
+        // ARB_MS_DEPTH: this shader runs per pixel, so its SV_Depth is one value for every covered sample; under
         // MSAA the hardware would have written each sample's own plane depth, so intersections with other geometry
         // resolve per pixel on these draws, and an edge pixel's covered samples take the centre's (extrapolated) depth.
-        // KH_ARB_VP_FLOOR: a near-gap routed draw (fxMeta.x armed) rasterises in the gap viewport, whose MinDepth is
+        // ARB_VP_FLOOR: a near-gap routed draw (fxMeta.x armed) rasterises in the gap viewport, whose MinDepth is
         // the floor fxMeta.y, not depthParams.z - its ndc is taken from that range, so a fragment at or beyond the near
         // plane writes the world mapping to within a few D24 steps (the float32 re-map's rounding), and routing a mesh
         // on or off moves its depth by a few steps (read over the world range it sat up to ~0.1 % of its distance
@@ -260,13 +260,13 @@ KhMeshOut PSComposite(VSOutC i, bool khFront : SV_IsFrontFace)   // KH_MESH_O1: 
     // Textured: sampled below the far contract and guard blocks (the textured twin adds no return / discard above
     // them). The mapped normal drives the sun N.L gate (khShN); the geometric one drives the self-shadow bias
     // (khBiasN).
-    KhMatLoad(i.matIx);   // KH_MAT_TABLE: the lanes below read from the entry.
-    float2 khtxDx, khtxDy;   // KH_UV_ANIM: the material's uv and its gradients (i.uv's, unanimated). TWIN.
+    KhMatLoad(i.matIx);   // MAT_TABLE: the lanes below read from the entry.
+    float2 khtxDx, khtxDy;   // UV_ANIM: the material's uv and its gradients (i.uv's, unanimated). TWIN.
     const float2 khtxUv = KhMatUv(i.uv, khtxDx, khtxDy);
     KhMatSurf khtxS = KhSampleMatG(khtxUv, khtxDx, khtxDy);
 
-    // Cutout kill (KH_CUTOUT_A2C: alpha to coverage on a multisampled target, KhCutoutCover). TWIN: PSMain.
-    if (matParams0.y >= 0.5f && matParams0.y < 1.5f) khA2cCov &= KhCutoutCover(khtxS.alpha);   // KH_A2C_AND.
+    // Cutout kill (CUTOUT_A2C: alpha to coverage on a multisampled target, KhCutoutCover). TWIN: PSMain.
+    if (matParams0.y >= 0.5f && matParams0.y < 1.5f) khA2cCov &= KhCutoutCover(khtxS.alpha);   // A2C_AND.
     // Opaque alpha contract: sampled alpha never reaches the blend on the opaque and cutout modes - survivors draw at
     // alpha 1. A blend material is split at the texel: solid texels draw in the opaque part and still occlude; texels
     // below it draw in the translucent tail, alpha kept and hardware-blended without a depth write.
@@ -290,7 +290,7 @@ KhMeshOut PSComposite(VSOutC i, bool khFront : SV_IsFrontFace)   // KH_MESH_O1: 
         float3 khtt = i.tanw.xyz - khtn * dot(khtn, i.tanw.xyz);
         float khttl = length(khtt);
 #if KH_USER_MAT
-        khUserNPs = khtn;   // KH_USER_FRAME. TWIN: PSMain / PSComposite.
+        khUserNPs = khtn;   // USER_FRAME. TWIN: PSMain / PSComposite.
         khUserFacePs = khFs;
 #endif
         if (khttl > 1.0e-5f) {
@@ -306,7 +306,7 @@ KhMeshOut PSComposite(VSOutC i, bool khFront : SV_IsFrontFace)   // KH_MESH_O1: 
         } else khtxN = khtn;   // Degenerate tangent: geometric normal.
 
     }
-    // KH_SPEC_AA: the shading normal's screen-space variance widens the lobe (KhSpecAAKernel), taken here - top level,
+    // SPEC_AA: the shading normal's screen-space variance widens the lobe (KhSpecAAKernel), taken here - top level,
     // so the quad's four pixels (helpers included) take the derivatives together - and carried by s to KhApplyPBR /
     // KhUserShade: the sun, the lamps, the overcast lobe and the ambient alike. TWIN: PSMain / PSComposite.
     khtxS = KhSpecAA(khtxS, khtxN);
@@ -318,17 +318,17 @@ KhMeshOut PSComposite(VSOutC i, bool khFront : SV_IsFrontFace)   // KH_MESH_O1: 
 
 #if KH_TEXTURED
     float3 khShN = khtxN;
-    // KH_DLS_GEOM_N: the dynamic lights' shadow lookup keeps the geometric normal, as the self-shadow bias does; their
+    // DLS_GEOM_N: the dynamic lights' shadow lookup keeps the geometric normal, as the self-shadow bias does; their
     // N.L takes khtxN. TWIN: PSMain / PSComposite.
     khDlsGeomN = khBiasN;
 #else
     float3 khShN = normalize(i.nrm);
 #endif
-    // KH_SUN_GRAD: the self ladder's gradients, here - before the N.L gate and the ladder's per-pixel branches - under
+    // SUN_GRAD: the self ladder's gradients, here - before the N.L gate and the ladder's per-pixel branches - under
     // a condition uniform in a quad (a CB lane, a per-primitive flat lane). Twin: PSMain / PSComposite.
     KhSunSelfGrad khSG = (KhSunSelfGrad)0;
     if (lighting0.x >= 0.5f && khObjNoRecv < 0.5f) khSG = KhSunSelfGradAt(i.wrel, khBiasN);
-    // KH_SHADOW_SWITCH: with receiveShadow off (khObjNoRecv) no received term is taken - smf stays 1 where the face
+    // SHADOW_SWITCH: with receiveShadow off (khObjNoRecv) no received term is taken - smf stays 1 where the face
     // turns to the sun and the gate's 0 below still holds where it does not. Twin: PSMain / PSComposite.
     if (lighting0.x >= 0.5f && dot(khShN, lighting1.xyz) > 0.01f && khObjNoRecv < 0.5f) {
         {
@@ -338,14 +338,14 @@ KhMeshOut PSComposite(VSOutC i, bool khFront : SV_IsFrontFace)   // KH_MESH_O1: 
 
         // A pixel the received term already darkens to 0 cannot get darker - min(0, x) = 0 - so the self ladder (the
         // costliest term in this shader) is not consulted for it. A plain if: the ladder takes no gradient of its own
-        // (KH_SUN_GRAD - khSG, priced above).
+        // (SUN_GRAD - khSG, priced above).
         if (smf > 0.0f) smf = min(smf, SunShadowFactorSelf(i.wpos, i.wrel, khBiasN, khSG));
         if (maskMeta.w >= 0.5f) {
             // A translucent texel = the blend material's translucent part or a whole translucent object on normal blend
-            // (the mirror below replaces its count where armed). KH_VOL_WITNESS: the witness needs this fragment in the
+            // (the mirror below replaces its count where armed). VOL_WITNESS: the witness needs this fragment in the
             // footprint the copy was counted against, which holds only depth-participating opaque casters on normal
             // blend - so a translucent texel, a whole object below full alpha on any blend mode, an object on a
-            // see-through blend mode at any alpha (KH_FOOT_BLEND: the seam skips all of those) and a depth-Off overlay
+            // see-through blend mode at any alpha (FOOT_BLEND: the seam skips all of those) and a depth-Off overlay
             // (shadowMeta2.z) have none and take the count as it stands. TWIN: PSMain and PSComposite.
             const bool khStenTl = (matParams0.y >= 1.5f && matParams0.y < 2.5f) ||
                                   (i.icol.a < 0.999f && bm == 0);
@@ -369,13 +369,13 @@ KhMeshOut PSComposite(VSOutC i, bool khFront : SV_IsFrontFace)   // KH_MESH_O1: 
             }
 #endif
             // The volume term starts from a witness compare - the distance our surface stood at in the copy's frame
-            // (the KH_VOL_FOOT mask, else the copy's depth decoded) must be this fragment's (KH_VOL_WITNESS) - and a
+            // (the VOL_FOOT mask, else the copy's depth decoded) must be this fragment's (VOL_WITNESS) - and a
             // translucent texel is not in the footprint, so it has none and answers with the background's stencil;
             // where the mirror is armed it reads the mirror instead. TWIN: PSMain and PSComposite.
             if (mirMeta.x >= 0.5f && mirMeta.x < 1.5f && khStenTl) {
                 khStenU = KhMirUnit(i.pos.xy, mirMeta.y, mirMeta.z);
             }
-            // KH_INFRONT (mirMeta.x = 2): a view-model mesh reads the mirror over its whole surface - its count taken
+            // INFRONT (mirMeta.x = 2): a view-model mesh reads the mirror over its whole surface - its count taken
             // against itself with the volumes standing on the mirror's 0.05 near, so the world near plane's collapse
             // never reaches it. TWIN: PSMain and PSComposite.
             if (mirMeta.x >= 1.5f) khStenU = KhMirUnit(i.pos.xy, mirMeta.y, mirMeta.z);
@@ -395,8 +395,8 @@ KhMeshOut PSComposite(VSOutC i, bool khFront : SV_IsFrontFace)   // KH_MESH_O1: 
 #if KH_TEXTURED
     khtxS.albedo *= i.icol.rgb;   // The object colour tints the albedo lane only.
 #if KH_USER_MAT
-    khUserUvPs = khtxUv;   // KH_USER_LANES: KhUserUv / KhUserPixel. TWIN: PSMain / PSComposite.
-    khUserUvRawPs = i.uv;   // KH_UV_ANIM: KhUserUvRaw / KhUserUvDx / KhUserUvDy.
+    khUserUvPs = khtxUv;   // USER_LANES: KhUserUv / KhUserPixel. TWIN: PSMain / PSComposite.
+    khUserUvRawPs = i.uv;   // UV_ANIM: KhUserUvRaw / KhUserUvDx / KhUserUvDy.
     khUserUvGPs = float4(khtxDx, khtxDy);
     khUserPxPs = i.pos.xy;
     float3 lc = KhUserShade(khtxS, i.wpos, khtxN, smf);
@@ -406,7 +406,7 @@ KhMeshOut PSComposite(VSOutC i, bool khFront : SV_IsFrontFace)   // KH_MESH_O1: 
 #else
     float3 lc = ApplyLighting(i.icol.rgb, i.wpos, i.nrm, smf);
 #endif
-    // KH_USER_FINITE / KH_PBR_FINITE: every route's result held to [0, 1e30] before fog and every return below
+    // USER_FINITE / PBR_FINITE: every route's result held to [0, 1e30] before fog and every return below
     // (min / max: a NaN reads 0, +inf 1e30, -inf and negatives 0), so a broken shader's NaN / inf never reaches the
     // blends or the scene's readers. Every finite lc in [0, 1e30] passes bit for bit: a highlight past the scene's
     // range keeps its energy through fog, coverage and the blends, and the 16F store saturates it at the format's
@@ -418,7 +418,7 @@ KhMeshOut PSComposite(VSOutC i, bool khFront : SV_IsFrontFace)   // KH_MESH_O1: 
     lc = min(max(lc, 0.0f), 1.0e30f);
 
     // KhDlswFog (static.hlsl) is this block's transmittance and colour for the
-    // world pass (KH_DLSW_FOG): an edit here is an edit there. TWIN.
+    // world pass (DLSW_FOG): an edit here is an edit there. TWIN.
     float khFogKeep = 1.0f;   // The fog's share of a non-covering blend mode (below).
     if (fogParams.w >= 0.5f || hazePars.w >= 0.5f || fogEngine.w >= 0.5f) {
         float distM = i.pos.w;
@@ -448,7 +448,7 @@ KhMeshOut PSComposite(VSOutC i, bool khFront : SV_IsFrontFace)   // KH_MESH_O1: 
                 float k = fogParams.y * dh / max(khaFbA, 1.0e-4f);
                 float integ = k < 1.0e-6f ? khaFbA : (1.0f - exp(-khaFbA * k)) / k;
                 float minY = khaFbOn ? min(khaFbLay, hgt) : min(hgt, camY);
-                // KH_FOG_EXP_CAP: a negative fog decay (setFog takes -1 .. 1) grows the falloff with height, and past
+                // FOG_EXP_CAP: a negative fog decay (setFog takes -1 .. 1) grows the falloff with height, and past
                 // |decay| x h = 88.7 its exp overflows; capped at e^60 - full fog either way (short of a density below
                 // ~1e-23 /m, which the cap leaves partly clear), with room for any path length in any product order - a
                 // zero density gives 0 x e^60 = 0, not 0 x inf = NaN. TWIN: PSMain, KhDlswFog, KhFxFogEngine and
@@ -519,16 +519,16 @@ KhMeshOut PSComposite(VSOutC i, bool khFront : SV_IsFrontFace)   // KH_MESH_O1: 
 #else
     float a = i.icol.a * SolidMask(i.wpos) * khFogKeep;
 #endif
-    // KH_MESH_O1: colour alone (KhMeshOutC) on every return - no composite route draws a sorted tail part (the
-    // injection draws none; the flush's near-gap route is excluded, khf_ws_elig's !khf_nz_this). TWIN: PSMain.
+    // MESH_O1: colour alone (KhMeshOutC) on every return - no composite route draws a sorted tail part (the
+    // injection draws none; the flush's near-gap route is excluded, ws_elig's !nz_this). TWIN: PSMain.
     if (bm == 1 || bm == 3) return KhMeshOutC(float4(lc * a, 1.0f));
     if (bm == 2) return KhMeshOutC(float4(lerp(float3(1.0f, 1.0f, 1.0f), lc, a), 1.0f));
-    // KH_BLEND_MINMAX: lighten / darken (MAX / MIN blend ops: no factors). With the flush's own copy of the scene just
+    // BLEND_MINMAX: lighten / darken (MAX / MIN blend ops: no factors). With the flush's own copy of the scene just
     // before this mesh bound at t3 (blendCtl.x), the exact lerp(scene, max / min(scene, colour), a): kept as written by
     // the op on a single-sample target (it is >= / <= the scene), drawn with a replacing blend on a multisampled one.
     // Else the hardware forms: lighten max(scene, colour x a), darken exact only at a = 1. Twin: PSMain.
     if (bm == 4 || bm == 5) {
-        // KH_TEX_OWN_BRANCH: a branch, so a route that leaves blendCtl.x 0 (the injection, the inFront
+        // TEX_OWN_BRANCH: a branch, so a route that leaves blendCtl.x 0 (the injection, the inFront
         // slice: t3 is not ours there) never loads t3, whatever fxc would flatten. Twin: PSMain.
         [branch] if (blendCtl.x >= 0.5f) {
             float3 khmm_s = sceneColorTex.Load(int3(int2(i.pos.xy), 0)).rgb;
@@ -540,10 +540,10 @@ KhMeshOut PSComposite(VSOutC i, bool khFront : SV_IsFrontFace)   // KH_MESH_O1: 
     }
 
     // Simple transparency per the spec is a display-space mix: sample the pre-mesh scene capture at this pixel, blend
-    // in Reinhard space, invert, write opaque. KH_TRANSL_ROUTES: a blend material's translucent part, an effect mesh
+    // in Reinhard space, invert, write opaque. TRANSL_ROUTES: a blend material's translucent part, an effect mesh
     // and an inFront mesh (the hands slice, no capture) blend in linear HDR instead (hardware) - a different look over
     // a bright background, kept as they look by design: not a parity defect.
-    [branch] if (blendCtl.x >= 0.5f) {   // KH_TEX_OWN_BRANCH (above).
+    [branch] if (blendCtl.x >= 0.5f) {   // TEX_OWN_BRANCH (above).
         // Twin: PSMain. Every pixel blends by a (the injection never arms blendCtl.x; the flush's near-gap route can).
         float3 scn = sceneColorTex.Load(int3(int2(i.pos.xy), 0)).rgb;
         float3 ts = scn / (1.0f + scn);

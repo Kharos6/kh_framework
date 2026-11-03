@@ -5,8 +5,8 @@
 // way any .rc is added (it compiles with rc.exe and links as a resource);
 // no other build change is needed.
 //
-// One entry per unit, named exactly as KH_HLSL_RES_NAMES lists them in
-// rendering/shader_compiler.hpp (kh_hlsl_src). A name here without a twin there
+// One entry per unit, named exactly as HLSL_RES_NAMES lists them in
+// rendering/shader_compiler.hpp (hlsl_src). A name here without a twin there
 // is dead weight; a name there without a twin here is reported at the first
 // compile (hlslResMissing) and that unit's shaders never build.
 KH_CB_HLSL            RCDATA "hlsl/cb.hlsl"

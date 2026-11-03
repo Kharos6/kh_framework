@@ -2,7 +2,7 @@
 
 #define KH_SAFE_RELEASE(p) if (p) { (p)->Release(); (p) = nullptr; }
 
-// ufbx, mikktspace, stb_image, <fstream>, <memory>, <intrin.h> and <smmintrin.h> (KH_WC_COPY's __cpuid, _mm_mfence and
+// ufbx, mikktspace, stb_image, <fstream>, <memory>, <intrin.h> and <smmintrin.h> (WC_COPY's __cpuid, _mm_mfence and
 // _mm_stream_load_si128) are included by the framework header ahead of this file.
 
 // The integration headers are CRLF-only, tab-free ASCII. Shaders are plain .hlsl RCDATA resources (kh_shaders.rc).
@@ -19,21 +19,21 @@
 // shape or a mesh index given as a number, a material's fresnel pair, every texture-animation key, vertexBound, a
 // simulationLod pair out of order, a physics affector's lifetime, position, vectorDir or scale number that is not
 // finite or is 1e30 or more in size (kh_aff_finite), and an [x, y, z] scale half-extent of 0 or below. A number for
-// one of the first five is truncated toward zero first (kh_gv_int: blend 5.9 is 5, -0.5 is 0). A NaN is refused with
-// a report by every parser, and so is an infinity in a material key (KH_MAT_FINITE) or where the key has no range to
+// one of the first five is truncated toward zero first (gv_int: blend 5.9 is 5, -0.5 is 0). A NaN is refused with
+// a report by every parser, and so is an infinity in a material key (MAT_FINITE) or where the key has no range to
 // clamp it to (a position, size, radius, falloff, band, rotation, lit pair or effect params: KH_RV_FINITE,
-// KH_FX_FINITE); elsewhere an infinity is a number past its range (a duration part's is accepted: KH_DURATION_NAN).
+// FX_FINITE); elsewhere an infinity is a number past its range (a duration part's is accepted: DURATION_NAN).
 //
-// KH_PLAYER_ONLY: graphics only where there is an interface (hasInterface, framework.hpp's g_is_player). On a
+// PLAYER_ONLY: graphics only where there is an interface (hasInterface, framework.hpp's g_is_player). On a
 // dedicated server or a headless client every command returns its empty value at once ('' / false / []): no parse, no
-// report, nothing created (kh_gfx_off, sqf_integration.hpp; kh_render_on below).
+// report, nothing created (kh_gfx_off, sqf_integration.hpp; render_on below).
 //
 // MISSION RESET: every mission start clears the last mission's meshes, passes and physics affectors and puts the
 // settings back to their defaults, in Intercept's pre-init (a CBA XEH preInit handler; rendering_integration_reset). A
 // command run before it at the same start (a preInit function the game calls ahead of Intercept's) is cleared with the
 // rest, unreported: the first commands must come from postInit or later.
 //
-// KH_SHADER_FIRST_RUN - cold-cache cost: some 130 units (plus the placeholder's two), about 18 minutes of one-core
+// SHADER_FIRST_RUN - cold-cache cost: some 130 units (plus the placeholder's two), about 18 minutes of one-core
 // compile work (d3dcompiler_47, one core of a loaded machine): the six mesh and injection shaders 35 - 45 s each, the
 // four full effect shaders 2 - 4 min each, the rest seconds. One worker per hardware thread, and the white placeholder
 // (no post-processing) holds until the last unit lands, so the first start takes at least the longest unit's time:
@@ -43,7 +43,8 @@
 // ===========================================================================
 
 // The shared head, in parts in rendering/, one feature each, in this order: a part may use what the parts above it
-// declare, so the order is load-bearing.
+// declare, so the order is load-bearing. The reader's guide is rendering/README.md: the layout, the threads, the
+// cycle, the naming, the abbreviations, the state map and the limitations - start reading there.
 #include "rendering/profiling.hpp"
 #include "rendering/mesh_types.hpp"
 #include "rendering/physics_types.hpp"

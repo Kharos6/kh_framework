@@ -73,12 +73,14 @@ private _positionParser = if !(isNull _object) then {
 	{
 		_currentPositionStart = _object modelToWorldVisualWorld _currentPositionStart;
 		_currentPositionEnd = _object modelToWorldVisualWorld _currentPositionEnd;
+		nil;
 	};
 }
 else {
 	{
 		_currentPositionStart = _position vectorAdd _currentPositionStart;
 		_currentPositionEnd = _position vectorAdd _currentPositionEnd;
+		nil;
 	};
 };
 

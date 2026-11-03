@@ -1,415 +1,415 @@
 #pragma once
 
-// The feature half (rendering_integration_features.hpp): the visibility occluders (KH_VOC) and the occluder floor.
+// The feature half (rendering_integration_features.hpp): the visibility occluders (VOC) and the occluder floor.
 // Never include it on its own.
 namespace RenderIntegration {
 
-inline bool kh_voc_project(const KhVisOcc& khvp_o, const float khvp_w[3], float& khvp_x, float& khvp_y) {
-    const float khvp_q[3] = { khvp_w[0] + khvp_o.bias[0], khvp_w[1] + khvp_o.bias[1],
-                              khvp_w[2] + khvp_o.bias[2] };
-    float khvp_c[4];
-    for (int khvp_j = 0; khvp_j < 4; ++khvp_j) {
-        khvp_c[khvp_j] = khvp_o.vp[3][khvp_j];
-        for (int khvp_i = 0; khvp_i < 3; ++khvp_i) khvp_c[khvp_j] += khvp_q[khvp_i] * khvp_o.vp[khvp_i][khvp_j];
+inline bool voc_project(const VisOcc& o, const float w[3], float& x, float& y) {
+    const float q[3] = { w[0] + o.bias[0], w[1] + o.bias[1],
+                         w[2] + o.bias[2] };
+    float c[4];
+    for (int j = 0; j < 4; ++j) {
+        c[j] = o.vp[3][j];
+        for (int i = 0; i < 3; ++i) c[j] += q[i] * o.vp[i][j];
     }
-    if (!(khvp_c[3] > 0.05f)) return false;   // Behind / at the near plane: fail toward visible.
-    const float khvp_iw = 1.0f / khvp_c[3];
-    khvp_x = (khvp_c[0] * khvp_iw * 0.5f + 0.5f) * static_cast<float>(KH_VOC_W);
-    khvp_y = (0.5f - khvp_c[1] * khvp_iw * 0.5f) * static_cast<float>(KH_VOC_H);
-    if (!(khvp_x == khvp_x) || !(khvp_y == khvp_y)) return false;   // NaN-safe.
+    if (!(c[3] > 0.05f)) return false;   // Behind / at the near plane: fail toward visible.
+    const float iw = 1.0f / c[3];
+    x = (c[0] * iw * 0.5f + 0.5f) * static_cast<float>(VOC_W);
+    y = (0.5f - c[1] * iw * 0.5f) * static_cast<float>(VOC_H);
+    if (!(x == x) || !(y == y)) return false;   // NaN-safe.
     return true;
 }
 
-// Inner-conservative rasterization of a convex polygon (kh_voc_box's faces, at most six corners): a cell counts only
+// Inner-conservative rasterization of a convex polygon (voc_box's faces, at most six corners): a cell counts only
 // when all four of its corners are inside every edge. Edge signs normalized against the centroid, so winding never
 // matters; a near-degenerate polygon stands the face down.
-inline void kh_voc_face(KhVisOcc& khvf_o, const float khvf_p[][2], int khvf_n, float khvf_z, int& khvf_budget) {
-    if (khvf_n < 3 || khvf_n > 6) return;
-    float khvf_cx = 0.0f, khvf_cy = 0.0f;
-    float khvf_mnx = khvf_p[0][0], khvf_mxx = khvf_p[0][0];
-    float khvf_mny = khvf_p[0][1], khvf_mxy = khvf_p[0][1];
-    const float khvf_in = 1.0f / static_cast<float>(khvf_n);
-    for (int khvf_i = 0; khvf_i < khvf_n; ++khvf_i) {
-        khvf_cx += khvf_p[khvf_i][0] * khvf_in;
-        khvf_cy += khvf_p[khvf_i][1] * khvf_in;
-        if (khvf_p[khvf_i][0] < khvf_mnx) khvf_mnx = khvf_p[khvf_i][0];
-        if (khvf_p[khvf_i][0] > khvf_mxx) khvf_mxx = khvf_p[khvf_i][0];
-        if (khvf_p[khvf_i][1] < khvf_mny) khvf_mny = khvf_p[khvf_i][1];
-        if (khvf_p[khvf_i][1] > khvf_mxy) khvf_mxy = khvf_p[khvf_i][1];
+inline void voc_face(VisOcc& o, const float p[][2], int n, float z, int& budget) {
+    if (n < 3 || n > 6) return;
+    float cx = 0.0f, cy = 0.0f;
+    float mnx = p[0][0], mxx = p[0][0];
+    float mny = p[0][1], mxy = p[0][1];
+    const float in = 1.0f / static_cast<float>(n);
+    for (int i = 0; i < n; ++i) {
+        cx += p[i][0] * in;
+        cy += p[i][1] * in;
+        if (p[i][0] < mnx) mnx = p[i][0];
+        if (p[i][0] > mxx) mxx = p[i][0];
+        if (p[i][1] < mny) mny = p[i][1];
+        if (p[i][1] > mxy) mxy = p[i][1];
     }
-    float khvf_a[6], khvf_b[6], khvf_c[6];
-    for (int khvf_e = 0; khvf_e < khvf_n; ++khvf_e) {
-        const float* khvf_p0 = khvf_p[khvf_e];
-        const float* khvf_p1 = khvf_p[(khvf_e + 1) % khvf_n];
-        khvf_a[khvf_e] = khvf_p0[1] - khvf_p1[1];
-        khvf_b[khvf_e] = khvf_p1[0] - khvf_p0[0];
-        khvf_c[khvf_e] = khvf_p0[0] * khvf_p1[1] - khvf_p1[0] * khvf_p0[1];
-        const float khvf_ec = khvf_a[khvf_e] * khvf_cx + khvf_b[khvf_e] * khvf_cy + khvf_c[khvf_e];
-        if (!(khvf_ec > 1.0e-4f || khvf_ec < -1.0e-4f)) return;   // Degenerate: stand down.
-        if (khvf_ec < 0.0f) { khvf_a[khvf_e] = -khvf_a[khvf_e]; khvf_b[khvf_e] = -khvf_b[khvf_e]; khvf_c[khvf_e] = -khvf_c[khvf_e]; }
+    float a[6], b[6], c[6];
+    for (int e = 0; e < n; ++e) {
+        const float* p0 = p[e];
+        const float* p1 = p[(e + 1) % n];
+        a[e] = p0[1] - p1[1];
+        b[e] = p1[0] - p0[0];
+        c[e] = p0[0] * p1[1] - p1[0] * p0[1];
+        const float ec = a[e] * cx + b[e] * cy + c[e];
+        if (!(ec > 1.0e-4f || ec < -1.0e-4f)) return;   // Degenerate: stand down.
+        if (ec < 0.0f) { a[e] = -a[e]; b[e] = -b[e]; c[e] = -c[e]; }
     }
     // The bounds clamped to the grid (one cell of margin) before the casts, on both sides: a corner projected near
     // the camera plane lands far off it.
-    const float khvf_gw = static_cast<float>(KH_VOC_W), khvf_gh = static_cast<float>(KH_VOC_H);
-    int khvf_x0 = static_cast<int>(floorf(fminf(fmaxf(khvf_mnx, -1.0f), khvf_gw))); if (khvf_x0 < 0) khvf_x0 = 0;
-    int khvf_y0 = static_cast<int>(floorf(fminf(fmaxf(khvf_mny, -1.0f), khvf_gh))); if (khvf_y0 < 0) khvf_y0 = 0;
-    int khvf_x1 = static_cast<int>(floorf(fminf(fmaxf(khvf_mxx, -1.0f), khvf_gw)));
-    if (khvf_x1 > KH_VOC_W - 1) khvf_x1 = KH_VOC_W - 1;
-    int khvf_y1 = static_cast<int>(floorf(fminf(fmaxf(khvf_mxy, -1.0f), khvf_gh)));
-    if (khvf_y1 > KH_VOC_H - 1) khvf_y1 = KH_VOC_H - 1;
-    for (int khvf_iy = khvf_y0; khvf_iy <= khvf_y1; ++khvf_iy) {
-        for (int khvf_ix = khvf_x0; khvf_ix <= khvf_x1; ++khvf_ix) {
-            bool khvf_inside = true;
-            for (int khvf_e = 0; khvf_e < khvf_n && khvf_inside; ++khvf_e) {
-                const float khvf_mn = khvf_a[khvf_e] * static_cast<float>(khvf_ix) +
-                                      khvf_b[khvf_e] * static_cast<float>(khvf_iy) + khvf_c[khvf_e] +
-                                      (khvf_a[khvf_e] < 0.0f ? khvf_a[khvf_e] : 0.0f) +
-                                      (khvf_b[khvf_e] < 0.0f ? khvf_b[khvf_e] : 0.0f);
-                if (!(khvf_mn > 0.0f)) khvf_inside = false;
+    const float gw = static_cast<float>(VOC_W), gh = static_cast<float>(VOC_H);
+    int x0 = static_cast<int>(floorf(fminf(fmaxf(mnx, -1.0f), gw))); if (x0 < 0) x0 = 0;
+    int y0 = static_cast<int>(floorf(fminf(fmaxf(mny, -1.0f), gh))); if (y0 < 0) y0 = 0;
+    int x1 = static_cast<int>(floorf(fminf(fmaxf(mxx, -1.0f), gw)));
+    if (x1 > VOC_W - 1) x1 = VOC_W - 1;
+    int y1 = static_cast<int>(floorf(fminf(fmaxf(mxy, -1.0f), gh)));
+    if (y1 > VOC_H - 1) y1 = VOC_H - 1;
+    for (int iy = y0; iy <= y1; ++iy) {
+        for (int ix = x0; ix <= x1; ++ix) {
+            bool inside = true;
+            for (int e = 0; e < n && inside; ++e) {
+                const float mn = a[e] * static_cast<float>(ix) +
+                                 b[e] * static_cast<float>(iy) + c[e] +
+                                 (a[e] < 0.0f ? a[e] : 0.0f) +
+                                 (b[e] < 0.0f ? b[e] : 0.0f);
+                if (!(mn > 0.0f)) inside = false;
             }
-            if (!khvf_inside) continue;
-            float& khvf_slot = khvf_o.z[khvf_iy * KH_VOC_W + khvf_ix];
-            if (khvf_z < khvf_slot) khvf_slot = khvf_z;
-            if (++khvf_budget > KH_VOC_PX_BUDGET) return;
+            if (!inside) continue;
+            float& slot = o.z[iy * VOC_W + ix];
+            if (z < slot) slot = z;
+            if (++budget > VOC_PX_BUDGET) return;
         }
     }
 }
-inline float kh_voc_poly_area(const KhVocPoly& khpa_p) {
-    float khpa_a = 0.0f;
-    for (int khpa_i = 0; khpa_i < khpa_p.n; ++khpa_i) {
-        const int khpa_j = (khpa_i + 1) % khpa_p.n;
-        khpa_a += khpa_p.x[khpa_i] * khpa_p.y[khpa_j] - khpa_p.x[khpa_j] * khpa_p.y[khpa_i];
+inline float voc_poly_area(const VocPoly& p) {
+    float a = 0.0f;
+    for (int i = 0; i < p.n; ++i) {
+        const int j = (i + 1) % p.n;
+        a += p.x[i] * p.y[j] - p.x[j] * p.y[i];
     }
-    return 0.5f * fabsf(khpa_a);
+    return 0.5f * fabsf(a);
 }
-// The part of khpc_in where a x + b y + c >= 0 (coordinates relative to the cell, c already shifted to them).
+// The part of in where a x + b y + c >= 0 (coordinates relative to the cell, c already shifted to them).
 // Sutherland-Hodgman against one line.
-inline void kh_voc_poly_clip(const KhVocPoly& khpc_in, float khpc_a, float khpc_b, float khpc_c, KhVocPoly& khpc_out) {
-    khpc_out.n = 0;
-    for (int khpc_i = 0; khpc_i < khpc_in.n; ++khpc_i) {
-        const int khpc_j = (khpc_i + 1) % khpc_in.n;
-        const float khpc_v0 = khpc_a * khpc_in.x[khpc_i] + khpc_b * khpc_in.y[khpc_i] + khpc_c;
-        const float khpc_v1 = khpc_a * khpc_in.x[khpc_j] + khpc_b * khpc_in.y[khpc_j] + khpc_c;
-        if (khpc_v0 >= 0.0f && khpc_out.n < 16) {
-            khpc_out.x[khpc_out.n] = khpc_in.x[khpc_i]; khpc_out.y[khpc_out.n] = khpc_in.y[khpc_i]; ++khpc_out.n;
+inline void voc_poly_clip(const VocPoly& in, float a, float b, float c, VocPoly& out) {
+    out.n = 0;
+    for (int i = 0; i < in.n; ++i) {
+        const int j = (i + 1) % in.n;
+        const float v0 = a * in.x[i] + b * in.y[i] + c;
+        const float v1 = a * in.x[j] + b * in.y[j] + c;
+        if (v0 >= 0.0f && out.n < 16) {
+            out.x[out.n] = in.x[i]; out.y[out.n] = in.y[i]; ++out.n;
         }
-        if ((khpc_v0 >= 0.0f) != (khpc_v1 >= 0.0f) && khpc_out.n < 16) {
-            const float khpc_t = khpc_v0 / (khpc_v0 - khpc_v1);
-            khpc_out.x[khpc_out.n] = khpc_in.x[khpc_i] + khpc_t * (khpc_in.x[khpc_j] - khpc_in.x[khpc_i]);
-            khpc_out.y[khpc_out.n] = khpc_in.y[khpc_i] + khpc_t * (khpc_in.y[khpc_j] - khpc_in.y[khpc_i]);
-            ++khpc_out.n;
+        if ((v0 >= 0.0f) != (v1 >= 0.0f) && out.n < 16) {
+            const float t = v0 / (v0 - v1);
+            out.x[out.n] = in.x[i] + t * (in.x[j] - in.x[i]);
+            out.y[out.n] = in.y[i] + t * (in.y[j] - in.y[i]);
+            ++out.n;
         }
     }
 }
-// One occluder box into the grid (centre khvb_ctr, half-vectors khvb_hv, engine axes): its front faces that are not
-// grazing (KH_VOC_FACE_COS), each clipped at the near depth (KH_VOC_NEAR_CLIP), rasterized one by one (kh_voc_face),
-// then the cells along the edges between them (KH_VOC_UNION).
-inline void kh_voc_box(KhVisOcc& khvb_o, const float khvb_ctr[3], const float khvb_hv[3][3],
-                       const float khvb_cam[3], int& khvb_budget) {
+// One occluder box into the grid (centre ctr, half-vectors hv, engine axes): its front faces that are not
+// grazing (VOC_FACE_COS), each clipped at the near depth (VOC_NEAR_CLIP), rasterized one by one (voc_face),
+// then the cells along the edges between them (VOC_UNION).
+inline void voc_box(VisOcc& o, const float ctr[3], const float hv[3][3],
+                    const float cam[3], int& budget) {
     // Points 0..7 the corners (bit k = the sign along axis k), 8..19 the near clip on box edge 8 + 4 ax + (the other
     // two axes' bits).
-    float khvb_w[20][3], khvb_dp[20], khvb_ds[20], khvb_p[20][2];
-    bool khvb_have[20] = {}, khvb_proj[20] = {};
-    auto khvb_depth = [&](const float* khvb_x) {   // The projection's w (kh_voc_project's).
-        float khvb_c = khvb_o.vp[3][3];
-        for (int khvb_i = 0; khvb_i < 3; ++khvb_i) {
-            khvb_c += (khvb_x[khvb_i] + khvb_o.bias[khvb_i]) * khvb_o.vp[khvb_i][3];
+    float w[20][3], dp[20], ds[20], p[20][2];
+    bool have[20] = {}, proj[20] = {};
+    auto depth = [&](const float* x) {   // The projection's w (voc_project's).
+        float vb_c = o.vp[3][3];
+        for (int i = 0; i < 3; ++i) {
+            vb_c += (x[i] + o.bias[i]) * o.vp[i][3];
         }
-        return khvb_c;
+        return vb_c;
     };
-    auto khvb_finish = [&](int khvb_id) {
-        float khvb_dd = 0.0f;
-        for (int khvb_c = 0; khvb_c < 3; ++khvb_c) {
-            const float khvb_r = khvb_w[khvb_id][khvb_c] - khvb_cam[khvb_c];
-            khvb_dd += khvb_r * khvb_r;
+    auto finish = [&](int vb_id) {
+        float dd = 0.0f;
+        for (int vb_c = 0; vb_c < 3; ++vb_c) {
+            const float r = w[vb_id][vb_c] - cam[vb_c];
+            dd += r * r;
         }
-        khvb_ds[khvb_id] = sqrtf(khvb_dd);
-        khvb_proj[khvb_id] = khvb_dp[khvb_id] >= KH_VOC_W_MIN &&
-                             kh_voc_project(khvb_o, khvb_w[khvb_id], khvb_p[khvb_id][0], khvb_p[khvb_id][1]);
-        khvb_have[khvb_id] = true;
+        ds[vb_id] = sqrtf(dd);
+        proj[vb_id] = dp[vb_id] >= VOC_W_MIN &&
+                      voc_project(o, w[vb_id], p[vb_id][0], p[vb_id][1]);
+        have[vb_id] = true;
     };
-    for (int khvb_s = 0; khvb_s < 8; ++khvb_s) {
-        for (int khvb_c = 0; khvb_c < 3; ++khvb_c) {
-            khvb_w[khvb_s][khvb_c] = khvb_ctr[khvb_c] + ((khvb_s & 1) ? 1.0f : -1.0f) * khvb_hv[0][khvb_c] +
-                                     ((khvb_s & 2) ? 1.0f : -1.0f) * khvb_hv[1][khvb_c] +
-                                     ((khvb_s & 4) ? 1.0f : -1.0f) * khvb_hv[2][khvb_c];
+    for (int s = 0; s < 8; ++s) {
+        for (int vb_c = 0; vb_c < 3; ++vb_c) {
+            w[s][vb_c] = ctr[vb_c] + ((s & 1) ? 1.0f : -1.0f) * hv[0][vb_c] +
+                         ((s & 2) ? 1.0f : -1.0f) * hv[1][vb_c] +
+                         ((s & 4) ? 1.0f : -1.0f) * hv[2][vb_c];
         }
-        khvb_dp[khvb_s] = khvb_depth(khvb_w[khvb_s]);
-        khvb_finish(khvb_s);
+        dp[s] = depth(w[s]);
+        finish(s);
     }
-    auto khvb_front = [&](int khvb_s) { return khvb_dp[khvb_s] >= KH_VOC_W_MIN; };
+    auto front = [&](int s) { return dp[s] >= VOC_W_MIN; };
     // The clip point of the edge between corners s0 and s1 (one bit apart).
-    auto khvb_clip = [&](int khvb_s0, int khvb_s1) -> int {
-        if (khvb_s0 > khvb_s1) { const int khvb_t = khvb_s0; khvb_s0 = khvb_s1; khvb_s1 = khvb_t; }
-        const int khvb_ax = (khvb_s0 ^ khvb_s1) == 1 ? 0 : ((khvb_s0 ^ khvb_s1) == 2 ? 1 : 2);
-        const int khvb_u = (khvb_ax + 1) % 3, khvb_v = (khvb_ax + 2) % 3;
-        const int khvb_id = 8 + 4 * khvb_ax + ((khvb_s0 >> khvb_u) & 1) + 2 * ((khvb_s0 >> khvb_v) & 1);
-        if (!khvb_have[khvb_id]) {
-            const float khvb_t = (KH_VOC_W_MIN - khvb_dp[khvb_s0]) / (khvb_dp[khvb_s1] - khvb_dp[khvb_s0]);
-            for (int khvb_c = 0; khvb_c < 3; ++khvb_c) {
-                const float khvb_e = khvb_w[khvb_s1][khvb_c] - khvb_w[khvb_s0][khvb_c];
-                khvb_w[khvb_id][khvb_c] = khvb_w[khvb_s0][khvb_c] + khvb_t * khvb_e;
+    auto clip = [&](int s0, int s1) -> int {
+        if (s0 > s1) { const int t = s0; s0 = s1; s1 = t; }
+        const int vb_ax = (s0 ^ s1) == 1 ? 0 : ((s0 ^ s1) == 2 ? 1 : 2);
+        const int u = (vb_ax + 1) % 3, v = (vb_ax + 2) % 3;
+        const int vb_id = 8 + 4 * vb_ax + ((s0 >> u) & 1) + 2 * ((s0 >> v) & 1);
+        if (!have[vb_id]) {
+            const float t = (VOC_W_MIN - dp[s0]) / (dp[s1] - dp[s0]);
+            for (int vb_c = 0; vb_c < 3; ++vb_c) {
+                const float e = w[s1][vb_c] - w[s0][vb_c];
+                w[vb_id][vb_c] = w[s0][vb_c] + t * e;
             }
-            khvb_dp[khvb_id] = KH_VOC_W_MIN;   // By construction; the projection re-derives its own w.
-            khvb_finish(khvb_id);
+            dp[vb_id] = VOC_W_MIN;   // By construction; the projection re-derives its own w.
+            finish(vb_id);
         }
-        return khvb_id;
+        return vb_id;
     };
-    // The faces: point ids in ring order, their edge lines (inside-positive, the centroid decides as kh_voc_face) and
+    // The faces: point ids in ring order, their edge lines (inside-positive, the centroid decides as voc_face) and
     // the farthest point's distance.
-    struct KhVbFace { int ax, sg, n, id[6]; float a[6], b[6], c[6], z; };
-    KhVbFace khvb_f[6];
-    int khvb_nf = 0;
-    static const int khvb_ring[4][2] = { { -1, -1 }, { 1, -1 }, { 1, 1 }, { -1, 1 } };
-    for (int khvb_ax = 0; khvb_ax < 3 && khvb_budget <= KH_VOC_PX_BUDGET; ++khvb_ax) {
-        for (int khvb_si = 0; khvb_si < 2 && khvb_budget <= KH_VOC_PX_BUDGET; ++khvb_si) {
-            const float khvb_fs = khvb_si ? 1.0f : -1.0f;
-            float khvb_nl2 = 0.0f, khvb_vl2 = 0.0f, khvb_nv = 0.0f;
-            for (int khvb_c = 0; khvb_c < 3; ++khvb_c) {
-                const float khvb_fc = khvb_ctr[khvb_c] + khvb_fs * khvb_hv[khvb_ax][khvb_c];
-                const float khvb_vw = khvb_fc - khvb_cam[khvb_c];
-                khvb_nl2 += khvb_hv[khvb_ax][khvb_c] * khvb_hv[khvb_ax][khvb_c];
-                khvb_vl2 += khvb_vw * khvb_vw;
-                khvb_nv += khvb_vw * khvb_fs * khvb_hv[khvb_ax][khvb_c];
+    struct VbFace { int ax, sg, n, id[6]; float a[6], b[6], c[6], z; };
+    VbFace f[6];
+    int nf = 0;
+    static const int ring[4][2] = { { -1, -1 }, { 1, -1 }, { 1, 1 }, { -1, 1 } };
+    for (int vb_ax = 0; vb_ax < 3 && budget <= VOC_PX_BUDGET; ++vb_ax) {
+        for (int si = 0; si < 2 && budget <= VOC_PX_BUDGET; ++si) {
+            const float fs = si ? 1.0f : -1.0f;
+            float nl2 = 0.0f, vl2 = 0.0f, nv = 0.0f;
+            for (int vb_c = 0; vb_c < 3; ++vb_c) {
+                const float fc = ctr[vb_c] + fs * hv[vb_ax][vb_c];
+                const float vw = fc - cam[vb_c];
+                nl2 += hv[vb_ax][vb_c] * hv[vb_ax][vb_c];
+                vl2 += vw * vw;
+                nv += vw * fs * hv[vb_ax][vb_c];
             }
-            if (!(khvb_nl2 > 1.0e-12f) || !(khvb_vl2 > 1.0e-6f)) continue;
-            if (!(khvb_nv / (sqrtf(khvb_vl2) * sqrtf(khvb_nl2)) < -KH_VOC_FACE_COS)) continue;
-            const int khvb_u = (khvb_ax + 1) % 3, khvb_v = (khvb_ax + 2) % 3;
-            int khvb_q[4];
-            for (int khvb_k = 0; khvb_k < 4; ++khvb_k) {
-                khvb_q[khvb_k] = (khvb_si << khvb_ax) | ((khvb_ring[khvb_k][0] > 0 ? 1 : 0) << khvb_u) |
-                                 ((khvb_ring[khvb_k][1] > 0 ? 1 : 0) << khvb_v);
+            if (!(nl2 > 1.0e-12f) || !(vl2 > 1.0e-6f)) continue;
+            if (!(nv / (sqrtf(vl2) * sqrtf(nl2)) < -VOC_FACE_COS)) continue;
+            const int u = (vb_ax + 1) % 3, v = (vb_ax + 2) % 3;
+            int q[4];
+            for (int k = 0; k < 4; ++k) {
+                q[k] = (si << vb_ax) | ((ring[k][0] > 0 ? 1 : 0) << u) |
+                       ((ring[k][1] > 0 ? 1 : 0) << v);
             }
-            KhVbFace& khvb_g = khvb_f[khvb_nf];
-            khvb_g.n = 0;
-            for (int khvb_k = 0; khvb_k < 4; ++khvb_k) {
-                const int khvb_a0 = khvb_q[khvb_k], khvb_a1 = khvb_q[(khvb_k + 1) & 3];
-                if (khvb_front(khvb_a0)) khvb_g.id[khvb_g.n++] = khvb_a0;
-                if (khvb_front(khvb_a0) != khvb_front(khvb_a1)) khvb_g.id[khvb_g.n++] = khvb_clip(khvb_a0, khvb_a1);
+            VbFace& g = f[nf];
+            g.n = 0;
+            for (int k = 0; k < 4; ++k) {
+                const int a0 = q[k], a1 = q[(k + 1) & 3];
+                if (front(a0)) g.id[g.n++] = a0;
+                if (front(a0) != front(a1)) g.id[g.n++] = clip(a0, a1);
             }
-            if (khvb_g.n < 3) continue;   // Wholly behind the near depth.
-            bool khvb_ok = true;
-            float khvb_pts[6][2];
-            khvb_g.z = 0.0f;
-            for (int khvb_k = 0; khvb_k < khvb_g.n; ++khvb_k) {
-                const int khvb_id = khvb_g.id[khvb_k];
-                if (!khvb_proj[khvb_id]) khvb_ok = false;
-                khvb_pts[khvb_k][0] = khvb_p[khvb_id][0];
-                khvb_pts[khvb_k][1] = khvb_p[khvb_id][1];
-                if (khvb_ds[khvb_id] > khvb_g.z) khvb_g.z = khvb_ds[khvb_id];
+            if (g.n < 3) continue;   // Wholly behind the near depth.
+            bool ok = true;
+            float pts[6][2];
+            g.z = 0.0f;
+            for (int k = 0; k < g.n; ++k) {
+                const int vb_id = g.id[k];
+                if (!proj[vb_id]) ok = false;
+                pts[k][0] = p[vb_id][0];
+                pts[k][1] = p[vb_id][1];
+                if (ds[vb_id] > g.z) g.z = ds[vb_id];
             }
-            if (!khvb_ok) continue;
-            kh_voc_face(khvb_o, khvb_pts, khvb_g.n, khvb_g.z, khvb_budget);
-            // The same lines for the union (kh_voc_face's arithmetic on the same points).
-            float khvb_cx = 0.0f, khvb_cy = 0.0f;
-            const float khvb_in = 1.0f / static_cast<float>(khvb_g.n);
-            for (int khvb_k = 0; khvb_k < khvb_g.n; ++khvb_k) {
-                khvb_cx += khvb_pts[khvb_k][0] * khvb_in;
-                khvb_cy += khvb_pts[khvb_k][1] * khvb_in;
+            if (!ok) continue;
+            voc_face(o, pts, g.n, g.z, budget);
+            // The same lines for the union (voc_face's arithmetic on the same points).
+            float cx = 0.0f, cy = 0.0f;
+            const float in = 1.0f / static_cast<float>(g.n);
+            for (int k = 0; k < g.n; ++k) {
+                cx += pts[k][0] * in;
+                cy += pts[k][1] * in;
             }
-            for (int khvb_e = 0; khvb_e < khvb_g.n && khvb_ok; ++khvb_e) {
-                const float* khvb_p0 = khvb_pts[khvb_e];
-                const float* khvb_p1 = khvb_pts[(khvb_e + 1) % khvb_g.n];
-                float khvb_a = khvb_p0[1] - khvb_p1[1], khvb_b = khvb_p1[0] - khvb_p0[0];
-                float khvb_c = khvb_p0[0] * khvb_p1[1] - khvb_p1[0] * khvb_p0[1];
-                const float khvb_ec = khvb_a * khvb_cx + khvb_b * khvb_cy + khvb_c;
-                if (!(khvb_ec > 1.0e-4f || khvb_ec < -1.0e-4f)) khvb_ok = false;   // Degenerate: no union.
-                if (khvb_ec < 0.0f) { khvb_a = -khvb_a; khvb_b = -khvb_b; khvb_c = -khvb_c; }
-                khvb_g.a[khvb_e] = khvb_a; khvb_g.b[khvb_e] = khvb_b; khvb_g.c[khvb_e] = khvb_c;
+            for (int e = 0; e < g.n && ok; ++e) {
+                const float* p0 = pts[e];
+                const float* p1 = pts[(e + 1) % g.n];
+                float vb_a = p0[1] - p1[1], vb_b = p1[0] - p0[0];
+                float vb_c = p0[0] * p1[1] - p1[0] * p0[1];
+                const float ec = vb_a * cx + vb_b * cy + vb_c;
+                if (!(ec > 1.0e-4f || ec < -1.0e-4f)) ok = false;   // Degenerate: no union.
+                if (ec < 0.0f) { vb_a = -vb_a; vb_b = -vb_b; vb_c = -vb_c; }
+                g.a[e] = vb_a; g.b[e] = vb_b; g.c[e] = vb_c;
             }
-            if (!khvb_ok) continue;
-            khvb_g.ax = khvb_ax; khvb_g.sg = khvb_si;
-            ++khvb_nf;
+            if (!ok) continue;
+            g.ax = vb_ax; g.sg = si;
+            ++nf;
         }
     }
-    if (khvb_nf < 2 || khvb_budget > KH_VOC_PX_BUDGET) return;
-    uint8_t khvb_seen[KH_VOC_W * KH_VOC_H] = {};
-    // Is the cell (ix, iy) inside the faces' union? Its farthest meeting face's distance in khvb_zc.
-    auto khvb_cover = [&](int khvb_ix, int khvb_iy, float& khvb_zc) -> bool {
-        KhVocPoly khvb_pc[KH_VOC_UNION_PIECES], khvb_nx[KH_VOC_UNION_PIECES];
-        int khvb_np = 1, khvb_nn = 0;
-        khvb_pc[0].n = 4;
-        khvb_pc[0].x[0] = 0.0f; khvb_pc[0].y[0] = 0.0f; khvb_pc[0].x[1] = 1.0f; khvb_pc[0].y[1] = 0.0f;
-        khvb_pc[0].x[2] = 1.0f; khvb_pc[0].y[2] = 1.0f; khvb_pc[0].x[3] = 0.0f; khvb_pc[0].y[3] = 1.0f;
-        khvb_zc = 0.0f;
-        for (int khvb_i = 0; khvb_i < khvb_nf && khvb_np > 0; ++khvb_i) {
-            const KhVbFace& khvb_g = khvb_f[khvb_i];
-            khvb_nn = 0;
-            bool khvb_meets = false;
-            for (int khvb_j = 0; khvb_j < khvb_np; ++khvb_j) {
-                KhVocPoly khvb_cur = khvb_pc[khvb_j];
-                for (int khvb_e = 0; khvb_e < khvb_g.n && khvb_cur.n > 0; ++khvb_e) {
+    if (nf < 2 || budget > VOC_PX_BUDGET) return;
+    uint8_t seen[VOC_W * VOC_H] = {};
+    // Is the cell (ix, iy) inside the faces' union? Its farthest meeting face's distance in zc.
+    auto cover = [&](int ix, int iy, float& zc) -> bool {
+        VocPoly pc[VOC_UNION_PIECES], nx[VOC_UNION_PIECES];
+        int np = 1, nn = 0;
+        pc[0].n = 4;
+        pc[0].x[0] = 0.0f; pc[0].y[0] = 0.0f; pc[0].x[1] = 1.0f; pc[0].y[1] = 0.0f;
+        pc[0].x[2] = 1.0f; pc[0].y[2] = 1.0f; pc[0].x[3] = 0.0f; pc[0].y[3] = 1.0f;
+        zc = 0.0f;
+        for (int i = 0; i < nf && np > 0; ++i) {
+            const VbFace& g = f[i];
+            nn = 0;
+            bool meets = false;
+            for (int j = 0; j < np; ++j) {
+                VocPoly cur = pc[j];
+                for (int e = 0; e < g.n && cur.n > 0; ++e) {
                     // The line in the cell's own coordinates (x - ix, y - iy).
-                    const float khvb_cc = khvb_g.c[khvb_e] + khvb_g.a[khvb_e] * static_cast<float>(khvb_ix) +
-                                          khvb_g.b[khvb_e] * static_cast<float>(khvb_iy);
-                    KhVocPoly khvb_out;
-                    kh_voc_poly_clip(khvb_cur, -khvb_g.a[khvb_e], -khvb_g.b[khvb_e], -khvb_cc, khvb_out);
-                    if (khvb_out.n >= 3 && kh_voc_poly_area(khvb_out) > KH_VOC_UNION_EPS) {
-                        if (khvb_nn == KH_VOC_UNION_PIECES) return false;   // Out of room: not covered.
-                        khvb_nx[khvb_nn++] = khvb_out;
+                    const float cc = g.c[e] + g.a[e] * static_cast<float>(ix) +
+                                     g.b[e] * static_cast<float>(iy);
+                    VocPoly out;
+                    voc_poly_clip(cur, -g.a[e], -g.b[e], -cc, out);
+                    if (out.n >= 3 && voc_poly_area(out) > VOC_UNION_EPS) {
+                        if (nn == VOC_UNION_PIECES) return false;   // Out of room: not covered.
+                        nx[nn++] = out;
                     }
-                    KhVocPoly khvb_in;
-                    kh_voc_poly_clip(khvb_cur, khvb_g.a[khvb_e], khvb_g.b[khvb_e], khvb_cc, khvb_in);
-                    khvb_cur = khvb_in;
-                    if (khvb_cur.n < 3 || !(kh_voc_poly_area(khvb_cur) > KH_VOC_UNION_EPS)) khvb_cur.n = 0;
+                    VocPoly in;
+                    voc_poly_clip(cur, g.a[e], g.b[e], cc, in);
+                    cur = in;
+                    if (cur.n < 3 || !(voc_poly_area(cur) > VOC_UNION_EPS)) cur.n = 0;
                 }
-                if (khvb_cur.n > 0) khvb_meets = true;
+                if (cur.n > 0) meets = true;
             }
-            if (khvb_meets && khvb_g.z > khvb_zc) khvb_zc = khvb_g.z;
-            for (int khvb_j = 0; khvb_j < khvb_nn; ++khvb_j) khvb_pc[khvb_j] = khvb_nx[khvb_j];
-            khvb_np = khvb_nn;
+            if (meets && g.z > zc) zc = g.z;
+            for (int j = 0; j < nn; ++j) pc[j] = nx[j];
+            np = nn;
         }
-        return khvb_np == 0 && khvb_zc > 0.0f;
+        return np == 0 && zc > 0.0f;
     };
     // The fast exact test for a cell the edge between faces g and h crosses (edge ge of g, he of h).
-    auto khvb_pair = [&](const KhVbFace& khvb_g, int khvb_ge, const KhVbFace& khvb_h, int khvb_he,
-                         int khvb_ix, int khvb_iy) -> bool {
+    auto pair = [&](const VbFace& g, int ge, const VbFace& h, int he,
+                    int ix, int iy) -> bool {
         // The lines in the cell's own coordinates; g's shared line is h's negated.
-        float khvb_gc[6], khvb_hc[6];
-        for (int khvb_e = 0; khvb_e < khvb_g.n; ++khvb_e) {
-            khvb_gc[khvb_e] = khvb_g.c[khvb_e] + khvb_g.a[khvb_e] * static_cast<float>(khvb_ix) +
-                              khvb_g.b[khvb_e] * static_cast<float>(khvb_iy);
+        float gc[6], hc[6];
+        for (int e = 0; e < g.n; ++e) {
+            gc[e] = g.c[e] + g.a[e] * static_cast<float>(ix) +
+                    g.b[e] * static_cast<float>(iy);
         }
-        for (int khvb_e = 0; khvb_e < khvb_h.n; ++khvb_e) {
-            khvb_hc[khvb_e] = khvb_h.c[khvb_e] + khvb_h.a[khvb_e] * static_cast<float>(khvb_ix) +
-                              khvb_h.b[khvb_e] * static_cast<float>(khvb_iy);
+        for (int e = 0; e < h.n; ++e) {
+            hc[e] = h.c[e] + h.a[e] * static_cast<float>(ix) +
+                    h.b[e] * static_cast<float>(iy);
         }
-        auto khvb_in = [&](const KhVbFace& khvb_f2, const float* khvb_cs, int khvb_se, float khvb_x, float khvb_y) {
-            for (int khvb_e = 0; khvb_e < khvb_f2.n; ++khvb_e) {
-                if (khvb_e == khvb_se) continue;
-                if (!(khvb_f2.a[khvb_e] * khvb_x + khvb_f2.b[khvb_e] * khvb_y + khvb_cs[khvb_e] > 0.0f)) return false;
+        auto in = [&](const VbFace& f2, const float* cs, int se, float x, float y) {
+            for (int e = 0; e < f2.n; ++e) {
+                if (e == se) continue;
+                if (!(f2.a[e] * x + f2.b[e] * y + cs[e] > 0.0f)) return false;
             }
             return true;
         };
         // The vertices of the two sides of the cut: the square's corners on each side and the points where the line
         // crosses the square's edges.
-        static const float khvb_sx[4] = { 0.0f, 1.0f, 1.0f, 0.0f }, khvb_sy[4] = { 0.0f, 0.0f, 1.0f, 1.0f };
-        float khvb_v[4];
-        for (int khvb_k = 0; khvb_k < 4; ++khvb_k) {
-            khvb_v[khvb_k] = khvb_g.a[khvb_ge] * khvb_sx[khvb_k] + khvb_g.b[khvb_ge] * khvb_sy[khvb_k] +
-                             khvb_gc[khvb_ge];
+        static const float sx[4] = { 0.0f, 1.0f, 1.0f, 0.0f }, sy[4] = { 0.0f, 0.0f, 1.0f, 1.0f };
+        float v[4];
+        for (int k = 0; k < 4; ++k) {
+            v[k] = g.a[ge] * sx[k] + g.b[ge] * sy[k] +
+                   gc[ge];
         }
-        for (int khvb_k = 0; khvb_k < 4; ++khvb_k) {
-            const float khvb_cx2 = khvb_sx[khvb_k], khvb_cy2 = khvb_sy[khvb_k];
-            if (khvb_v[khvb_k] >= 0.0f && !khvb_in(khvb_g, khvb_gc, khvb_ge, khvb_cx2, khvb_cy2)) return false;
-            if (khvb_v[khvb_k] <= 0.0f && !khvb_in(khvb_h, khvb_hc, khvb_he, khvb_cx2, khvb_cy2)) return false;
-            const int khvb_n2 = (khvb_k + 1) & 3;
-            if ((khvb_v[khvb_k] >= 0.0f) != (khvb_v[khvb_n2] >= 0.0f)) {
-                const float khvb_t2 = khvb_v[khvb_k] / (khvb_v[khvb_k] - khvb_v[khvb_n2]);
-                const float khvb_px = khvb_sx[khvb_k] + khvb_t2 * (khvb_sx[khvb_n2] - khvb_sx[khvb_k]);
-                const float khvb_py = khvb_sy[khvb_k] + khvb_t2 * (khvb_sy[khvb_n2] - khvb_sy[khvb_k]);
-                if (!khvb_in(khvb_g, khvb_gc, khvb_ge, khvb_px, khvb_py) ||
-                    !khvb_in(khvb_h, khvb_hc, khvb_he, khvb_px, khvb_py)) return false;
+        for (int k = 0; k < 4; ++k) {
+            const float cx2 = sx[k], cy2 = sy[k];
+            if (v[k] >= 0.0f && !in(g, gc, ge, cx2, cy2)) return false;
+            if (v[k] <= 0.0f && !in(h, hc, he, cx2, cy2)) return false;
+            const int n2 = (k + 1) & 3;
+            if ((v[k] >= 0.0f) != (v[n2] >= 0.0f)) {
+                const float t2 = v[k] / (v[k] - v[n2]);
+                const float px = sx[k] + t2 * (sx[n2] - sx[k]);
+                const float py = sy[k] + t2 * (sy[n2] - sy[k]);
+                if (!in(g, gc, ge, px, py) ||
+                    !in(h, hc, he, px, py)) return false;
             }
         }
         return true;
     };
-    auto khvb_edge_of = [](const KhVbFace& khvb_f2, int khvb_a0, int khvb_a1) -> int {
-        for (int khvb_e = 0; khvb_e < khvb_f2.n; ++khvb_e) {
-            const int khvb_p0 = khvb_f2.id[khvb_e], khvb_p1 = khvb_f2.id[(khvb_e + 1) % khvb_f2.n];
-            if ((khvb_p0 == khvb_a0 && khvb_p1 == khvb_a1) || (khvb_p0 == khvb_a1 && khvb_p1 == khvb_a0)) return khvb_e;
+    auto edge_of = [](const VbFace& f2, int a0, int a1) -> int {
+        for (int e = 0; e < f2.n; ++e) {
+            const int p0 = f2.id[e], p1 = f2.id[(e + 1) % f2.n];
+            if ((p0 == a0 && p1 == a1) || (p0 == a1 && p1 == a0)) return e;
         }
         return -1;
     };
     // Every edge two of the faces share (its part in front of the near depth): the cells its projected segment
     // crosses, clipped to the grid first.
-    for (int khvb_i = 0; khvb_i < khvb_nf; ++khvb_i) {
-        for (int khvb_j = khvb_i + 1; khvb_j < khvb_nf; ++khvb_j) {
-            const KhVbFace& khvb_g = khvb_f[khvb_i];
-            const KhVbFace& khvb_h = khvb_f[khvb_j];
-            if (khvb_g.ax == khvb_h.ax) continue;   // Opposite faces share nothing.
-            const int khvb_t = 3 - khvb_g.ax - khvb_h.ax;
-            const int khvb_s0 = (khvb_g.sg << khvb_g.ax) | (khvb_h.sg << khvb_h.ax);
-            const int khvb_s1 = khvb_s0 | (1 << khvb_t);
-            if (!khvb_front(khvb_s0) && !khvb_front(khvb_s1)) continue;   // Wholly behind the near depth.
-            const int khvb_e0 = khvb_front(khvb_s0) ? khvb_s0 : khvb_clip(khvb_s0, khvb_s1);
-            const int khvb_e1 = khvb_front(khvb_s1) ? khvb_s1 : khvb_clip(khvb_s0, khvb_s1);
-            const int khvb_ge = khvb_edge_of(khvb_g, khvb_e0, khvb_e1);
-            const int khvb_he = khvb_edge_of(khvb_h, khvb_e0, khvb_e1);
-            if (khvb_ge < 0 || khvb_he < 0) continue;
-            const float khvb_x0 = khvb_p[khvb_e0][0], khvb_y0 = khvb_p[khvb_e0][1];
-            const float khvb_dx = khvb_p[khvb_e1][0] - khvb_x0, khvb_dy = khvb_p[khvb_e1][1] - khvb_y0;
-            float khvb_t0 = 0.0f, khvb_t1 = 1.0f;   // Liang-Barsky against the grid, one cell of margin.
-            const float khvb_lim[4] = { -1.0f - khvb_x0, static_cast<float>(KH_VOC_W) + 1.0f - khvb_x0,
-                                        -1.0f - khvb_y0, static_cast<float>(KH_VOC_H) + 1.0f - khvb_y0 };
-            const float khvb_dir[4] = { -khvb_dx, khvb_dx, -khvb_dy, khvb_dy };
-            bool khvb_in = true;
-            for (int khvb_k = 0; khvb_k < 4 && khvb_in; ++khvb_k) {
-                const float khvb_pk = khvb_dir[khvb_k];
-                const float khvb_qk = (khvb_k & 1) ? khvb_lim[khvb_k] : -khvb_lim[khvb_k];
-                if (khvb_pk == 0.0f) { if (khvb_qk < 0.0f) khvb_in = false; continue; }
-                const float khvb_r = khvb_qk / khvb_pk;
-                if (khvb_pk < 0.0f) { if (khvb_r > khvb_t0) khvb_t0 = khvb_r; }
-                else if (khvb_r < khvb_t1) khvb_t1 = khvb_r;
-                if (khvb_t0 > khvb_t1) khvb_in = false;
+    for (int i = 0; i < nf; ++i) {
+        for (int j = i + 1; j < nf; ++j) {
+            const VbFace& g = f[i];
+            const VbFace& h = f[j];
+            if (g.ax == h.ax) continue;   // Opposite faces share nothing.
+            const int t = 3 - g.ax - h.ax;
+            const int s0 = (g.sg << g.ax) | (h.sg << h.ax);
+            const int s1 = s0 | (1 << t);
+            if (!front(s0) && !front(s1)) continue;   // Wholly behind the near depth.
+            const int e0 = front(s0) ? s0 : clip(s0, s1);
+            const int e1 = front(s1) ? s1 : clip(s0, s1);
+            const int ge = edge_of(g, e0, e1);
+            const int he = edge_of(h, e0, e1);
+            if (ge < 0 || he < 0) continue;
+            const float x0 = p[e0][0], y0 = p[e0][1];
+            const float dx = p[e1][0] - x0, dy = p[e1][1] - y0;
+            float t0 = 0.0f, t1 = 1.0f;   // Liang-Barsky against the grid, one cell of margin.
+            const float lim[4] = { -1.0f - x0, static_cast<float>(VOC_W) + 1.0f - x0,
+                                   -1.0f - y0, static_cast<float>(VOC_H) + 1.0f - y0 };
+            const float dir[4] = { -dx, dx, -dy, dy };
+            bool in = true;
+            for (int k = 0; k < 4 && in; ++k) {
+                const float pk = dir[k];
+                const float qk = (k & 1) ? lim[k] : -lim[k];
+                if (pk == 0.0f) { if (qk < 0.0f) in = false; continue; }
+                const float r = qk / pk;
+                if (pk < 0.0f) { if (r > t0) t0 = r; }
+                else if (r < t1) t1 = r;
+                if (t0 > t1) in = false;
             }
-            if (!khvb_in) continue;
-            const float khvb_len = (khvb_t1 - khvb_t0) * sqrtf(khvb_dx * khvb_dx + khvb_dy * khvb_dy);
-            const int khvb_steps = static_cast<int>(fminf(khvb_len * 2.0f, 1024.0f)) + 1;
-            for (int khvb_k = 0; khvb_k <= khvb_steps; ++khvb_k) {
-                const float khvb_tt = khvb_t0 + (khvb_t1 - khvb_t0) * static_cast<float>(khvb_k) /
-                                                static_cast<float>(khvb_steps);
-                // KH_VOC_CAST_CLAMP: the clip keeps the point in [-1, W + 1] only up to float cancellation (a
+            if (!in) continue;
+            const float len = (t1 - t0) * sqrtf(dx * dx + dy * dy);
+            const int steps = static_cast<int>(fminf(len * 2.0f, 1024.0f)) + 1;
+            for (int k = 0; k <= steps; ++k) {
+                const float tt = t0 + (t1 - t0) * static_cast<float>(k) /
+                                      static_cast<float>(steps);
+                // VOC_CAST_CLAMP: the clip keeps the point in [-1, W + 1] only up to float cancellation (a
                 // corner far off the grid); clamped two cells out (NaN too) before the casts, where every
                 // neighbour below is still off the grid and skipped.
-                const int khvb_cx = static_cast<int>(floorf(fminf(fmaxf(khvb_x0 + khvb_tt * khvb_dx, -2.0f),
-                                                                  static_cast<float>(KH_VOC_W) + 2.0f)));
-                const int khvb_cy = static_cast<int>(floorf(fminf(fmaxf(khvb_y0 + khvb_tt * khvb_dy, -2.0f),
-                                                                  static_cast<float>(KH_VOC_H) + 2.0f)));
-                for (int khvb_oy = -1; khvb_oy <= 1; ++khvb_oy) {
-                    for (int khvb_ox = -1; khvb_ox <= 1; ++khvb_ox) {
-                        const int khvb_ix = khvb_cx + khvb_ox, khvb_iy = khvb_cy + khvb_oy;
-                        if (khvb_ix < 0 || khvb_iy < 0 || khvb_ix >= KH_VOC_W || khvb_iy >= KH_VOC_H) continue;
-                        uint8_t& khvb_m = khvb_seen[khvb_iy * KH_VOC_W + khvb_ix];
-                        if (khvb_m) continue;
-                        khvb_m = 1;
+                const int cx = static_cast<int>(floorf(fminf(fmaxf(x0 + tt * dx, -2.0f),
+                                                             static_cast<float>(VOC_W) + 2.0f)));
+                const int cy = static_cast<int>(floorf(fminf(fmaxf(y0 + tt * dy, -2.0f),
+                                                             static_cast<float>(VOC_H) + 2.0f)));
+                for (int oy = -1; oy <= 1; ++oy) {
+                    for (int ox = -1; ox <= 1; ++ox) {
+                        const int ix = cx + ox, iy = cy + oy;
+                        if (ix < 0 || iy < 0 || ix >= VOC_W || iy >= VOC_H) continue;
+                        uint8_t& m = seen[iy * VOC_W + ix];
+                        if (m) continue;
+                        m = 1;
                         // Only a cell the edge itself crosses can be in the union and in neither face: off the
                         // edge's line the union on each side is one face. The segment against the cell's square
                         // (1e-3 wider).
                         {
-                            float khvb_a0 = khvb_t0, khvb_a1 = khvb_t1;
-                            const float khvb_bx[4] = { static_cast<float>(khvb_ix) - 1.0e-3f - khvb_x0,
-                                                       static_cast<float>(khvb_ix) + 1.001f - khvb_x0,
-                                                       static_cast<float>(khvb_iy) - 1.0e-3f - khvb_y0,
-                                                       static_cast<float>(khvb_iy) + 1.001f - khvb_y0 };
-                            bool khvb_hit = true;
-                            for (int khvb_b = 0; khvb_b < 4 && khvb_hit; ++khvb_b) {
-                                const float khvb_pb = khvb_dir[khvb_b];
-                                const float khvb_qb = (khvb_b & 1) ? khvb_bx[khvb_b] : -khvb_bx[khvb_b];
-                                if (khvb_pb == 0.0f) { if (khvb_qb < 0.0f) khvb_hit = false; continue; }
-                                const float khvb_rb = khvb_qb / khvb_pb;
-                                if (khvb_pb < 0.0f) { if (khvb_rb > khvb_a0) khvb_a0 = khvb_rb; }
-                                else if (khvb_rb < khvb_a1) khvb_a1 = khvb_rb;
-                                if (khvb_a0 > khvb_a1) khvb_hit = false;
+                            float a0 = t0, a1 = t1;
+                            const float bx[4] = { static_cast<float>(ix) - 1.0e-3f - x0,
+                                                  static_cast<float>(ix) + 1.001f - x0,
+                                                  static_cast<float>(iy) - 1.0e-3f - y0,
+                                                  static_cast<float>(iy) + 1.001f - y0 };
+                            bool hit = true;
+                            for (int vb_b = 0; vb_b < 4 && hit; ++vb_b) {
+                                const float pb = dir[vb_b];
+                                const float qb = (vb_b & 1) ? bx[vb_b] : -bx[vb_b];
+                                if (pb == 0.0f) { if (qb < 0.0f) hit = false; continue; }
+                                const float rb = qb / pb;
+                                if (pb < 0.0f) { if (rb > a0) a0 = rb; }
+                                else if (rb < a1) a1 = rb;
+                                if (a0 > a1) hit = false;
                             }
-                            if (!khvb_hit) continue;
+                            if (!hit) continue;
                         }
-                        float khvb_zc = khvb_g.z > khvb_h.z ? khvb_g.z : khvb_h.z;
-                        if (!khvb_pair(khvb_g, khvb_ge, khvb_h, khvb_he, khvb_ix, khvb_iy) &&
-                            !(khvb_nf > 2 && khvb_cover(khvb_ix, khvb_iy, khvb_zc))) continue;
-                        float& khvb_slot = khvb_o.z[khvb_iy * KH_VOC_W + khvb_ix];
-                        if (khvb_zc < khvb_slot) khvb_slot = khvb_zc;
-                        if (++khvb_budget > KH_VOC_PX_BUDGET) return;
+                        float zc = g.z > h.z ? g.z : h.z;
+                        if (!pair(g, ge, h, he, ix, iy) &&
+                            !(nf > 2 && cover(ix, iy, zc))) continue;
+                        float& slot = o.z[iy * VOC_W + ix];
+                        if (zc < slot) slot = zc;
+                        if (++budget > VOC_PX_BUDGET) return;
                     }
                 }
             }
         }
     }
 }
-// KH_OCC_BOX / KH_OCC_FORCE: the box the cull rasterizes for an object and the bounds the camera must stay out of,
+// OCC_BOX / OCC_FORCE: the box the cull rasterizes for an object and the bounds the camera must stay out of,
 // normalised (engine axes): the mesh's proven box and its every level's bounds, or for a declared occluder its unit
 // box for both. The transform is the vertex stage's: centre + R (p * size).
-inline void kh_occ_box_of(const RenderObject& o, bool khob_force, float khob_c[3], float khob_h[3],
-                          float khob_mn[3], float khob_mx[3]) {
-    const MeshDef& khob_md = mesh_def(mesh_id_clamp(o.mesh));
+inline void occ_box_of(const RenderObject& o, bool force, float c[3], float h[3],
+                       float mn[3], float mx[3]) {
+    const MeshDef& md = mesh_def(mesh_id_clamp(o.mesh));
     for (int k = 0; k < 3; ++k) {
-        khob_c[k] = khob_force ? 0.0f : khob_md.occ_c[k];
-        khob_h[k] = khob_force ? 0.5f : khob_md.occ_h[k];
-        khob_mn[k] = khob_force ? -0.5f : khob_md.occ_hmn[k];
-        khob_mx[k] = khob_force ? 0.5f : khob_md.occ_hmx[k];
+        c[k] = force ? 0.0f : md.occ_c[k];
+        h[k] = force ? 0.5f : md.occ_h[k];
+        mn[k] = force ? -0.5f : md.occ_hmn[k];
+        mx[k] = force ? 0.5f : md.occ_hmx[k];
     }
 }
-// Squared distance (metres^2) from the camera to those bounds, along the object's own axes. KH_OCC_ROW_SCALE: a row
+// Squared distance (metres^2) from the camera to those bounds, along the object's own axes. OCC_ROW_SCALE: a row
 // may carry an attached parent's scale (length s); the camera's local coordinate is (v . row) / |row|^2 and an
 // axis's gap counts |row| metres per local unit - exact for orthogonal rows of any lengths (bit-identical to the
 // plain dot for |row|^2 == 1). A zero row's coordinate is 0 / 0 = NaN: gap 0 on that axis (both tests fail). A
@@ -420,369 +420,369 @@ inline void kh_occ_box_of(const RenderObject& o, bool khob_force, float khob_c[3
 // |row| below ~1.1e-20, where a camera under the caller's 0.2 m from the box reads as outside - unreachable scales.
 // Rows that are not orthogonal (a non-uniform parent scale under a rotation: a sheared map) have no such exact form:
 // the camera counts as inside (0), as above.
-inline float kh_occ_bounds_dist_sq(const RenderObject& o, const float khbd_mn[3], const float khbd_mx[3],
-                                   const float cam[3]) {
-    for (int i = 0; i < 3; ++i) {   // KH_OCC_ROW_SCALE: the orthogonality the measure needs.
-        const float* const khbd_ri = o.rot_m + i * 3;
-        const float* const khbd_rj = o.rot_m + ((i + 1) % 3) * 3;
-        const float khbd_d = khbd_ri[0] * khbd_rj[0] + khbd_ri[1] * khbd_rj[1] + khbd_ri[2] * khbd_rj[2];
-        const float khbd_ni = khbd_ri[0] * khbd_ri[0] + khbd_ri[1] * khbd_ri[1] + khbd_ri[2] * khbd_ri[2];
-        const float khbd_nj = khbd_rj[0] * khbd_rj[0] + khbd_rj[1] * khbd_rj[1] + khbd_rj[2] * khbd_rj[2];
-        if (khbd_d * khbd_d > 1.0e-6f * khbd_ni * khbd_nj) return 0.0f;
+inline float occ_bounds_dist_sq(const RenderObject& o, const float mn[3], const float mx[3],
+                                const float cam[3]) {
+    for (int i = 0; i < 3; ++i) {   // OCC_ROW_SCALE: the orthogonality the measure needs.
+        const float* const ri = o.rot_m + i * 3;
+        const float* const rj = o.rot_m + ((i + 1) % 3) * 3;
+        const float d = ri[0] * rj[0] + ri[1] * rj[1] + ri[2] * rj[2];
+        const float ni = ri[0] * ri[0] + ri[1] * ri[1] + ri[2] * ri[2];
+        const float nj = rj[0] * rj[0] + rj[1] * rj[1] + rj[2] * rj[2];
+        if (d * d > 1.0e-6f * ni * nj) return 0.0f;
     }
-    float khbd_c[3];
-    kh_obj_center_engine(o, khbd_c);
-    const float khbd_v[3] = { cam[0] - khbd_c[0], cam[1] - khbd_c[1], cam[2] - khbd_c[2] };
-    const float khbd_se[3] = { o.size[0], o.size[2], o.size[1] };   // Engine edge lengths.
-    float khbd_acc = 0.0f;
+    float c[3];
+    obj_center_engine(o, c);
+    const float v[3] = { cam[0] - c[0], cam[1] - c[1], cam[2] - c[2] };
+    const float se[3] = { o.size[0], o.size[2], o.size[1] };   // Engine edge lengths.
+    float acc = 0.0f;
     for (int k = 0; k < 3; ++k) {
-        const float* const khbd_r = o.rot_m + k * 3;
-        const float khbd_n2 = khbd_r[0] * khbd_r[0] + khbd_r[1] * khbd_r[1] + khbd_r[2] * khbd_r[2];
-        const float khbd_l = (khbd_v[0] * khbd_r[0] + khbd_v[1] * khbd_r[1] + khbd_v[2] * khbd_r[2]) / khbd_n2;
-        const float khbd_a = khbd_mn[k] * khbd_se[k], khbd_b = khbd_mx[k] * khbd_se[k];
-        const float khbd_e = khbd_l < khbd_a ? khbd_a - khbd_l : (khbd_l > khbd_b ? khbd_l - khbd_b : 0.0f);
-        khbd_acc += khbd_e * khbd_e * khbd_n2;
+        const float* const r = o.rot_m + k * 3;
+        const float n2 = r[0] * r[0] + r[1] * r[1] + r[2] * r[2];
+        const float l = (v[0] * r[0] + v[1] * r[1] + v[2] * r[2]) / n2;
+        const float a = mn[k] * se[k], b = mx[k] * se[k];
+        const float e = l < a ? a - l : (l > b ? l - b : 0.0f);
+        acc += e * e * n2;
     }
-    return khbd_acc;
+    return acc;
 }
 // The world-axis box (centre, half extents) around everything an object's mesh draws, at any level: the burial
 // check's footprint.
-inline void kh_occ_hull_world(const RenderObject& o, float khhw_c[3], float khhw_he[3]) {
-    const MeshDef& khhw_md = mesh_def(mesh_id_clamp(o.mesh));
-    kh_obj_center_engine(o, khhw_c);
-    const float khhw_se[3] = { o.size[0], o.size[2], o.size[1] };
-    khhw_he[0] = khhw_he[1] = khhw_he[2] = 0.0f;
+inline void occ_hull_world(const RenderObject& o, float hw_c[3], float he[3]) {
+    const MeshDef& md = mesh_def(mesh_id_clamp(o.mesh));
+    obj_center_engine(o, hw_c);
+    const float se[3] = { o.size[0], o.size[2], o.size[1] };
+    he[0] = he[1] = he[2] = 0.0f;
     for (int k = 0; k < 3; ++k) {
-        const float khhw_m = 0.5f * (khhw_md.occ_hmn[k] + khhw_md.occ_hmx[k]) * khhw_se[k];
-        const float khhw_x = 0.5f * (khhw_md.occ_hmx[k] - khhw_md.occ_hmn[k]) * khhw_se[k];
+        const float m = 0.5f * (md.occ_hmn[k] + md.occ_hmx[k]) * se[k];
+        const float x = 0.5f * (md.occ_hmx[k] - md.occ_hmn[k]) * se[k];
         for (int c = 0; c < 3; ++c) {
-            khhw_c[c] += khhw_m * o.rot_m[k * 3 + c];
-            khhw_he[c] += khhw_x * fabsf(o.rot_m[k * 3 + c]);
+            hw_c[c] += m * o.rot_m[k * 3 + c];
+            he[c] += x * fabsf(o.rot_m[k * 3 + c]);
         }
     }
 }
-// KH_OCC_BOX: whether this object draws its mesh as kh_mesh_occ_prep proved it. A skeletal binding, a cloth and a
+// OCC_BOX: whether this object draws its mesh as mesh_occ_prep proved it. A skeletal binding, a cloth and a
 // chain move their vertices every frame (the pass draws the skinned or simulated buffer - or the rest pose until that
 // exists), and a KH_USER_VS vertex stage deforms them on the GPU: none is the geometry the box was proven on,
-// whatever the buffer. Beyond those, the pass must bind the mesh's own buffer (any substitution kh_mesh_vb_ref
+// whatever the buffer. Beyond those, the pass must bind the mesh's own buffer (any substitution mesh_vb_ref
 // makes), and the transform must keep the winding (positive sizes, a proper rotation - an attached basis may be
 // mirrored).
-inline bool kh_occ_drawn_as_built(const RenderObject& o) {
+inline bool occ_drawn_as_built(const RenderObject& o) {
     if (o.skel || o.cloth_sim || o.chain_sim) return false;
     if (o.materials && o.materials->vertex_any) return false;
-    const int khdb_mid = mesh_id_clamp(o.mesh);
-    if (!mesh_def(khdb_mid).occ_ok) return false;
-    if (khdb_mid < 0 || static_cast<size_t>(khdb_mid) >= g_res.mesh_vb.size() || !g_res.mesh_vb[khdb_mid] ||
-        kh_mesh_vb_ref(khdb_mid, o.slot).vb != g_res.mesh_vb[khdb_mid]) return false;
+    const int mid = mesh_id_clamp(o.mesh);
+    if (!mesh_def(mid).occ_ok) return false;
+    if (mid < 0 || static_cast<size_t>(mid) >= g_res.mesh_vb.size() || !g_res.mesh_vb[mid] ||
+        mesh_vb_ref(mid, o.slot).vb != g_res.mesh_vb[mid]) return false;
     if (!(o.size[0] > 0.0f && o.size[1] > 0.0f && o.size[2] > 0.0f)) return false;
     const float* r = o.rot_m;
-    const float khdb_det = r[0] * (r[4] * r[8] - r[5] * r[7]) - r[1] * (r[3] * r[8] - r[5] * r[6]) +
-                           r[2] * (r[3] * r[7] - r[4] * r[6]);
-    return khdb_det > 0.5f;
+    const float det = r[0] * (r[4] * r[8] - r[5] * r[7]) - r[1] * (r[3] * r[8] - r[5] * r[6]) +
+                      r[2] * (r[3] * r[7] - r[4] * r[6]);
+    return det > 0.5f;
 }
 
-// Occluder pick + rasterize. khvo_m is the pass's own draw list, khvo_x the declared occluders it does not draw (one
-// index space, khvo_m first). khvo_margin covers passes whose PS may write nearer than their geometry (far-arb
-// terrain clamp); khvo_far / khvo_cut bound an occluder to where its far contract cannot discard it. khvo_floor = the
+// Occluder pick + rasterize. m is the pass's own draw list, x the declared occluders it does not draw (one
+// index space, m first). margin covers passes whose PS may write nearer than their geometry (far-arb
+// terrain clamp); vo_far / cut bound an occluder to where its far contract cannot discard it. floor = the
 // height (engine y) below which this object may fail to depth-write a pixel the grid would count, the terrain
-// march's discards aside (KH_VOC_BURIAL says why they are safe): KH_VOC_FLOOR_REFUSE for the SV_Depth routes and any
-// occluder the endpoint discard cannot be bounded for, KH_VOC_FLOOR_NONE where no endpoint discard reaches it, else
-// kh_voc_floor's certified line - the box is then clipped to its part above it, and taken only with the camera above
+// march's discards aside (VOC_BURIAL says why they are safe): VOC_FLOOR_REFUSE for the SV_Depth routes and any
+// occluder the endpoint discard cannot be bounded for, VOC_FLOOR_NONE where no endpoint discard reaches it, else
+// voc_floor's certified line - the box is then clipped to its part above it, and taken only with the camera above
 // it too. A declared occluder takes none of the drawn-surface tests: its box is the script's promise, whatever is
 // drawn there - taken exactly (no inset), at any size on screen, and ranked ahead of every automatic occluder.
-template <class KhVocFloor>
-inline void kh_vis_occ_build(KhVisOcc& khvo, const std::vector<RenderObject>& khvo_m,
-                             const std::vector<RenderObject>& khvo_x,
-                             const float khvo_vp[4][4], const KhCullSet& khvo_cull,
-                             const float khvo_cam[3], float khvo_margin,
-                             float khvo_far, float khvo_cut, KhVocFloor khvo_floor) {
-    KH_PROF_SCOPE(KHP_VIS_OCC);   // KH_PROF.
-    khvo.on = false;
-    if (!khvo_cull.valid) return;
-    memcpy(khvo.vp, khvo_vp, sizeof(khvo.vp));
-    khvo.bias[0] = khvo_cull.bias[0]; khvo.bias[1] = khvo_cull.bias[1]; khvo.bias[2] = khvo_cull.bias[2];
-    khvo.cam[0] = khvo_cam[0]; khvo.cam[1] = khvo_cam[1]; khvo.cam[2] = khvo_cam[2];
-    khvo.margin = khvo_margin;
-    double khvo_sc[KH_VOC_MAX];   // Rank keys (see below).
-    uint32_t khvo_id[KH_VOC_MAX];
-    float khvo_fl[KH_VOC_MAX];   // KH_VOC_BURIAL: each pick's floor.
-    int khvo_n = 0;
-    const size_t khvo_mn = khvo_m.size();
-    for (uint32_t khvo_i = 0; khvo_i < khvo_mn + khvo_x.size(); ++khvo_i) {
-        const RenderObject& o = khvo_i < khvo_mn ? khvo_m[khvo_i] : khvo_x[khvo_i - khvo_mn];
+template <class VocFloor>
+inline void vis_occ_build(VisOcc& vo, const std::vector<RenderObject>& m,
+                          const std::vector<RenderObject>& x,
+                          const float vp[4][4], const CullSet& cull,
+                          const float cam[3], float margin,
+                          float vo_far, float cut, VocFloor floor) {
+    KH_PROF_SCOPE(PROF_VIS_OCC);   // PROF.
+    vo.on = false;
+    if (!cull.valid) return;
+    memcpy(vo.vp, vp, sizeof(vo.vp));
+    vo.bias[0] = cull.bias[0]; vo.bias[1] = cull.bias[1]; vo.bias[2] = cull.bias[2];
+    vo.cam[0] = cam[0]; vo.cam[1] = cam[1]; vo.cam[2] = cam[2];
+    vo.margin = margin;
+    double sc[VOC_MAX];   // Rank keys (see below).
+    uint32_t id[VOC_MAX];
+    float fl[VOC_MAX];   // VOC_BURIAL: each pick's floor.
+    int n = 0;
+    const size_t mn = m.size();
+    for (uint32_t i = 0; i < mn + x.size(); ++i) {
+        const RenderObject& o = i < mn ? m[i] : x[i - mn];
         if (o.fullscreen) continue;
-        const bool khvo_force = o.occluder;   // KH_OCC_FORCE.
-        float khvo_f = KH_VOC_FLOOR_NONE;
-        if (!khvo_force) {
+        const bool force = o.occluder;   // OCC_FORCE.
+        float f = VOC_FLOOR_NONE;
+        if (!force) {
             if (o.effect != 0 || o.mode == DepthMode::Off) continue;
-            if (!kh_occ_drawn_as_built(o)) continue;   // KH_OCC_BOX: every mesh by one rule.
+            if (!occ_drawn_as_built(o)) continue;   // OCC_BOX: every mesh by one rule.
             if (o.blend_mode != 0 || o.color[3] < 0.999f) continue;
             if (o.localized || o.banded) continue;
             if (o.materials && o.materials->any) {   // Cutout / blend / user PS may discard pixels.
-                bool khvo_solid = true;
-                for (const KhMaterial& khvo_mt : o.materials->slots) {
-                    if (khvo_mt.used && (khvo_mt.alpha_mode != 0 || khvo_mt.shader == 1)) {
-                        khvo_solid = false;
+                bool solid = true;
+                for (const Material& mt : o.materials->slots) {
+                    if (mt.used && (mt.alpha_mode != 0 || mt.shader == 1)) {
+                        solid = false;
                         break;
                     }
                 }
-                if (!khvo_solid) continue;
+                if (!solid) continue;
             }
-            khvo_f = khvo_floor(o);
-            if (!(khvo_f < KH_VOC_FLOOR_REFUSE)) continue;   // NaN refuses too.
-            // KH_VOC_BURIAL: a ray from the camera to the clipped box meets the drawn front face on the way, between
+            f = floor(o);
+            if (!(f < VOC_FLOOR_REFUSE)) continue;   // NaN refuses too.
+            // VOC_BURIAL: a ray from the camera to the clipped box meets the drawn front face on the way, between
             // two points above the floor - above it too, so never discarded by the endpoint test - only while the
             // camera is above the floor.
-            if (khvo_f > KH_VOC_FLOOR_NONE && !(khvo_cam[1] > khvo_f)) continue;
+            if (f > VOC_FLOOR_NONE && !(cam[1] > f)) continue;
         }
         // Camera inside / touching the bounds (outside a closed mesh's it has winding 0).
         {
-            float khvo_bc[3], khvo_bh[3], khvo_bmn[3], khvo_bmx[3];
-            kh_occ_box_of(o, khvo_force, khvo_bc, khvo_bh, khvo_bmn, khvo_bmx);
-            if (!(kh_occ_bounds_dist_sq(o, khvo_bmn, khvo_bmx, khvo_cam) > 0.04f)) continue;
+            float bc[3], bh[3], bmn[3], bmx[3];
+            occ_box_of(o, force, bc, bh, bmn, bmx);
+            if (!(occ_bounds_dist_sq(o, bmn, bmx, cam) > 0.04f)) continue;
         }
-        float khvo_he[3];
-        kh_world_half_extents(o, khvo_he);
-        const float khvo_r2 = khvo_he[0] * khvo_he[0] + khvo_he[1] * khvo_he[1] + khvo_he[2] * khvo_he[2];
-        const float khvo_d2 = kh_mesh_dist_sq(o, khvo_cam);
-        if (!(khvo_d2 > 1.0e-4f)) continue;
-        const float khvo_s = khvo_r2 / khvo_d2;
+        float he[3];
+        world_half_extents(o, he);
+        const float r2 = he[0] * he[0] + he[1] * he[1] + he[2] * he[2];
+        const float d2 = mesh_dist_sq(o, cam);
+        if (!(d2 > 1.0e-4f)) continue;
+        const float s = r2 / d2;
         // A declared occluder has no size floor. NaN fails here too.
-        if (!(khvo_s >= (khvo_force ? 0.0f : KH_VOC_MIN_SCORE))) continue;
-        // KH_OCC_FORCE: the rank key puts every declared occluder ahead of every automatic one, each kind by its
+        if (!(s >= (force ? 0.0f : VOC_MIN_SCORE))) continue;
+        // OCC_FORCE: the rank key puts every declared occluder ahead of every automatic one, each kind by its
         // score (s / (1 + s) keeps the order in [0, 1); a declared one adds 2).
-        const double khvo_k = (khvo_force ? 2.0 : 0.0) +
-                              static_cast<double>(khvo_s) / (1.0 + static_cast<double>(khvo_s));
-        int khvo_at = khvo_n < KH_VOC_MAX ? khvo_n : KH_VOC_MAX - 1;
-        if (khvo_n == KH_VOC_MAX && !(khvo_k > khvo_sc[khvo_at])) continue;
-        while (khvo_at > 0 && khvo_sc[khvo_at - 1] < khvo_k) {
-            khvo_sc[khvo_at] = khvo_sc[khvo_at - 1];
-            khvo_id[khvo_at] = khvo_id[khvo_at - 1];
-            khvo_fl[khvo_at] = khvo_fl[khvo_at - 1];
-            --khvo_at;
+        const double k = (force ? 2.0 : 0.0) +
+                         static_cast<double>(s) / (1.0 + static_cast<double>(s));
+        int at = n < VOC_MAX ? n : VOC_MAX - 1;
+        if (n == VOC_MAX && !(k > sc[at])) continue;
+        while (at > 0 && sc[at - 1] < k) {
+            sc[at] = sc[at - 1];
+            id[at] = id[at - 1];
+            fl[at] = fl[at - 1];
+            --at;
         }
-        khvo_sc[khvo_at] = khvo_k;
-        khvo_id[khvo_at] = khvo_i;
-        khvo_fl[khvo_at] = khvo_f;
-        if (khvo_n < KH_VOC_MAX) ++khvo_n;
+        sc[at] = k;
+        id[at] = i;
+        fl[at] = f;
+        if (n < VOC_MAX) ++n;
     }
-    if (khvo_n == 0) return;
-    for (int khvo_i = 0; khvo_i < KH_VOC_W * KH_VOC_H; ++khvo_i) khvo.z[khvo_i] = 1.0e18f;
-    int khvo_budget = 0;
-    uint64_t khvo_drawn = 0;   // KH_OCC_STATS: boxes that covered a cell.
-    for (int khvo_k = 0; khvo_k < khvo_n && khvo_budget <= KH_VOC_PX_BUDGET; ++khvo_k) {
-        const RenderObject& o = khvo_id[khvo_k] < khvo_mn ? khvo_m[khvo_id[khvo_k]]
-                                                          : khvo_x[khvo_id[khvo_k] - khvo_mn];
-        const bool khvo_force = o.occluder;
-        float khvo_bc[3], khvo_bh[3], khvo_bmn[3], khvo_bmx[3];
-        kh_occ_box_of(o, khvo_force, khvo_bc, khvo_bh, khvo_bmn, khvo_bmx);
-        const float khvo_se[3] = { o.size[0], o.size[2], o.size[1] };   // Engine edge lengths.
-        float khvo_ctr[3];
-        kh_obj_center_engine(o, khvo_ctr);
-        // KH_VOC_BURIAL: the part of the box above the floor. World height is linear in the box's normalised
+    if (n == 0) return;
+    for (int i = 0; i < VOC_W * VOC_H; ++i) vo.z[i] = 1.0e18f;
+    int budget = 0;
+    uint64_t drawn = 0;   // OCC_STATS: boxes that covered a cell.
+    for (int k = 0; k < n && budget <= VOC_PX_BUDGET; ++k) {
+        const RenderObject& o = id[k] < mn ? m[id[k]]
+                                                          : x[id[k] - mn];
+        const bool force = o.occluder;
+        float bc[3], bh[3], bmn[3], bmx[3];
+        occ_box_of(o, force, bc, bh, bmn, bmx);
+        const float se[3] = { o.size[0], o.size[2], o.size[1] };   // Engine edge lengths.
+        float ctr[3];
+        obj_center_engine(o, ctr);
+        // VOC_BURIAL: the part of the box above the floor. World height is linear in the box's normalised
         // coordinates (y = ctr.y + sum a_k p_k); the axis with the steepest rise is cut at the height its lowest
         // corner must keep with every other axis at its lowest - a box standing upright loses its buried slab
         // exactly; nothing left, no occluder.
-        if (khvo_fl[khvo_k] > KH_VOC_FLOOR_NONE) {
-            float khvo_a[3];
-            int khvo_ku = 0;
-            for (int khvo_rr = 0; khvo_rr < 3; ++khvo_rr) {
-                khvo_a[khvo_rr] = khvo_se[khvo_rr] * o.rot_m[khvo_rr * 3 + 1];
-                if (fabsf(khvo_a[khvo_rr]) > fabsf(khvo_a[khvo_ku])) khvo_ku = khvo_rr;
+        if (fl[k] > VOC_FLOOR_NONE) {
+            float a[3];
+            int ku = 0;
+            for (int rr = 0; rr < 3; ++rr) {
+                a[rr] = se[rr] * o.rot_m[rr * 3 + 1];
+                if (fabsf(a[rr]) > fabsf(a[ku])) ku = rr;
             }
-            if (!(fabsf(khvo_a[khvo_ku]) > 1.0e-6f)) continue;
-            float khvo_low = khvo_ctr[1];   // The lowest the other axes can put it.
-            for (int khvo_rr = 0; khvo_rr < 3; ++khvo_rr) {
-                if (khvo_rr == khvo_ku) continue;
-                khvo_low += khvo_a[khvo_rr] * khvo_bc[khvo_rr] - fabsf(khvo_a[khvo_rr]) * khvo_bh[khvo_rr];
+            if (!(fabsf(a[ku]) > 1.0e-6f)) continue;
+            float low = ctr[1];   // The lowest the other axes can put it.
+            for (int rr = 0; rr < 3; ++rr) {
+                if (rr == ku) continue;
+                low += a[rr] * bc[rr] - fabsf(a[rr]) * bh[rr];
             }
-            const float khvo_fc = (khvo_fl[khvo_k] - khvo_low) / khvo_a[khvo_ku];
-            float khvo_lo = khvo_bc[khvo_ku] - khvo_bh[khvo_ku], khvo_hi = khvo_bc[khvo_ku] + khvo_bh[khvo_ku];
-            if (khvo_a[khvo_ku] > 0.0f) khvo_lo = fmaxf(khvo_lo, khvo_fc);
-            else                        khvo_hi = fminf(khvo_hi, khvo_fc);
-            if (!(khvo_hi - khvo_lo > 1.0e-4f)) continue;
-            khvo_bc[khvo_ku] = 0.5f * (khvo_lo + khvo_hi);
-            khvo_bh[khvo_ku] = 0.5f * (khvo_hi - khvo_lo);
+            const float fc = (fl[k] - low) / a[ku];
+            float lo = bc[ku] - bh[ku], hi = bc[ku] + bh[ku];
+            if (a[ku] > 0.0f) lo = fmaxf(lo, fc);
+            else                        hi = fminf(hi, fc);
+            if (!(hi - lo > 1.0e-4f)) continue;
+            bc[ku] = 0.5f * (lo + hi);
+            bh[ku] = 0.5f * (hi - lo);
         }
         // The box's half-vectors (rows scaled by the engine edge lengths and its half extents), its centre moved onto
         // its own. A declared box is taken as it is: the inset keeps a drawn surface's box off that surface.
-        const float khvo_inset = khvo_force ? 1.0f : KH_VOC_INSET;
-        float khvo_hv[3][3];
-        for (int khvo_rr = 0; khvo_rr < 3; ++khvo_rr) {
-            for (int khvo_c = 0; khvo_c < 3; ++khvo_c) {
-                const float khvo_ax = khvo_se[khvo_rr] * o.rot_m[khvo_rr * 3 + khvo_c];
-                khvo_hv[khvo_rr][khvo_c] = khvo_inset * khvo_bh[khvo_rr] * khvo_ax;
-                khvo_ctr[khvo_c] += khvo_bc[khvo_rr] * khvo_ax;
+        const float inset = force ? 1.0f : VOC_INSET;
+        float hv[3][3];
+        for (int rr = 0; rr < 3; ++rr) {
+            for (int c = 0; c < 3; ++c) {
+                const float ax = se[rr] * o.rot_m[rr * 3 + c];
+                hv[rr][c] = inset * bh[rr] * ax;
+                ctr[c] += bc[rr] * ax;
             }
         }
-        {   // KH_POS_RES: drawn at pos plus its residual - every half-vector pulled in by the residual's length
+        {   // POS_RES: drawn at pos plus its residual - every half-vector pulled in by the residual's length
             // (the rows are orthogonal), so the box lies inside the drawn one wherever the residual points; an
             // axis that would vanish takes the occluder out.
-            float khvo_rs[3];
-            kh_pos_res(o, khvo_rs);
-            const float khvo_rl = sqrtf(khvo_rs[0] * khvo_rs[0] + khvo_rs[1] * khvo_rs[1] + khvo_rs[2] * khvo_rs[2]);
-            bool khvo_gone = false;
-            if (khvo_rl > 0.0f) {
-                for (int khvo_rr = 0; khvo_rr < 3; ++khvo_rr) {
-                    float* const khvo_h = khvo_hv[khvo_rr];
-                    const float khvo_len = sqrtf(khvo_h[0] * khvo_h[0] + khvo_h[1] * khvo_h[1] + khvo_h[2] * khvo_h[2]);
-                    if (!(khvo_len > khvo_rl)) { khvo_gone = true; break; }
-                    const float khvo_f = 1.0f - khvo_rl / khvo_len;
-                    khvo_h[0] *= khvo_f; khvo_h[1] *= khvo_f; khvo_h[2] *= khvo_f;
+            float rs[3];
+            obj_pos_res(o, rs);
+            const float rl = sqrtf(rs[0] * rs[0] + rs[1] * rs[1] + rs[2] * rs[2]);
+            bool gone = false;
+            if (rl > 0.0f) {
+                for (int rr = 0; rr < 3; ++rr) {
+                    float* const h = hv[rr];
+                    const float len = sqrtf(h[0] * h[0] + h[1] * h[1] + h[2] * h[2]);
+                    if (!(len > rl)) { gone = true; break; }
+                    const float f = 1.0f - rl / len;
+                    h[0] *= f; h[1] *= f; h[2] *= f;
                 }
             }
-            if (khvo_gone) continue;
+            if (gone) continue;
         }
-        float khvo_dmn = 1.0e18f, khvo_dmx = 0.0f;
-        for (int khvo_s8 = 0; khvo_s8 < 8; ++khvo_s8) {
-            const float khvo_sx = (khvo_s8 & 1) ? 1.0f : -1.0f;
-            const float khvo_sy = (khvo_s8 & 2) ? 1.0f : -1.0f;
-            const float khvo_sz = (khvo_s8 & 4) ? 1.0f : -1.0f;
-            float khvo_d2c = 0.0f;
-            for (int khvo_c = 0; khvo_c < 3; ++khvo_c) {
-                const float khvo_w = khvo_ctr[khvo_c] + khvo_sx * khvo_hv[0][khvo_c] +
-                                     khvo_sy * khvo_hv[1][khvo_c] + khvo_sz * khvo_hv[2][khvo_c] - khvo_cam[khvo_c];
-                khvo_d2c += khvo_w * khvo_w;
+        float dmn = 1.0e18f, dmx = 0.0f;
+        for (int s8 = 0; s8 < 8; ++s8) {
+            const float sx = (s8 & 1) ? 1.0f : -1.0f;
+            const float sy = (s8 & 2) ? 1.0f : -1.0f;
+            const float sz = (s8 & 4) ? 1.0f : -1.0f;
+            float d2c = 0.0f;
+            for (int c = 0; c < 3; ++c) {
+                const float w = ctr[c] + sx * hv[0][c] +
+                                sy * hv[1][c] + sz * hv[2][c] - cam[c];
+                d2c += w * w;
             }
-            const float khvo_dc = sqrtf(khvo_d2c);
-            if (khvo_dc < khvo_dmn) khvo_dmn = khvo_dc;
-            if (khvo_dc > khvo_dmx) khvo_dmx = khvo_dc;
+            const float dc = sqrtf(d2c);
+            if (dc < dmn) dmn = dc;
+            if (dc > dmx) dmx = dc;
         }
-        if (!(khvo_dmn > KH_VOC_NEAR_M)) continue;
-        if (!khvo_force) {   // Its own far contract may discard it: keep it well inside.
-            float khvo_lim = khvo_far;
-            if (khvo_cut > 0.0f && khvo_cut < khvo_lim) khvo_lim = khvo_cut;
-            if (khvo_lim > 0.0f && !(khvo_dmx < 0.98f * khvo_lim)) continue;
+        if (!(dmn > VOC_NEAR_M)) continue;
+        if (!force) {   // Its own far contract may discard it: keep it well inside.
+            float lim = vo_far;
+            if (cut > 0.0f && cut < lim) lim = cut;
+            if (lim > 0.0f && !(dmx < 0.98f * lim)) continue;
         }
-        const int khvo_b0 = khvo_budget;
-        kh_voc_box(khvo, khvo_ctr, khvo_hv, khvo_cam, khvo_budget);   // KH_VOC_NEAR_CLIP, KH_VOC_UNION.
-        if (khvo_budget > khvo_b0) ++khvo_drawn;
+        const int b0 = budget;
+        voc_box(vo, ctr, hv, cam, budget);   // VOC_NEAR_CLIP, VOC_UNION.
+        if (budget > b0) ++drawn;
     }
-    kh_stat_add(g_stats.vis_occluders, khvo_drawn);
-    khvo.on = khvo_budget > 0;
+    stat_add(g_stats.vis_occluders, drawn);
+    vo.on = budget > 0;
 }
 
-// True = provably hidden. Every failure direction is 'visible'. KH_LOD_BOUNDS: the object is taken at its bounds
+// True = provably hidden. Every failure direction is 'visible'. LOD_BOUNDS: the object is taken at its bounds
 // size, which holds everything any of its levels draws, so no drawn corner falls outside the cells tested or nearer
 // than the distance they are tested at.
-inline bool kh_vis_occ_hidden(const KhVisOcc& khvh_o, const RenderObject& o) {
-    if (!khvh_o.on) return false;
-    float khvh_ctr[3];
-    kh_obj_center_engine(o, khvh_ctr);
-    float khvh_he[3];
-    kh_world_half_extents(o, khvh_he);
-    const float khvh_r = sqrtf(khvh_he[0] * khvh_he[0] + khvh_he[1] * khvh_he[1] + khvh_he[2] * khvh_he[2]);
-    float khvh_d2 = 0.0f;
-    for (int khvh_c = 0; khvh_c < 3; ++khvh_c) {
-        const float khvh_w = khvh_ctr[khvh_c] - khvh_o.cam[khvh_c];
-        khvh_d2 += khvh_w * khvh_w;
+inline bool vis_occ_hidden(const VisOcc& vh_o, const RenderObject& o) {
+    if (!vh_o.on) return false;
+    float ctr[3];
+    obj_center_engine(o, ctr);
+    float he[3];
+    world_half_extents(o, he);
+    const float r = sqrtf(he[0] * he[0] + he[1] * he[1] + he[2] * he[2]);
+    float d2 = 0.0f;
+    for (int c = 0; c < 3; ++c) {
+        const float w = ctr[c] - vh_o.cam[c];
+        d2 += w * w;
     }
-    const float khvh_mn = sqrtf(khvh_d2) - khvh_r - KH_VOC_EPS_M;   // Nearest possible point.
-    if (!(khvh_mn > KH_VOC_NEAR_M)) return false;
-    float khvh_x0 = 1.0e18f, khvh_x1 = -1.0e18f, khvh_y0 = 1.0e18f, khvh_y1 = -1.0e18f;
-    for (int khvh_s = 0; khvh_s < 8; ++khvh_s) {
-        const float khvh_wc[3] = {
-            khvh_ctr[0] + ((khvh_s & 1) ? khvh_he[0] : -khvh_he[0]),
-            khvh_ctr[1] + ((khvh_s & 2) ? khvh_he[1] : -khvh_he[1]),
-            khvh_ctr[2] + ((khvh_s & 4) ? khvh_he[2] : -khvh_he[2]) };
-        float khvh_px, khvh_py;
-        if (!kh_voc_project(khvh_o, khvh_wc, khvh_px, khvh_py)) return false;
-        if (khvh_px < khvh_x0) khvh_x0 = khvh_px;
-        if (khvh_px > khvh_x1) khvh_x1 = khvh_px;
-        if (khvh_py < khvh_y0) khvh_y0 = khvh_py;
-        if (khvh_py > khvh_y1) khvh_y1 = khvh_py;
+    const float mn = sqrtf(d2) - r - VOC_EPS_M;   // Nearest possible point.
+    if (!(mn > VOC_NEAR_M)) return false;
+    float x0 = 1.0e18f, x1 = -1.0e18f, y0 = 1.0e18f, y1 = -1.0e18f;
+    for (int s = 0; s < 8; ++s) {
+        const float wc[3] = {
+            ctr[0] + ((s & 1) ? he[0] : -he[0]),
+            ctr[1] + ((s & 2) ? he[1] : -he[1]),
+            ctr[2] + ((s & 4) ? he[2] : -he[2]) };
+        float px, py;
+        if (!voc_project(vh_o, wc, px, py)) return false;
+        if (px < x0) x0 = px;
+        if (px > x1) x1 = px;
+        if (py < y0) y0 = py;
+        if (py > y1) y1 = py;
     }
-    // KH_VOC_CAST_CLAMP: clamped to the grid (one cell of margin) before the casts, as kh_voc_face does - a huge
+    // VOC_CAST_CLAMP: clamped to the grid (one cell of margin) before the casts, as voc_face does - a huge
     // finite corner converted out of int range (UB). A clamped bound still fails the range test below.
-    const float khvh_gw = static_cast<float>(KH_VOC_W), khvh_gh = static_cast<float>(KH_VOC_H);
-    const int khvh_ix0 = static_cast<int>(floorf(fminf(fmaxf(khvh_x0 - 0.01f, -1.0f), khvh_gw)));
-    const int khvh_iy0 = static_cast<int>(floorf(fminf(fmaxf(khvh_y0 - 0.01f, -1.0f), khvh_gh)));
-    const int khvh_ix1 = static_cast<int>(floorf(fminf(fmaxf(khvh_x1 + 0.01f, -1.0f), khvh_gw)));
-    const int khvh_iy1 = static_cast<int>(floorf(fminf(fmaxf(khvh_y1 + 0.01f, -1.0f), khvh_gh)));
-    if (khvh_ix0 < 0 || khvh_iy0 < 0 || khvh_ix1 >= KH_VOC_W || khvh_iy1 >= KH_VOC_H) return false;
-    if ((khvh_ix1 - khvh_ix0 + 1) * (khvh_iy1 - khvh_iy0 + 1) > KH_VOC_TEST_PX) return false;
-    for (int khvh_iy = khvh_iy0; khvh_iy <= khvh_iy1; ++khvh_iy) {
-        for (int khvh_ix = khvh_ix0; khvh_ix <= khvh_ix1; ++khvh_ix) {
+    const float gw = static_cast<float>(VOC_W), gh = static_cast<float>(VOC_H);
+    const int ix0 = static_cast<int>(floorf(fminf(fmaxf(x0 - 0.01f, -1.0f), gw)));
+    const int iy0 = static_cast<int>(floorf(fminf(fmaxf(y0 - 0.01f, -1.0f), gh)));
+    const int ix1 = static_cast<int>(floorf(fminf(fmaxf(x1 + 0.01f, -1.0f), gw)));
+    const int iy1 = static_cast<int>(floorf(fminf(fmaxf(y1 + 0.01f, -1.0f), gh)));
+    if (ix0 < 0 || iy0 < 0 || ix1 >= VOC_W || iy1 >= VOC_H) return false;
+    if ((ix1 - ix0 + 1) * (iy1 - iy0 + 1) > VOC_TEST_PX) return false;
+    for (int iy = iy0; iy <= iy1; ++iy) {
+        for (int ix = ix0; ix <= ix1; ++ix) {
             // An uncovered cell holds 1e18 and reads visible here too.
-            if (khvh_mn <= khvh_o.z[khvh_iy * KH_VOC_W + khvh_ix] + khvh_o.margin) return false;
+            if (mn <= vh_o.z[iy * VOC_W + ix] + vh_o.margin) return false;
         }
     }
     return true;
 }
 
-inline float kh_voc_floor(const RenderObject& khvb_o) {
-    if (!g_thm_valid) return KH_VOC_FLOOR_NONE;   // Discard lanes inert (kh_fill_occ): nothing to defend.
-    if (!g_voc_thm_valid || !(g_voc_thm_cell > 0.0f) ||
-        g_voc_thm_fw == 0 || g_voc_thm_fh == 0) {
-        return KH_VOC_FLOOR_REFUSE;   // Armed discard, no certificate: refuse.
+inline float voc_floor(const RenderObject& o) {
+    if (!g_thm.valid) return VOC_FLOOR_NONE;   // Discard lanes inert (fill_occ): nothing to defend.
+    if (!g_voc_thm.valid || !(g_voc_thm.cell > 0.0f) ||
+        g_voc_thm.fw == 0 || g_voc_thm.fh == 0) {
+        return VOC_FLOOR_REFUSE;   // Armed discard, no certificate: refuse.
     }
-    float khvb_c[3], khvb_he[3];
-    kh_occ_hull_world(khvb_o, khvb_c, khvb_he);   // KH_OCC_BOX: everything the occluder draws.
-    const float khvb_inv = 1.0f / g_voc_thm_cell;
-    const float khvb_gx0 = (khvb_c[0] - khvb_he[0] - g_voc_thm_origin[0]) * khvb_inv;
-    const float khvb_gx1 = (khvb_c[0] + khvb_he[0] - g_voc_thm_origin[0]) * khvb_inv;
-    const float khvb_gz0 = (khvb_c[2] - khvb_he[2] - g_voc_thm_origin[1]) * khvb_inv;
-    const float khvb_gz1 = (khvb_c[2] + khvb_he[2] - g_voc_thm_origin[1]) * khvb_inv;
-    if (!(khvb_gx0 <= khvb_gx1) || !(khvb_gz0 <= khvb_gz1) ||
-        !(khvb_gx1 - khvb_gx0 < 1.0e7f) || !(khvb_gz1 - khvb_gz0 < 1.0e7f)) {
-        return KH_VOC_FLOOR_REFUSE;   // NaN / absurd extents: refuse before any int cast.
+    float c[3], he[3];
+    occ_hull_world(o, c, he);   // OCC_BOX: everything the occluder draws.
+    const float inv = 1.0f / g_voc_thm.cell;
+    const float gx0 = (c[0] - he[0] - g_voc_thm.origin[0]) * inv;
+    const float gx1 = (c[0] + he[0] - g_voc_thm.origin[0]) * inv;
+    const float gz0 = (c[2] - he[2] - g_voc_thm.origin[1]) * inv;
+    const float gz1 = (c[2] + he[2] - g_voc_thm.origin[1]) * inv;
+    if (!(gx0 <= gx1) || !(gz0 <= gz1) ||
+        !(gx1 - gx0 < 1.0e7f) || !(gz1 - gz0 < 1.0e7f)) {
+        return VOC_FLOOR_REFUSE;   // NaN / absurd extents: refuse before any int cast.
     }
     // KhThmHeight answers -1e6 outside the grid (no discard evidence), so a footprint fully outside cannot be eaten.
-    if (khvb_gx1 < -1.0f || khvb_gz1 < -1.0f ||
-        khvb_gx0 > static_cast<float>(g_voc_thm_fw) ||
-        khvb_gz0 > static_cast<float>(g_voc_thm_fh)) {
-        return KH_VOC_FLOOR_NONE;
+    if (gx1 < -1.0f || gz1 < -1.0f ||
+        gx0 > static_cast<float>(g_voc_thm.fw) ||
+        gz0 > static_cast<float>(g_voc_thm.fh)) {
+        return VOC_FLOOR_NONE;
     }
     // Fine-node range under the footprint plus one node each way (the support of a sample at g - its cell's corners -
     // touches floor(g) and floor(g) + 1), clamped in float so the casts stay in range.
-    const float khvb_fx = static_cast<float>(g_voc_thm_fw - 1);
-    const float khvb_fz = static_cast<float>(g_voc_thm_fh - 1);
-    const int khvb_x0 = static_cast<int>(fmaxf(floorf(khvb_gx0) - 1.0f, 0.0f));
-    const int khvb_x1 = static_cast<int>(fminf(floorf(khvb_gx1) + 1.0f, khvb_fx));
-    const int khvb_z0 = static_cast<int>(fmaxf(floorf(khvb_gz0) - 1.0f, 0.0f));
-    const int khvb_z1 = static_cast<int>(fminf(floorf(khvb_gz1) + 1.0f, khvb_fz));
-    float khvb_hmax = -1.0e6f;
-    if ((khvb_x1 - khvb_x0 + 1) * (khvb_z1 - khvb_z0 + 1) <= KH_VOC_THM_FINE_CAP) {
-        for (int khvb_z = khvb_z0; khvb_z <= khvb_z1; ++khvb_z) {
-            const float* khvb_row = g_voc_thm_fine.data() + static_cast<size_t>(khvb_z) * g_voc_thm_fw;
-            for (int khvb_x = khvb_x0; khvb_x <= khvb_x1; ++khvb_x) {
-                if (khvb_row[khvb_x] > khvb_hmax) khvb_hmax = khvb_row[khvb_x];
+    const float fx = static_cast<float>(g_voc_thm.fw - 1);
+    const float fz = static_cast<float>(g_voc_thm.fh - 1);
+    const int x0 = static_cast<int>(fmaxf(floorf(gx0) - 1.0f, 0.0f));
+    const int x1 = static_cast<int>(fminf(floorf(gx1) + 1.0f, fx));
+    const int z0 = static_cast<int>(fmaxf(floorf(gz0) - 1.0f, 0.0f));
+    const int z1 = static_cast<int>(fminf(floorf(gz1) + 1.0f, fz));
+    float hmax = -1.0e6f;
+    if ((x1 - x0 + 1) * (z1 - z0 + 1) <= VOC_THM_FINE_CAP) {
+        for (int z = z0; z <= z1; ++z) {
+            const float* row = g_voc_thm.fine.data() + static_cast<size_t>(z) * g_voc_thm.fw;
+            for (int x = x0; x <= x1; ++x) {
+                if (row[x] > hmax) hmax = row[x];
             }
         }
     } else {
-        const int khvb_cx0 = khvb_x0 / static_cast<int>(KH_VOC_THM_DS);
-        const int khvb_cx1 = khvb_x1 / static_cast<int>(KH_VOC_THM_DS);
-        const int khvb_cz0 = khvb_z0 / static_cast<int>(KH_VOC_THM_DS);
-        const int khvb_cz1 = khvb_z1 / static_cast<int>(KH_VOC_THM_DS);
-        if ((khvb_cx1 - khvb_cx0 + 1) * (khvb_cz1 - khvb_cz0 + 1) > KH_VOC_THM_CAP) {
-            return KH_VOC_FLOOR_REFUSE;   // Too wide to certify at this budget: refuse.
+        const int cx0 = x0 / static_cast<int>(VOC_THM_DS);
+        const int cx1 = x1 / static_cast<int>(VOC_THM_DS);
+        const int cz0 = z0 / static_cast<int>(VOC_THM_DS);
+        const int cz1 = z1 / static_cast<int>(VOC_THM_DS);
+        if ((cx1 - cx0 + 1) * (cz1 - cz0 + 1) > VOC_THM_CAP) {
+            return VOC_FLOOR_REFUSE;   // Too wide to certify at this budget: refuse.
         }
-        for (int khvb_cz = khvb_cz0; khvb_cz <= khvb_cz1; ++khvb_cz) {
-            const float* khvb_row = g_voc_thm_max.data() +
-                                    static_cast<size_t>(khvb_cz) * g_voc_thm_w;
-            for (int khvb_cx = khvb_cx0; khvb_cx <= khvb_cx1; ++khvb_cx) {
-                if (khvb_row[khvb_cx] > khvb_hmax) khvb_hmax = khvb_row[khvb_cx];
+        for (int cz = cz0; cz <= cz1; ++cz) {
+            const float* row = g_voc_thm.max_grid.data() +
+                               static_cast<size_t>(cz) * g_voc_thm.w;
+            for (int cx = cx0; cx <= cx1; ++cx) {
+                if (row[cx] > hmax) hmax = row[cx];
             }
         }
     }
     // The discard line anywhere under the footprint, with 5 cm of headroom over the shader's strict compare: a floor
     // only when the box's lowest point could sit below it.
-    const float khvb_fl = khvb_hmax - KH_THM_BIAS_M + 0.05f;
-    return khvb_c[1] - khvb_he[1] < khvb_fl ? khvb_fl : KH_VOC_FLOOR_NONE;
+    const float fl = hmax - THM_BIAS_M + 0.05f;
+    return c[1] - he[1] < fl ? fl : VOC_FLOOR_NONE;
 }
 
 // Fills the heightfield lanes (thm_params, thm_meta) of the guard CB tail while a heightfield is live; untouched
 // (zeroed = inert) otherwise. Called at three fills: the injection's frame CB (inject_composited_meshes), the
-// flush's frame template (kh_fx_frame_template) and the engine cast mask's (mask_cast_engine).
-inline void kh_fill_occ(ConstantData& cbd) {
-    if (!g_thm_valid) return;   // Heightfield lanes stay zeroed = lane inert.
-    cbd.thm_params[0] = g_thml_origin[0];
-    cbd.thm_params[1] = g_thml_origin[1];
-    cbd.thm_params[2] = g_thml_cell;
-    cbd.thm_params[3] = 1.0f + static_cast<float>(g_thml_split);   // KH_THM_EXACT: enabled, and the split.
-    cbd.thm_meta[0] = static_cast<float>(g_thml_w);
-    cbd.thm_meta[1] = static_cast<float>(g_thml_h);
-    cbd.thm_meta[2] = KH_THM_BIAS_M;
-    cbd.thm_meta[3] = KH_THM_MIN_DIST_M;
+// flush's frame template (fx_frame_template) and the engine cast mask's (mask_cast_engine).
+inline void fill_occ(ConstantData& cbd) {
+    if (!g_thm.valid) return;   // Heightfield lanes stay zeroed = lane inert.
+    cbd.thm_params[0] = g_thml.origin[0];
+    cbd.thm_params[1] = g_thml.origin[1];
+    cbd.thm_params[2] = g_thml.cell;
+    cbd.thm_params[3] = 1.0f + static_cast<float>(g_thml.split);   // THM_EXACT: enabled, and the split.
+    cbd.thm_meta[0] = static_cast<float>(g_thml.w);
+    cbd.thm_meta[1] = static_cast<float>(g_thml.h);
+    cbd.thm_meta[2] = THM_BIAS_M;
+    cbd.thm_meta[3] = THM_MIN_DIST_M;
 }
 }

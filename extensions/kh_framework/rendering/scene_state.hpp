@@ -27,7 +27,8 @@ struct KhScene {
 static KhScene g_scene;
 // KH_LOD_BOUNDS: the lowest mesh id an object was gridded under while that id was unpublished - its cell radius read
 // mesh 0's bounds (the id clamps); 0xFFFFFFFF = none. With g_scene: kh_scene_grid_insert lowers it, flush_locked's
-// housekeeping grids those objects again once the id reads published.
+// housekeeping grids those objects again once the id reads published. A backstop since KH_SCENE_UNPUB: kh_scene_sync
+// takes no object whose mesh is unpublished, so none is gridded so.
 static uint32_t g_scene_unpub_min = 0xFFFFFFFFu;
 // Staging side (under g_draw_list_mutex).
 static std::vector<RenderObject*> g_scene_stage;   // Slot -> map value (nullptr = removed).

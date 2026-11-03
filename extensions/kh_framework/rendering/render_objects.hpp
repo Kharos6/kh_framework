@@ -298,8 +298,9 @@ inline bool kh_obj_has_blend(const RenderObject& o) {
 // Material draw support (both loops share these).
 
 inline void kh_apply_native_size(RenderObject& o) {
-    // Staged lookup: a just-imported .fbx whose publish was deferred is appended but not published; mesh_id_clamp would
-    // hand back the box. Game thread only.
+    // Staged lookup: a just-imported .fbx whose publish was deferred, and every generated mesh until the next injection
+    // or flush (KH_MESH_GEN_PUB), is appended but not published; mesh_id_clamp would hand back the box. Game thread
+    // only.
     const MeshDef* khn_sd = kh_mesh_def_staged(o.mesh);
     const MeshDef& md = khn_sd ? *khn_sd : mesh_def(0);
 

@@ -317,10 +317,12 @@ inline void kh_mesh_cache_store(uint64_t khmc_hash, const MeshDef& khmc_d) {
 }
 
 // Registration tail shared by the ufbx import and the cache hit (kh_fbx_register): name the def, append, publish + GPU
-// top-up under the park (deferred to flush_locked's head when it cannot park). Game thread. g_mesh_last_ref: per id,
-// GetTickCount64 of the last reference note (the mesh GC's input). KH_MESH_REF_LOCK: under g_mesh_ref_mu (a leaf lock):
-// game-thread writers (flush_frame's census, kh_fbx_register) may resize it while kh_mesh_gc - which also writes it
-// (its own walk's note) - reads it on the flush's thread (the render thread, or the game thread under the park).
+// top-up under the park (deferred to the next injection or flush, kh_mesh_publish_land, when it cannot park). Game
+// thread. g_mesh_last_ref: per id, GetTickCount64 of the last reference note (the mesh GC's input). KH_MESH_REF_LOCK:
+// under g_mesh_ref_mu, which nests nothing but the store's append_mx (kh_mesh_gc's KH_GC_RECHECK tombstone; append_mx
+// nests nothing): game-thread writers (flush_frame's census, kh_fbx_register) may resize it while kh_mesh_gc - which
+// also writes it (its own walk's note) - reads it on the flush's thread (the render thread, or the game thread under
+// the park).
 static std::vector<uint64_t> g_mesh_last_ref;
 static std::mutex g_mesh_ref_mu;
 
@@ -358,5 +360,14 @@ inline void kh_mesh_note_ref(int khnr_id) {
     std::lock_guard<std::mutex> khnr_g(g_mesh_ref_mu);
     if (khnr_i >= g_mesh_last_ref.size()) g_mesh_last_ref.resize(khnr_i + 1, 0);
     g_mesh_last_ref[khnr_i] = GetTickCount64();
+}
+// KH_GC_RECHECK - a new user's reference to a mesh it just resolved: stamped first, then the id read alive (or
+// appended, its publish pending) again. kh_mesh_gc re-reads the stamp and tombstones in one g_mesh_ref_mu section, so
+// either it saw this stamp and keeps the mesh, or its tombstone is visible here. False = released meanwhile: resolve
+// again (a by-path or generated mesh is imported or built anew; a released id is gone). Game thread.
+inline bool kh_mesh_take_ref(int khtr_id) {
+    if (khtr_id < 0) return false;
+    kh_mesh_note_ref(khtr_id);
+    return kh_mesh_alive(khtr_id) || kh_mesh_def_staged(khtr_id) != nullptr;
 }
 }

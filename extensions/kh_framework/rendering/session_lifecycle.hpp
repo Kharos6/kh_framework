@@ -997,6 +997,7 @@ inline void kh_session_objects_reset() {
     g_tex_page_gen = 0;
     g_tex_land_serial = 0;   // KH_TEX_LAND.
     kh_reinit(g_fbx_cache);
+    kh_reinit(g_mesh_gen_cache);   // KH_MESH_GEN_SHARE.
     kh_reinit(g_mesh_last_ref);
     kh_reinit(g_ref_note_cen);   // KH_REF_NOTE_ONCE.
     kh_reinit(g_mat_note_cen);   // KH_MAT_NOTE_ONCE.

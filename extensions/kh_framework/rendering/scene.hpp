@@ -19,7 +19,7 @@ static std::vector<uint8_t>       g_scene_dirty_mark;
 static std::vector<uint32_t>      g_scene_dirty;
 static std::vector<uint32_t>      g_scene_free;   // Slots whose death the live side has seen.
 // KH_SYNC_IDLE: g_scene_dirty's size, readable without the lock. Written only under g_draw_list_mutex (the mark
-// adds, the sync clears); a sync that reads 0 takes no lock.
+// adds, the sync clears all but the slots it holds, KH_SCENE_UNPUB); a sync that reads 0 takes no lock.
 static std::atomic<uint32_t>      g_scene_dirty_n{ 0 };
 
 inline void kh_scene_mark(uint32_t khsm_slot) {   // Under g_draw_list_mutex.
@@ -167,7 +167,8 @@ struct KhSceneHold {
 };
 
 // The dirty-only sync. Under the park invariant on whichever thread walks next; takes g_draw_list_mutex for the copy
-// only. O(dirty), O(1) when idle.
+// only. O(dirty), O(1) when idle - and O(held) on each call while an object waits for its mesh's publish
+// (KH_SCENE_UNPUB, below: a frame at most).
 // KH_SUN_GEN: an object a sync takes that can be one of the sun ladder's casters in some view - kh_shadow_active
 // less the terms that move between syncs (visibility, the view-model slice, the shadow switch), so a change that
 // matters to the ladder is never missed; one that only might is counted.
@@ -190,12 +191,34 @@ inline void kh_scene_sync() {
     if (g_scene.objs.size() < khss_n) g_scene.objs.resize(khss_n);
     if (g_objbuf_cpu.size() < khss_n) g_objbuf_cpu.resize(khss_n, KhObjRec());
     bool khss_cast = false;   // KH_SUN_GEN: a caster (before or after) taken.
-    for (uint32_t khss_s : g_scene_dirty) {
+    // KH_SCENE_UNPUB: a staged object whose mesh is appended but not yet published (an import whose publish was
+    // deferred, a generated mesh - each until the next injection or flush lands it, KH_MESH_GEN_PUB) is not taken:
+    // every draw would clamp the id to mesh 0 (the box, at the new mesh's size) until then. Its slot stays marked and
+    // listed, moved to the front in order, and the scene keeps what it had - nothing for a new object, the last synced
+    // state for a changed one - until a sync after the publish. The in-place compaction keeps KH_SCENE_PAIR: an entry
+    // is overwritten only once passed (taken, unmarked, or itself held and copied nearer the front), so a throw leaves
+    // every marked slot listed.
+    const uint32_t khss_pub = mesh_count();
+    size_t khss_w = 0;   // KH_SCENE_UNPUB: the slots held so far.
+    bool khss_took = false;
+    // KH_SCENE_UNPUB: a sync that throws after taking a slot has changed the live scene, and the next sync may only
+    // hold (no bump), so the unwind bumps the generations here.
+    struct KhSsGen {
+        const bool& took; const bool& cast; bool armed;
+        ~KhSsGen() { if (armed && took) { ++g_scene.gen; if (cast) ++g_scene.gen_cast; } }
+    } khss_gen{ khss_took, khss_cast, true };
+    for (size_t khss_i = 0; khss_i < g_scene_dirty.size(); ++khss_i) {
+        const uint32_t khss_s = g_scene_dirty[khss_i];
         // KH_SCENE_PAIR: a slot is unmarked once done, and one listed but unmarked is passed over - a sync that threw
         // part-way leaves its done slots listed (one marked again since, listed twice; a dead one taken again would be
         // freed twice); the slot it threw on is still marked and is taken again from the top.
         if (!g_scene_dirty_mark[khss_s]) continue;
         const RenderObject* khss_src = g_scene_stage[khss_s];
+        if (khss_src && khss_src->mesh >= 0 && static_cast<uint32_t>(khss_src->mesh) >= khss_pub) {
+            g_scene_dirty[khss_w++] = khss_s;   // KH_SCENE_UNPUB: held, still marked.
+            continue;
+        }
+        khss_took = true;
         // KH_GRID_KEEP: a live slot whose cell is unchanged (an attached mesh moving within its 64 m cell, an
         // update) stays filed - the remove scanned the whole cell, so N movers sharing one cost N^2 / 2 a sync.
         const bool khss_keep = khss_src && g_scene.alive[khss_s] &&
@@ -220,8 +243,21 @@ inline void kh_scene_sync() {
         }
         g_scene_dirty_mark[khss_s] = 0;   // KH_SCENE_PAIR: done.
     }
-    g_scene_dirty.clear();
-    g_scene_dirty_n.store(0u, std::memory_order_release);   // KH_SYNC_IDLE.
+    khss_gen.armed = false;   // No throw: the bump below.
+    // KH_SCENE_UNPUB: a slot listed twice (a throw's leftover, KH_SCENE_PAIR) is kept once - as the old full sync
+    // emptied the list - by a pass that cannot throw (mark 2 = kept this pass, put back to 1 after).
+    size_t khss_k = 0;
+    for (size_t khss_i = 0; khss_i < khss_w; ++khss_i) {
+        const uint32_t khss_s = g_scene_dirty[khss_i];
+        if (g_scene_dirty_mark[khss_s] != 1u) continue;
+        g_scene_dirty_mark[khss_s] = 2u;
+        g_scene_dirty[khss_k++] = khss_s;
+    }
+    for (size_t khss_i = 0; khss_i < khss_k; ++khss_i) g_scene_dirty_mark[g_scene_dirty[khss_i]] = 1u;
+    khss_w = khss_k;
+    g_scene_dirty.resize(khss_w);   // KH_SCENE_UNPUB: the held slots (none: emptied, as before).
+    g_scene_dirty_n.store(static_cast<uint32_t>(khss_w), std::memory_order_release);   // KH_SYNC_IDLE.
+    if (khss_w != 0 && !khss_took) return;   // KH_SCENE_UNPUB: only holds - nothing changed.
     ++g_scene.gen;
     if (khss_cast) ++g_scene.gen_cast;   // KH_SUN_GEN.
 }

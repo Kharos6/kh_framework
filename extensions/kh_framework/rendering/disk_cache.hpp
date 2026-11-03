@@ -304,12 +304,13 @@ inline void kh_mesh_cache_queue(uint64_t khmw_h, int khmw_id) {
     g_khmw_cv.notify_one();
 }
 // KH_MESH_CACHE_LATER: an import whose publish kh_fbx_register had to defer (the graphics lock refused three times)
-// has no published id until the next flush lands it (g_mesh_publish_pending), and the writer drops an unpublished id -
-// so its disk-cache write waits here and is queued where that publish lands (flush_locked's head). A landing between
-// the register and the stash is caught by the stash itself (the id already published: it queues at once). An id
-// released meanwhile is dropped (the writer's inline fallback would read mesh 0 in its place). One appended but not
-// yet published - its register lost the lock after this landing's publish ran, and its pending flag stands - waits
-// for the next landing (KH_MESH_STAGED). Emptied with the pending flag (kh_mesh_release_session).
+// has no published id until the next injection or flush lands it (g_mesh_publish_pending), and the writer drops an
+// unpublished id - so its disk-cache write waits here and is queued where that publish lands (kh_mesh_publish_land:
+// the injection ahead of its scene sync, or flush_locked's housekeeping). A landing between the register and the
+// stash is caught by the stash itself (the id already published: it queues at once). An id released meanwhile is
+// dropped (the writer's inline fallback would read mesh 0 in its place). One appended but not yet published - its
+// register lost the lock after this landing's publish ran, and its pending flag stands - waits for the next landing
+// (KH_MESH_STAGED). Emptied with the pending flag (kh_mesh_release_session).
 static std::mutex g_mesh_cache_later_mu;
 static std::vector<std::pair<uint64_t, int>> g_mesh_cache_later_q;   // (content hash, id), under the mutex.
 inline void kh_mesh_cache_later_land() {

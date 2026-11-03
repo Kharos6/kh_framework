@@ -6,6 +6,7 @@ namespace RenderIntegration {
 // Defined in rendering/mesh_cache.hpp (declared here for the uses below).
 inline bool kh_mesh_cache_load(uint64_t khmc_hash, MeshDef& khmc_d);
 inline void kh_mesh_note_ref(int khnr_id);
+inline bool kh_mesh_take_ref(int khtr_id);
 
 // Bones per skeleton: every index KhSkinInf's uint16_t can hold - the
 // importer's cap and the cache loader's bound.
@@ -53,7 +54,8 @@ inline void kh_gen_tangents(std::vector<MeshVertex>& v) {
 
 static constexpr size_t KH_FBX_VERT_CEIL = 0xFFFFFFFFull / sizeof(MeshVertex);
 
-// khfb_pub (optional): whether the publish landed here (false = deferred to the next flush, g_mesh_publish_pending).
+// khfb_pub (optional): whether the publish landed here (false = deferred to the next injection or flush,
+// g_mesh_publish_pending).
 inline bool kh_fbx_register(MeshDef&& d, const std::string& path, int& out_id, std::string& err,
                             bool* khfb_pub = nullptr) {
     d.name = path;
@@ -65,7 +67,8 @@ inline bool kh_fbx_register(MeshDef&& d, const std::string& path, int& out_id, s
     const int id = kh_mesh_append(std::move(d));
     if (id < 0) { err = "mesh registry full"; return false; }
     kh_mesh_note_ref(id);   // KH_MESH_FREE: the idle window starts at import, not at 0.
-    // Until the publish lands every draw path clamps the id to mesh 0: one flush of box at most.
+    // Until the publish lands no object naming the id enters the live scene (KH_SCENE_UNPUB, kh_scene_sync), and a
+    // changed one keeps drawing its last synced state.
     bool khfb_published = false;
 
     for (int khfb_try = 0; khfb_try < 3 && !khfb_published; ++khfb_try) {

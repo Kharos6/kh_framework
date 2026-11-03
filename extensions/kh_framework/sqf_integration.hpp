@@ -152,6 +152,7 @@ static registered_sqf_function _sqf_remove_render_handler_string;
 static registered_sqf_function _sqf_remove_all_render_handlers;
 static registered_sqf_function _sqf_all_render_handlers;
 static registered_sqf_function _sqf_add_render3d_array;
+static registered_sqf_function _sqf_generate_mesh_array;
 static registered_sqf_function _sqf_update_render3d_array;
 static registered_sqf_function _sqf_add_physics_affector_array;
 static registered_sqf_function _sqf_update_physics_affector_array;
@@ -5750,7 +5751,8 @@ static void update_unit_states() {
 // 2. Creators take EXACTLY their documented shape (an extra element is an error, not ignored), so a script written
 //    against an older shape fails loudly on its first call instead of silently rendering the wrong thing.
 // 3. addRender3D is [pos, rotation, mesh] and nothing else; every other mesh property has an updateRender3D twin and
-//    is set through it.
+//    is set through it. generateMesh is [pos, rotation, shading, faces]: addRender3D with a generated mesh
+//    (KH_MESH_GEN), the same object after.
 // 4. updateRender3D / updatePostFX take one [handle, property, value] triple or an ARRAY of them (one call, many
 //    updates); the batch form returns true only when every triple applied, and each failed triple is reported on its
 //    own with its index.
@@ -5817,7 +5819,8 @@ static bool kh_rotation_m_from_gv(const game_value& v, float m[9], float& p, flo
 // form existed and a number cannot mean both: addRender3D's rotation slot while position follows a plain object
 // (KH_ATTACH_PLAIN_ROT), updateRender3D "rotation", and chainSimulation "endRotation"; those three take true / false
 // only, and the comment at each says so. Two more do not come here: allowDynamicShadows takes a real BOOL only, and
-// the material key vertexStatic a number only.
+// the material key vertexStatic a number only. Nor does a generated mesh's shading (KH_MESH_GEN, kh_gen_parse): true
+// or false, or a number that is a crease angle in degrees.
 static bool kh_gv_bool(const game_value& v, bool& out) {
     if (v.is_nil()) return false;
     if (v.type_enum() == game_data_type::BOOL) { out = static_cast<bool>(v); return true; }
@@ -5933,18 +5936,33 @@ static bool kh_rv_params(const game_value& v, RenderIntegration::RenderObject& o
     return true;
 }
 
-// Builtin name / alias, registry index, or a path ending.fbx.
+// Builtin name / alias, registry index, a path ending.fbx, or [shading, faces] - a generated mesh
+// (KH_MESH_GEN, rendering/mesh_generate.hpp: built, or shared with a live object's made from the same spec).
 static bool kh_rv_mesh(const game_value& v, int& mid, std::string& err) {
+    if (v.type_enum() == game_data_type::ARRAY) {   // KH_MESH_GEN.
+        mid = RenderIntegration::kh_mesh_gen_from_gv(v, err);
+        return mid >= 0;
+    }
     if (v.type_enum() == game_data_type::STRING &&
         RenderIntegration::kh_ends_with_ci(static_cast<std::string>(v), ".fbx")) {
-        std::string khfb_err;
-        mid = RenderIntegration::kh_fbx_mesh_id(static_cast<std::string>(v), khfb_err);
-        if (mid < 0) { err = "fbx: " + khfb_err; return false; }
-        return true;
+        // KH_GC_RECHECK: a fresh idle window for the mesh it now carries; released meanwhile, the path resolves again
+        // (kh_mesh_take_ref).
+        for (int khfb_try = 0; ; ++khfb_try) {
+            std::string khfb_err;
+            mid = RenderIntegration::kh_fbx_mesh_id(static_cast<std::string>(v), khfb_err);
+            if (mid < 0) { err = "fbx: " + khfb_err; return false; }
+            if (RenderIntegration::kh_mesh_take_ref(mid) || khfb_try == 1) return true;
+        }
     }
-    mid = RenderIntegration::mesh_id_from_gv(v);
-    if (mid < 0) { err = "mesh must be a builtin name (box | steps | sphere | cylinder | cone | pyramid), a registry index, or a path ending .fbx"; return false; }
-    return true;
+    for (int khmr_try = 0; ; ++khmr_try) {
+        mid = RenderIntegration::mesh_id_from_gv(v);
+        if (mid < 0) {
+            err = "mesh must be a builtin name (box | steps | sphere | cylinder | cone | pyramid), a registry index, a "
+                  "path ending .fbx, or [shading, faces] (a generated mesh)";
+            return false;
+        }
+        if (RenderIntegration::kh_mesh_take_ref(mid) || khmr_try == 1) return true;   // KH_GC_RECHECK, as above.
+    }
 }
 
 // Effect name / id /.hlsl /.cube. want_fullscreen rejects 'solid' (0), which a fullscreen pass cannot draw.
@@ -6047,13 +6065,14 @@ static bool kh_rv_bone_pair(const game_value& v, game_value& out_obj,
 // color [1,1,1,1], mode 1 (depth test + write), no effect, no params, no band, blend normal, permanent, lit, twoSided
 // false (back faces culled), lodLock false. Aspect ratio is always preserved - there is no box fit, so a model is never
 // squashed to a cube.
-static game_value add_render3d_sqf(game_value_parameter args) {
-    if (kh_gfx_off()) return game_value("");   // KH_PLAYER_ONLY.
+// khar_cmd: the command the faults are reported as - addRender3D, or generateMesh, whose call this body completes
+// (KH_MESH_GEN).
+static game_value kh_add_render3d(game_value_parameter args, const char* khar_cmd) {
     try {
         auto& arr = args.to_array();
         std::string err;
         if (arr.size() != 3) {
-            kh_rv_report("addRender3D", "expects exactly [[x, y, zASL], rotation, mesh] (" +
+            kh_rv_report(khar_cmd, "expects exactly [[x, y, zASL], rotation, mesh] (" +
                          std::to_string(arr.size()) + " elements given); every other property is set with updateRender3D");
             return game_value("");
         }
@@ -6076,7 +6095,7 @@ static game_value add_render3d_sqf(game_value_parameter args) {
             // wait for the mesh below: only the memory points its bones name get one.
             khr_brot = true;
             if (!arr[1].is_nil() && !kh_gv_bool(arr[1], khr_brot)) {   // KH_BOOL_SCALAR.
-                kh_rv_report("addRender3D", "rotation must be true, false (1 / 0) or nil when position is [object, true] (true, the default, = the model turns with the object)");
+                kh_rv_report(khar_cmd, "rotation must be true, false (1 / 0) or nil when position is [object, true] (true, the default, = the model turns with the object)");
                 return game_value("");
             }
         } else if (khr_pair && khr_splain) {
@@ -6091,11 +6110,11 @@ static game_value add_render3d_sqf(game_value_parameter args) {
             // The rotation slot is MANDATORY here and must be a boolean: with a memory point there is no sensible
             // default (following the bone's rotation and ignoring it are both ordinary wants).
             if (!kh_gv_bool(arr[1], khr_brot)) {   // KH_BOOL_SCALAR; nil is refused here.
-                kh_rv_report("addRender3D", "rotation must be true or false (1 / 0) when position is [object, memoryPoint] (true = follow the bone's rotation)");
+                kh_rv_report(khar_cmd, "rotation must be true or false (1 / 0) when position is [object, memoryPoint] (true = follow the bone's rotation)");
                 return game_value("");
             }
             if (!RenderIntegration::kh_attach_bone_make(khr_bparent, khr_bmem, khr_bown.proxy, err)) {
-                if (!RenderIntegration::kh_err_silent(err)) kh_rv_report("addRender3D", err);   // KH_NULL_SILENT.
+                if (!RenderIntegration::kh_err_silent(err)) kh_rv_report(khar_cmd, err);   // KH_NULL_SILENT.
                 return game_value("");
             }
             // Frame one is seeded from the PARENT, not the proxy: attachTo has not been simulated yet, so the proxy
@@ -6112,7 +6131,7 @@ static game_value add_render3d_sqf(game_value_parameter args) {
                 }
             }
         } else if (khr_bbad) {
-            kh_rv_report("addRender3D", err);
+            kh_rv_report(khar_cmd, err);
             return game_value("");
         } else if (RenderIntegration::kh_attach_is_obj(arr[0])) {
             if (!RenderIntegration::kh_attach_read(arr[0], khr_ap, khr_ar)) {
@@ -6121,7 +6140,7 @@ static game_value add_render3d_sqf(game_value_parameter args) {
             obj.pos[0] = khr_ap[0]; obj.pos[1] = khr_ap[1]; obj.pos[2] = khr_ap[2];
             khr_apos = arr[0];
         } else if (!kh_rv_pos(arr[0], obj.pos, err)) {
-            kh_rv_report("addRender3D", "position must be [x, y, zASL] or an object to follow");
+            kh_rv_report(khar_cmd, "position must be [x, y, zASL] or an object to follow");
             return game_value("");
         }
 
@@ -6153,7 +6172,7 @@ static game_value add_render3d_sqf(game_value_parameter args) {
             float khr_p = 0.0f, khr_y = 0.0f, khr_r = 0.0f, khr_m[9];
             bool khr_vec = false, khr_id = true;
             if (!kh_rotation_m_from_gv(arr[1], khr_m, khr_p, khr_y, khr_r, khr_vec, khr_id)) {
-                kh_rv_report("addRender3D", "rotation must be nil, a number (yaw), [pitch, yaw, roll] degrees, [vectorDir, vectorUp] (non-zero, not parallel), an object to follow, or true/false when the position follows an object (true = turn with it)");
+                kh_rv_report(khar_cmd, "rotation must be nil, a number (yaw), [pitch, yaw, roll] degrees, [vectorDir, vectorUp] (non-zero, not parallel), an object to follow, or true/false when the position follows an object (true = turn with it)");
                 return game_value("");
             }
             if (khr_vec) RenderIntegration::kh_set_rotation_rows(obj, khr_m);
@@ -6162,7 +6181,7 @@ static game_value add_render3d_sqf(game_value_parameter args) {
 
         if (!arr[2].is_nil()) {   // Nil = mesh 0 (box).
             int mid = 0;
-            if (!kh_rv_mesh(arr[2], mid, err)) { kh_rv_report("addRender3D", err); return game_value(""); }
+            if (!kh_rv_mesh(arr[2], mid, err)) { kh_rv_report(khar_cmd, err); return game_value(""); }
             obj.mesh = mid;
         }
 
@@ -6186,7 +6205,7 @@ static game_value add_render3d_sqf(game_value_parameter args) {
             }
             if (!RenderIntegration::kh_skel_make(khr_bparent, RenderIntegration::kh_skel_bone_names(obj.mesh),
                                                  khr_sown.proxies, khr_smem, err)) {
-                if (!RenderIntegration::kh_err_silent(err)) kh_rv_report("addRender3D", err);   // KH_NULL_SILENT.
+                if (!RenderIntegration::kh_err_silent(err)) kh_rv_report(khar_cmd, err);   // KH_NULL_SILENT.
                 return game_value("");
             }
             obj.skel = true;
@@ -6213,10 +6232,47 @@ static game_value add_render3d_sqf(game_value_parameter args) {
         }
         return game_value(khr_h);
     } catch (const std::exception& e) {
-        report_error(std::string("addRender3D: ") + e.what());
+        report_error(std::string(khar_cmd) + ": " + e.what());
         return game_value("");
     } catch (...) {
-        report_error("addRender3D: unknown exception");
+        report_error(std::string(khar_cmd) + ": unknown exception");
+        return game_value("");
+    }
+}
+
+static game_value add_render3d_sqf(game_value_parameter args) {
+    if (kh_gfx_off()) return game_value("");   // KH_PLAYER_ONLY.
+    return kh_add_render3d(args, "addRender3D");
+}
+
+// KH_MESH_GEN - generateMesh [[x, y, zASL], rotation, shading, faces]: addRender3D [[x, y, zASL], rotation,
+// [shading, faces]] (kh_rv_mesh's generated-mesh form; rendering/mesh_generate.hpp documents the spec). The position
+// and rotation slots take everything addRender3D's take (an object to follow, a memory point, a skeletal binding);
+// the handle is an ordinary addRender3D one: every updateRender3D property applies, "mesh" taking a new
+// [shading, faces] to rebuild the geometry. The object's position is the mesh's origin.
+static game_value generate_mesh_sqf(game_value_parameter args) {
+    if (kh_gfx_off()) return game_value("");   // KH_PLAYER_ONLY.
+    try {
+        auto& khgm_a = args.to_array();
+        if (khgm_a.size() != 4) {
+            kh_rv_report("generateMesh", "expects exactly [[x, y, zASL], rotation, shading, faces] (" +
+                         std::to_string(khgm_a.size()) + " elements given); every other property is set with "
+                         "updateRender3D");
+            return game_value("");
+        }
+        auto_array<game_value> khgm_spec;
+        khgm_spec.push_back(khgm_a[2]);
+        khgm_spec.push_back(khgm_a[3]);
+        auto_array<game_value> khgm_args;
+        khgm_args.push_back(khgm_a[0]);
+        khgm_args.push_back(khgm_a[1]);
+        khgm_args.push_back(game_value(std::move(khgm_spec)));
+        return kh_add_render3d(game_value(std::move(khgm_args)), "generateMesh");
+    } catch (const std::exception& e) {
+        report_error(std::string("generateMesh: ") + e.what());
+        return game_value("");
+    } catch (...) {
+        report_error("generateMesh: unknown exception");
         return game_value("");
     }
 }
@@ -9584,6 +9640,14 @@ static void initialize_sqf_integration() {
         "addRender3D",
         "Creates a persistent 3D mesh and returns its handle.",
         userFunctionWrapper<add_render3d_sqf>,
+        game_data_type::STRING,
+        game_data_type::ARRAY
+    );
+
+    _sqf_generate_mesh_array = intercept::client::host::register_sqf_command(
+        "generateMesh",
+        "Creates a persistent 3D mesh from the script's own faces and returns its handle.",
+        userFunctionWrapper<generate_mesh_sqf>,
         game_data_type::STRING,
         game_data_type::ARRAY
     );

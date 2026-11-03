@@ -3,10 +3,15 @@
 // The feature half (rendering_integration_features.hpp): the asset GC: meshes, materials and textures released when
 // idle. Never include it on its own.
 namespace RenderIntegration {
-// Session VRAM is not monotonic: a registry mesh unreferenced for KH_MESH_GC_IDLE_MS is released (def + VB + IB) by
-// kh_mesh_gc in flush_locked; textures follow through kh_tex_cache_gc. Ids are never reused: a freed slot is a
-// tombstone mesh_id_clamp folds to 0; a by-path lookup re-imports from the disk cache.
+// Session VRAM is not monotonic: a registry mesh unreferenced for KH_MESH_GC_IDLE_MS (a generated one:
+// KH_MESH_GEN_GC_IDLE_MS) is released (def + VB + IB) by kh_mesh_gc in flush_locked; textures follow through
+// kh_tex_cache_gc. Ids are never reused: a freed slot is a tombstone mesh_id_clamp folds to 0; a by-path lookup
+// re-imports from the disk cache, a generated mesh's spec builds it again.
 static constexpr uint64_t KH_MESH_GC_IDLE_MS = 120000;
+// KH_MESH_GEN_GC: a generated mesh's window - a rebuild's predecessors go within seconds, not two minutes (it is built
+// again from its spec, not read from disk). Far above the census's staleness (a mesh a live object carries is stamped
+// every frame, or by kh_mesh_gc's own note when the census is over 1 s old - KH_GC_NOTE_SKIP).
+static constexpr uint64_t KH_MESH_GEN_GC_IDLE_MS = 5000;
 static constexpr uint64_t KH_TEX_GC_IDLE_MS  = 180000;
 static constexpr uint64_t KH_MESH_GRAVE_FLUSHES = 2;   // The release wall, in flushes.
 inline bool kh_mesh_write_busy(int khwb_id) {
@@ -18,14 +23,21 @@ inline bool kh_mesh_write_busy(int khwb_id) {
 
 // From the flush's housekeeping (kh_mesh_gc: the render thread, or the game thread under the park) and the session
 // teardown (kh_mesh_release_session, under the park). The GPU objects + def go to the graveyard for the release wall.
-inline void kh_mesh_release(int khmr_id) {
-    MeshDef* khmr_d = kh_mesh_tombstone(khmr_id);
+// kh_mesh_release_def: the rest of a release whose kh_mesh_tombstone already ran (khmr_d its result; null = nothing).
+inline void kh_mesh_release_def(int khmr_id, MeshDef* khmr_d) {
     if (!khmr_d) return;
     {
         std::lock_guard<std::mutex> khmr_l(g_fbx_cache_mutex);
         for (auto khmr_it = g_fbx_cache.begin(); khmr_it != g_fbx_cache.end();) {
             if (khmr_it->second == khmr_id) khmr_it = g_fbx_cache.erase(khmr_it);
             else ++khmr_it;
+        }
+        // KH_MESH_GEN_SHARE: a generated mesh's entry, found by the spec hash its name carries (kh_gen_build); the
+        // id test leaves an entry that names another mesh alone.
+        if (kh_mesh_is_generated(*khmr_d)) {
+            const uint64_t khmr_h = strtoull(khmr_d->name.c_str() + 10, nullptr, 16);
+            const auto khmr_g = g_mesh_gen_cache.find(khmr_h);
+            if (khmr_g != g_mesh_gen_cache.end() && khmr_g->second == khmr_id) g_mesh_gen_cache.erase(khmr_g);
         }
     }
     {
@@ -44,6 +56,7 @@ inline void kh_mesh_release(int khmr_id) {
     g_res.mesh_grave.push_back(khmr_g);
     kh_stat(g_stats.meshes_released);
 }
+inline void kh_mesh_release(int khmr_id) { kh_mesh_release_def(khmr_id, kh_mesh_tombstone(khmr_id)); }
 
 // Once per flush: drain graves older than the wall.
 inline void kh_mesh_grave_sweep() {
@@ -60,16 +73,18 @@ inline void kh_mesh_grave_sweep() {
 
 // Once per flush. "Idle" means no object carried the id for the whole window. KH_MESH_REF_LOCK - the census may be a
 // frame old, so the GC first notes the list itself (under g_draw_list_mutex; skipped while the census stamped under 1 s
-// ago, KH_GC_NOTE_SKIP), then reads the table under its own lock, then releases holding neither (kh_mesh_write_busy
-// takes g_khmw_mu, kh_mesh_release g_fbx_cache_mutex, g_physics_bvh_mu and the mesh store's append_mx). An object
-// inserted between the note and the release, on a mesh idle for two minutes, draws the release's fallback. KH_GC_CLOCK:
+// ago, KH_GC_NOTE_SKIP), then reads the table under its own lock, then releases (kh_mesh_write_busy takes g_khmw_mu;
+// KH_GC_RECHECK takes g_mesh_ref_mu again around the stamp's second read and the tombstone - append_mx; the rest of the
+// release, holding neither, g_fbx_cache_mutex and g_physics_bvh_mu). A user taking the mesh meanwhile stamps it first
+// and then reads it alive (kh_mesh_take_ref): its stamp lands before that section, which then keeps the mesh, or after
+// it, and the user sees the tombstone and resolves again (once). KH_GC_CLOCK:
 // the idle test's clock is read under g_mesh_ref_mu, which every g_mesh_last_ref write holds, so no stamp is later than
 // it. Do not read it before the lock: a census or import stamp (flush_frame / the importer, game thread) taken on the
 // next tick makes now - stamp wrap to a huge age and releases a mesh a live object carries.
 inline void kh_mesh_gc() {
     KH_PROF_SCOPE(KHP_MESH_GC);   // KH_PROF.
     // KH_GC_NOTE_SKIP: the census stamps the same references every frame; its notes under 1 s old stand for this walk
-    // (the idle window is 120 s).
+    // (the idle windows are 120 s, and 5 s for a generated mesh - KH_MESH_GEN_GC).
     if (GetTickCount64() - g_ref_note_cen_ms.load(std::memory_order_acquire) > 1000ull) {
         std::lock_guard<std::mutex> khgc_l(g_draw_list_mutex);
         kh_ref_note_begin(g_ref_note_gc);   // KH_REF_NOTE_ONCE.
@@ -88,13 +103,27 @@ inline void kh_mesh_gc() {
         for (uint32_t khgc_id = khgc_b; khgc_id < khgc_n; ++khgc_id) {
             if (!kh_mesh_alive(static_cast<int>(khgc_id))) continue;
             const uint64_t khgc_ref = khgc_id < g_mesh_last_ref.size() ? g_mesh_last_ref[khgc_id] : 0;
-            if (khgc_now - khgc_ref < KH_MESH_GC_IDLE_MS) continue;
+            const uint64_t khgc_age = khgc_now - khgc_ref;
+            if (khgc_age < KH_MESH_GEN_GC_IDLE_MS) continue;
+            if (khgc_age < KH_MESH_GC_IDLE_MS && !kh_mesh_is_generated(mesh_def(static_cast<int>(khgc_id)))) continue;
             khgc_idle.push_back(static_cast<int>(khgc_id));
         }
     }
     for (int khgc_id : khgc_idle) {
         if (kh_mesh_write_busy(khgc_id)) continue;
-        kh_mesh_release(khgc_id);
+        MeshDef* khgc_d = nullptr;
+        {   // KH_GC_RECHECK: the stamp again, just before the release - a user that took the mesh since the walk
+            // above (a share hit, a by-name, by-index or by-path assignment: kh_mesh_take_ref) keeps it - and the
+            // tombstone in the same section, so no stamp lands between the two.
+            std::lock_guard<std::mutex> khgc_r(g_mesh_ref_mu);
+            const size_t khgc_i = static_cast<size_t>(khgc_id);
+            const uint64_t khgc_ref = khgc_i < g_mesh_last_ref.size() ? g_mesh_last_ref[khgc_i] : 0;
+            const uint64_t khgc_win = kh_mesh_is_generated(mesh_def(khgc_id)) ? KH_MESH_GEN_GC_IDLE_MS
+                                                                              : KH_MESH_GC_IDLE_MS;
+            if (GetTickCount64() - khgc_ref < khgc_win) continue;
+            khgc_d = kh_mesh_tombstone(khgc_id);
+        }
+        kh_mesh_release_def(khgc_id, khgc_d);
     }
 }
 

@@ -142,7 +142,8 @@ struct RenderObject {
     // KH_SCENE: this object's slot in the live scene, assigned by add_render_object and carried through every copy the
     // script side makes.
     uint32_t slot = 0xFFFFFFFFu;
-    int   mesh = 0;   // Mesh registry id 0 = "box"; published ids only - see mesh_id_clamp.
+    int   mesh = 0;   // Mesh registry id 0 = "box"; published, or appended with its publish pending (kh_scene_sync
+                      // holds such an object out of the live scene, KH_SCENE_UNPUB) - see mesh_id_clamp.
     float color[4] = { 1, 1, 1, 1 };
     bool  lit = false;
     float light_ambient = 0.40f;   // Scale of the engine's ambient light on this mesh (lit [ambient, diffuse]).

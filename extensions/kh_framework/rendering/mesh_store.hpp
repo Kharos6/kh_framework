@@ -160,9 +160,10 @@ inline int kh_mesh_append(MeshDef&& def) {
 }
 
 // CPU half of a release: the slot becomes a null tombstone (id never reused); the def is handed back and parked with
-// the GPU objects in Resources::mesh_grave for kh_mesh_grave_sweep. From kh_mesh_release only: the flush's
-// housekeeping (kh_mesh_gc - the render thread, or the game thread under the park) and the session teardown
-// (kh_mesh_release_session, under the park), never beside a draw; the caller verified the id alive and unreferenced.
+// the GPU objects in Resources::mesh_grave for kh_mesh_grave_sweep. From the releases only: the flush's housekeeping
+// (kh_mesh_gc - the render thread, or the game thread under the park; it tombstones under g_mesh_ref_mu,
+// KH_GC_RECHECK, then kh_mesh_release_def) and the session teardown (kh_mesh_release_session, under the park, through
+// kh_mesh_release), never beside a draw; the caller verified the id alive and unreferenced.
 inline MeshDef* kh_mesh_tombstone(int id) {
     MeshStore& s = mesh_store();
     std::lock_guard<std::mutex> g(s.append_mx);
@@ -175,8 +176,9 @@ inline MeshDef* kh_mesh_tombstone(int id) {
 }
 
 // Only where no draw can index the new id before ensure_mesh_vbs lands: kh_fbx_register under a park and
-// flush_locked's housekeeping, each followed by ensure_mesh_vbs on its thread; and kh_mesh_release_session, under the
-// park, which then releases every non-builtin mesh, the one it published included.
+// kh_mesh_publish_land (flush_locked's housekeeping, and the injection ahead of its scene sync - KH_MESH_GEN_PUB), each
+// followed by ensure_mesh_vbs on its thread; and kh_mesh_release_session, under the park, which then releases every
+// non-builtin mesh, the one it published included.
 inline uint32_t kh_mesh_publish() {
     MeshStore& s = mesh_store();
     std::lock_guard<std::mutex> g(s.append_mx);
@@ -224,9 +226,9 @@ inline int mesh_id_clamp(int id) {
     return kh_mesh_alive(id) ? id : 0;
 }
 
-// Lookup that also covers ids appended but not yet published: the game thread's, and the flush's cache-later landing
-// (a null test alone). The one reader that takes append_mx - never on a draw path. Null outside the appended range;
-// callers fall back to mesh 0.
+// Lookup that also covers ids appended but not yet published: the game thread's, and the cache-later landing in
+// kh_mesh_publish_land (a null test alone, and only while imports wait there). The one reader that takes append_mx -
+// never per draw. Null outside the appended range; callers fall back to mesh 0.
 inline const MeshDef* kh_mesh_def_staged(int id) {
     if (id < 0) return nullptr;
     MeshStore& s = mesh_store();
@@ -236,9 +238,9 @@ inline const MeshDef* kh_mesh_def_staged(int id) {
     return s.root[khms_id >> KH_MESH_BLOCK_SHIFT][khms_id & (KH_MESH_BLOCK - 1u)];
 }
 
-// Called from both mesh paths' ensure_resources, flush_locked's mesh publish, kh_white_draw and kh_fbx_register. No
-// lock: every caller holds the park (render thread stalled) or is the render thread inside an engine call; they never
-// overlap.
+// Called from both mesh paths' ensure_resources, kh_mesh_publish_land (the flush's and the injection's publish),
+// kh_white_draw and kh_fbx_register. No lock: every caller holds the park (render thread stalled) or is the render
+// thread inside an engine call; they never overlap.
 inline std::string ensure_mesh_vbs(ID3D11Device* dev) {
     const uint32_t khmv_n = mesh_count();
     if (g_res.mesh_ib.size() > g_res.mesh_vb.size()) g_res.mesh_ib.resize(g_res.mesh_vb.size());

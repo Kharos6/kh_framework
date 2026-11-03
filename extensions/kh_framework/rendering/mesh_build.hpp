@@ -358,25 +358,58 @@ inline void kh_mco_range(uint32_t* khmo_ix, uint32_t khmo_c, uint32_t khmo_vn) {
     std::vector<uint8_t> khmo_done(khmo_tn, 0u);
     for (uint32_t t = 0; t < khmo_tn; ++t)
         khmo_tsc[t] = khmo_vsc[khmo_ix[t * 3u]] + khmo_vsc[khmo_ix[t * 3u + 1u]] + khmo_vsc[khmo_ix[t * 3u + 2u]];
+    // KH_MCO_TREE - the fallback's pick without a scan of every triangle left: a max tree over the triangles' scores,
+    // a done one at -inf, a tie to the lower index. The fallback runs only when no triangle left touches the cache, so
+    // each vertex of one left is out of it and its khmo_vsc is the out-of-cache score it took on leaving (or at the
+    // start), unchanged since: only an emit moves a valence, and an emit puts the vertex in the cache. An emit marks
+    // its vertices stale; the fallback first re-scores the stale vertices' triangles from khmo_vsc with the scan's own
+    // sum, so every leaf holds what the scan would compute and the pick is the scan's - the first of the best. One
+    // scan per exhausted region was quadratic in a mesh of many regions (a flat-shaded one: every face is one); a pick
+    // is now O(log n), and the stale triangles' refresh O(log n) each.
+    uint32_t khmo_tp = 1u;
+    while (khmo_tp < khmo_tn) khmo_tp <<= 1;
+    const float khmo_inf = std::numeric_limits<float>::infinity();
+    std::vector<float> khmo_tv(2u * static_cast<size_t>(khmo_tp), -khmo_inf);
+    std::vector<uint32_t> khmo_ti(2u * static_cast<size_t>(khmo_tp), 0u);
+    auto khmo_tfix = [&](uint32_t khmo_nd) {   // The nodes above a leaf, again.
+        for (khmo_nd >>= 1; khmo_nd >= 1u; khmo_nd >>= 1) {
+            const uint32_t khmo_l = 2u * khmo_nd;
+            const bool khmo_lw = khmo_tv[khmo_l] >= khmo_tv[khmo_l + 1u];
+            khmo_tv[khmo_nd] = khmo_lw ? khmo_tv[khmo_l] : khmo_tv[khmo_l + 1u];
+            khmo_ti[khmo_nd] = khmo_lw ? khmo_ti[khmo_l] : khmo_ti[khmo_l + 1u];
+        }
+    };
+    for (uint32_t t = 0; t < khmo_tn; ++t) { khmo_tv[khmo_tp + t] = khmo_tsc[t]; khmo_ti[khmo_tp + t] = t; }
+    for (uint32_t khmo_nd = khmo_tp - 1u; khmo_nd >= 1u; --khmo_nd) {
+        const uint32_t khmo_l = 2u * khmo_nd;
+        const bool khmo_lw = khmo_tv[khmo_l] >= khmo_tv[khmo_l + 1u];
+        khmo_tv[khmo_nd] = khmo_lw ? khmo_tv[khmo_l] : khmo_tv[khmo_l + 1u];
+        khmo_ti[khmo_nd] = khmo_lw ? khmo_ti[khmo_l] : khmo_ti[khmo_l + 1u];
+    }
+    std::vector<uint8_t>  khmo_stale(khmo_vn, 0u);
+    std::vector<uint32_t> khmo_stl;   // The stale vertices, each once.
     std::vector<uint32_t> khmo_out;
     khmo_out.reserve(khmo_c);
     std::vector<uint32_t> khmo_cache;   // Most recent first.
     khmo_cache.reserve(KH_MCO_CACHE + 3u);
-    uint32_t khmo_scan = 0;   // Fallback cursor over the triangle list.
     int64_t  khmo_best = -1;
     float    khmo_best_s = -1.0e30f;
     for (uint32_t t = 0; t < khmo_tn; ++t) if (khmo_tsc[t] > khmo_best_s) { khmo_best_s = khmo_tsc[t]; khmo_best = t; }
     for (uint32_t khmo_emit = 0; khmo_emit < khmo_tn; ++khmo_emit) {
-        if (khmo_best < 0) {   // Nothing in the cache neighbourhood: the best-scoring triangle left
-                               // (a full scan, rare: once per exhausted region).
-            while (khmo_scan < khmo_tn && khmo_done[khmo_scan]) ++khmo_scan;
-            if (khmo_scan >= khmo_tn) break;
-            khmo_best_s = -1.0e30f;
-            for (uint32_t u = khmo_scan; u < khmo_tn; ++u) {
-                if (khmo_done[u]) continue;
-                const float s = khmo_vsc[khmo_ix[u * 3u]] + khmo_vsc[khmo_ix[u * 3u + 1u]] + khmo_vsc[khmo_ix[u * 3u + 2u]];
-                if (s > khmo_best_s) { khmo_best_s = s; khmo_best = u; }
+        if (khmo_best < 0) {   // Nothing in the cache neighbourhood: the best-scoring triangle left (KH_MCO_TREE).
+            for (uint32_t khmo_v : khmo_stl) {
+                khmo_stale[khmo_v] = 0u;
+                for (uint32_t khmo_a = khmo_off[khmo_v]; khmo_a < khmo_off[khmo_v + 1u]; ++khmo_a) {
+                    const uint32_t u = khmo_adj[khmo_a];
+                    khmo_tv[khmo_tp + u] = khmo_done[u] ? -khmo_inf
+                                         : khmo_vsc[khmo_ix[u * 3u]] + khmo_vsc[khmo_ix[u * 3u + 1u]] +
+                                           khmo_vsc[khmo_ix[u * 3u + 2u]];
+                    khmo_tfix(khmo_tp + u);
+                }
             }
+            khmo_stl.clear();
+            if (!(khmo_tv[1] > -khmo_inf)) break;   // None left.
+            khmo_best = khmo_ti[1];
         }
         const uint32_t t = static_cast<uint32_t>(khmo_best);
         khmo_done[t] = 1u;
@@ -384,6 +417,7 @@ inline void kh_mco_range(uint32_t* khmo_ix, uint32_t khmo_c, uint32_t khmo_vn) {
             const uint32_t v = khmo_ix[t * 3u + k];
             khmo_out.push_back(v);
             --khmo_deg[v];
+            if (!khmo_stale[v]) { khmo_stale[v] = 1u; khmo_stl.push_back(v); }   // KH_MCO_TREE.
             // Move v to the cache front (an LRU list of positions, the model of the paper).
             size_t khmo_at = khmo_cache.size();
             for (size_t c = 0; c < khmo_cache.size(); ++c) if (khmo_cache[c] == v) { khmo_at = c; break; }

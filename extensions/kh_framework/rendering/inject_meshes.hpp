@@ -84,6 +84,12 @@ inline void inject_composited_meshes(ID3D11DeviceContext* ctx) {
         }
         kh_uvs_step(ctx);   // KH_USER_VS: a no-op for what the cast fire's step evaluated, but for a source this step just re-posed.
         if (g_sun_restep_cycle == g_topo_cycles) g_sun_map_rendered_frame = false;   // KH_SUN_RESTEP: rebuild from this step's poses.
+        // KH_MESH_GEN_PUB: a pending publish (a generated mesh, an import that could not park) lands here, before the
+        // sync that would hold the objects naming it (KH_SCENE_UNPUB) - so a new or rebuilt mesh draws this cycle,
+        // with the pose this step just placed. The render thread, between our draws: the flush's own window (its
+        // housekeeping lands the same way), and ensure_resources below tops up the same buffers here on every
+        // injection that draws.
+        kh_mesh_publish_land(RVExtBridge::get_d3d_device());
         kh_scene_sync();
         kh_objbuf_sync(ctx);   // KH_OBJBUF: the records this pass's buckets index.
     }

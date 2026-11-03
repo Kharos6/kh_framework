@@ -17,18 +17,16 @@ inline void flush_locked(ID3D11Device* dev, ID3D11DeviceContext* ctx, bool khfl_
     // released buffer or a half-written Map; with the flush on the render thread that reader is this thread, so the
     // block belongs to the frame's only flush.
     if (!khfl_chain_only) {   // KH_FX_LATE: the scene flush did the housekeeping.
-    // Land a publish kh_fbx_register could not park for. This body runs either under a park held end to end or on the
-    // render thread itself (which no park can then stall mid-body), so the publish and the VB top-up share one
-    // serialized window. Ahead of every skip below on purpose: a frame the flush declines still lands it.
-    if (g_mesh_publish_pending.exchange(false, std::memory_order_relaxed)) {
-        kh_mesh_publish();
-        kh_mesh_cache_later_land();   // KH_MESH_CACHE_LATER: the imports that waited for this publish.
-        const std::string khmp_err = ensure_mesh_vbs(dev);
-        kh_ensure_ok("mesh publish", khmp_err);   // KH_ENSURE_ONCE: the flush's ensure sees the same error.
-    }
-    // KH_LOD_BOUNDS: an object synced while its mesh was unpublished was gridded at mesh 0's bounds (the id clamps);
-    // its cell radius is taken again once its own every-level bounds read - whichever publish landed the id: the one
-    // above, or a kh_fbx_register since, which publishes every id appended before its own.
+    // Land a publish kh_fbx_register could not park for, or a generated mesh's (KH_MESH_GEN_PUB: never parked; the
+    // objects naming either wait out of the live scene until then, KH_SCENE_UNPUB). This body runs either under a park
+    // held end to end or on the render thread itself (which no park can then stall mid-body), so the publish and the VB
+    // top-up share one serialized window. Ahead of every skip below on purpose: a frame the flush declines still lands
+    // it.
+    kh_mesh_publish_land(dev);
+    // KH_LOD_BOUNDS (a backstop: KH_SCENE_UNPUB syncs no such object): an object synced while its mesh was
+    // unpublished was gridded at mesh 0's bounds (the id clamps); its cell radius is taken again once its own
+    // every-level bounds read - whichever publish landed the id: the one above, the injection's (kh_mesh_publish_land),
+    // or a kh_fbx_register since, which publishes every id appended before its own.
     if (g_scene_unpub_min < mesh_count()) {
         const uint32_t khmp_from = g_scene_unpub_min, khmp_to = mesh_count();
         uint32_t khmp_left = 0xFFFFFFFFu;   // The lowest id still unpublished.

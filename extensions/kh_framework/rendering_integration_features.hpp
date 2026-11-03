@@ -39,6 +39,7 @@
 #include "rendering/texture_cache.hpp"
 #include "rendering/texture_loader.hpp"
 #include "rendering/fbx_import.hpp"
+#include "rendering/mesh_generate.hpp"
 #include "rendering/mesh_cache.hpp"
 #include "rendering/asset_gc.hpp"
 #include "rendering/material_binding.hpp"

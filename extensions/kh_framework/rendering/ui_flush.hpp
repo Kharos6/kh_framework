@@ -684,6 +684,7 @@ inline bool flush_ui_frame() {
             kh_stat(g_stats.lock_retries);
             continue;
         }
+        ++g_ui_parks;   // KH_PARK_COUNT.
         // KhFlushActiveScope keeps our draws out of the hooks (released on unwind). KH_PARK_INJ: and the render-thread
         // branch on the thread the hooks take for the render thread - both as in kh_park_run.
         {

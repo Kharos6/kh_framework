@@ -104,6 +104,14 @@ static RenderStats g_stats;
 // disarms it again. Every counter write is gated on kh_stats_on (kh_stat / kh_stat_add, or a test at the site), so a
 // disarmed session pays one relaxed load per site and accumulates nothing. g_stats_armed / kh_stats_on: defined with
 // KH_PROF (rendering/profiling.hpp).
+// KH_PARK_COUNT - the game-thread parks the fallbacks took (graphics-lock acquisitions; each stalls the render
+// thread): kh_park_run's (the Draw3D fallback: bootstrap, the render-thread flush's watchdog, the deferred mission
+// destroy, FSAA 1x) and the UI lane's lock path (flush_ui_frame, while the Present hook is not serving). Counted
+// whether or not the stats are armed (as hookExceptions), so 0 means none since the last resetRenderStats or mission
+// start; zeroed by reset_stat_counters. Not counted: the mission edge's own park, the device reset's and the stats
+// commands' own locks. Game thread only.
+static uint64_t g_parks = 0;
+static uint64_t g_ui_parks = 0;
 inline void kh_stat(uint64_t& khst_c) { if (kh_stats_on()) ++khst_c; }
 inline void kh_stat_add(uint64_t& khst_c, uint64_t khst_n) { if (kh_stats_on()) khst_c += khst_n; }
 }

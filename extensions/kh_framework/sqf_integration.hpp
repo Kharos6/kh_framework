@@ -8150,6 +8150,12 @@ static game_value get_render_stats_sqf() {
         }
         out.push_back(kv("lockRetries", static_cast<float>(s.lock_retries)));
         out.push_back(kv("lockFailedFrames", static_cast<float>(s.lock_failed_frames)));
+        // KH_PARK_COUNT: the fallbacks' game-thread parks - Draw3D's (kh_park_run) and the UI lane's lock path -
+        // counted whether or not the stats are armed. Expected: a few whenever work appears (a mission's start, the
+        // first object after the draw list was empty) until the render-thread flush runs, then none; FSAA 1x parks
+        // every frame.
+        out.push_back(kv("parks", static_cast<float>(RenderIntegration::g_parks)));
+        out.push_back(kv("uiParks", static_cast<float>(RenderIntegration::g_ui_parks)));
         out.push_back(kv("hookActive", RenderIntegration::g_reorder_hook_active.load(std::memory_order_relaxed) ? 1.0f : 0.0f));
         out.push_back(kv("hookFailed", RenderIntegration::g_reorder_hook_failed ? 1.0f : 0.0f));
         // Exceptions caught inside the context hooks this session (each dropped that hook's work for the

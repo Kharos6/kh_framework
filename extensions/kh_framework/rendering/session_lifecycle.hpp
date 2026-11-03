@@ -12,6 +12,8 @@ namespace RenderIntegration {
 inline void reset_stat_counters() {
     g_stats_armed.store(false, std::memory_order_relaxed);
     g_stats = RenderStats{};
+    g_parks = 0;   // KH_PARK_COUNT.
+    g_ui_parks = 0;
     g_attach_repaired.store(0, std::memory_order_relaxed);   // KH_ATTACH_DIAG.
     g_rp_c = KhRpCounters();   // KH_VOL_REPLAY.
     kh_wsee_gput_zero_pub();   // KH_WSEE_GPUT: "wseeGpu" (frames in flight stay the clear's to read or drop).

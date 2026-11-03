@@ -129,8 +129,10 @@ inline void kh_park_run(ID3D11Device* khpr_dev, ID3D11DeviceContext* khpr_ctx) {
                 khpr_mcl = !g_mesh_cache_later_q.empty();
             }
             if (khpr_mcl) kh_mesh_cache_writer_start();
+            ++g_parks;   // KH_PARK_COUNT: after the teardown, whose stats reset would zero it - this session's park.
             return;
         }
+        ++g_parks;   // KH_PARK_COUNT.
         // KH_PARK_STEP: a park's flush draws late and needs this cycle's poses; the render-thread step inside
         // flush_locked is khfl_rt only. Taken with the render thread stalled: a lane the render thread already stepped
         // this cycle is skipped (the cycle gate); others take the cycle's sample (kh_gts_for_cycle), or hold.
